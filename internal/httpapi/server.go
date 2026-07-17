@@ -1,0 +1,707 @@
+package httpapi
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"eino-ops-agent/internal/agent"
+	"eino-ops-agent/internal/domain"
+	"eino-ops-agent/internal/ids"
+	"eino-ops-agent/internal/observability"
+	"eino-ops-agent/internal/service"
+	"eino-ops-agent/internal/store"
+)
+
+type Server struct {
+	service *service.Service
+	agent   *agent.Runtime
+	mux     *http.ServeMux
+}
+
+func New(svc *service.Service, runtime *agent.Runtime) *Server {
+	s := &Server{service: svc, agent: runtime, mux: http.NewServeMux()}
+	s.routes()
+	return s
+}
+
+func (s *Server) Handler() http.Handler {
+	return requestLogMiddleware(recoverMiddleware(corsMiddleware(s.mux)))
+}
+
+func (s *Server) routes() {
+	s.mux.HandleFunc("GET /api/v1/health", s.health)
+	s.mux.HandleFunc("GET /api/v1/model-providers", s.listModelProviders)
+	s.mux.HandleFunc("POST /api/v1/model-providers", s.saveModelProvider)
+	s.mux.HandleFunc("POST /api/v1/model-providers/discover", s.discoverModels)
+	s.mux.HandleFunc("POST /api/v1/model-providers/test", s.testModelConfiguration)
+	s.mux.HandleFunc("DELETE /api/v1/model-providers/{id}", s.deleteModelProvider)
+	s.mux.HandleFunc("POST /api/v1/model-providers/{id}/activate", s.activateModelProvider)
+	s.mux.HandleFunc("POST /api/v1/model-providers/{id}/test", s.testModelProvider)
+	s.mux.HandleFunc("GET /api/v1/settings", s.systemSettings)
+	s.mux.HandleFunc("PUT /api/v1/settings", s.saveSystemSettings)
+	s.mux.HandleFunc("GET /api/v1/hosts", s.listHosts)
+	s.mux.HandleFunc("POST /api/v1/hosts", s.saveHost)
+	s.mux.HandleFunc("GET /api/v1/hosts/{id}", s.getHost)
+	s.mux.HandleFunc("DELETE /api/v1/hosts/{id}", s.deleteHost)
+	s.mux.HandleFunc("POST /api/v1/hosts/{id}/scan-key", s.scanHostKey)
+	s.mux.HandleFunc("POST /api/v1/hosts/{id}/trust-key", s.trustHostKey)
+	s.mux.HandleFunc("POST /api/v1/hosts/{id}/probe", s.probeHost)
+	s.mux.HandleFunc("POST /api/v1/policy/evaluate", s.evaluate)
+	s.mux.HandleFunc("POST /api/v1/exec", s.exec)
+	s.mux.HandleFunc("POST /api/v1/tasks", s.startTask)
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
+	s.mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", s.cancelTask)
+	s.mux.HandleFunc("GET /api/v1/approvals", s.listApprovals)
+	s.mux.HandleFunc("POST /api/v1/approvals/{id}/approve", s.approve)
+	s.mux.HandleFunc("POST /api/v1/approvals/{id}/reject", s.reject)
+	s.mux.HandleFunc("GET /api/v1/runs", s.searchRuns)
+	s.mux.HandleFunc("GET /api/v1/runs/{id}", s.getRun)
+	s.mux.HandleFunc("GET /api/v1/audit", s.listAudit)
+	s.mux.HandleFunc("GET /api/v1/logs", s.logs)
+	s.mux.HandleFunc("GET /api/v1/artifacts", s.listArtifacts)
+	s.mux.HandleFunc("POST /api/v1/artifacts", s.saveArtifact)
+	s.mux.HandleFunc("POST /api/v1/transfers/upload", s.uploadArtifact)
+	s.mux.HandleFunc("POST /api/v1/transfers/download", s.downloadArtifact)
+	s.mux.HandleFunc("POST /api/v1/chat", s.chat)
+	s.mux.HandleFunc("GET /api/v1/chat/sessions", s.chatSessions)
+	s.mux.HandleFunc("DELETE /api/v1/chat/{id}", s.deleteChatSession)
+	s.mux.HandleFunc("GET /api/v1/chat/{id}/messages", s.chatMessages)
+	s.mux.HandleFunc("GET /api/v1/chat/{id}/state", s.chatState)
+	s.mux.Handle("/", spaHandler("web/dist"))
+}
+
+func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	result := observability.Recent(observability.LogFilter{
+		Level: r.URL.Query().Get("level"), Component: r.URL.Query().Get("component"),
+		Query: r.URL.Query().Get("q"), Limit: limit,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"entries": result, "components": observability.Components(), "minimum_level": observability.MinimumLevel(), "file": observability.File()})
+}
+
+func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
+	model := agent.Status{Source: "none"}
+	if s.agent != nil {
+		model = s.agent.Status()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok", "agent_available": model.Available, "model": model, "time": time.Now().UTC(),
+	})
+}
+
+func (s *Server) systemSettings(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.SystemSettings(r.Context())
+	respond(w, result, err)
+}
+
+func (s *Server) saveSystemSettings(w http.ResponseWriter, r *http.Request) {
+	var input domain.SystemSettingsInput
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.SaveSystemSettings(r.Context(), input, actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if s.agent != nil {
+		if err := s.agent.Reload(r.Context()); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) listModelProviders(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ListModelProviders(r.Context())
+	respond(w, result, err)
+}
+
+func (s *Server) saveModelProvider(w http.ResponseWriter, r *http.Request) {
+	var input domain.ModelProviderInput
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.SaveModelProvider(r.Context(), input, actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if result.Active && s.agent != nil {
+		if err := s.agent.Reload(r.Context()); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) discoverModels(w http.ResponseWriter, r *http.Request) {
+	var input domain.ModelDiscoveryInput
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.DiscoverModels(r.Context(), input, actor(r))
+	if err != nil {
+		if errors.Is(err, service.ErrModelProviderUpstream) {
+			writeErrorStatus(w, err, http.StatusBadGateway)
+			return
+		}
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) testModelConfiguration(w http.ResponseWriter, r *http.Request) {
+	if s.agent == nil {
+		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
+		return
+	}
+	var input domain.ModelTestInput
+	if !decode(w, r, &input) {
+		return
+	}
+	cfg, err := s.service.ModelTestConfig(r.Context(), input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := s.agent.TestProvider(r.Context(), cfg)
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) activateModelProvider(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ActivateModelProvider(r.Context(), r.PathValue("id"), actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if s.agent == nil {
+		writeError(w, agent.ErrUnavailable)
+		return
+	}
+	if err := s.agent.Reload(r.Context()); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) deleteModelProvider(w http.ResponseWriter, r *http.Request) {
+	wasActive, err := s.service.DeleteModelProvider(r.Context(), r.PathValue("id"), actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if wasActive && s.agent != nil {
+		if err := s.agent.Reload(r.Context()); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) testModelProvider(w http.ResponseWriter, r *http.Request) {
+	if s.agent == nil {
+		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
+		return
+	}
+	cfg, provider, err := s.service.ModelProviderConfig(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := s.agent.TestProvider(r.Context(), cfg)
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider_id": provider.ID, "name": provider.Name, "model": result.Model,
+		"response": result.Response, "latency_ms": result.LatencyMS,
+	})
+}
+
+func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
+	hosts, err := s.service.ListHosts(r.Context())
+	respond(w, hosts, err)
+}
+
+func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
+	var host domain.HostInput
+	if !decode(w, r, &host) {
+		return
+	}
+	result, err := s.service.SaveHost(r.Context(), host, actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) getHost(w http.ResponseWriter, r *http.Request) {
+	host, err := s.service.GetHost(r.Context(), r.PathValue("id"))
+	respond(w, host, err)
+}
+
+func (s *Server) deleteHost(w http.ResponseWriter, r *http.Request) {
+	err := s.service.DeleteHost(r.Context(), r.PathValue("id"), actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) scanHostKey(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ScanHostKey(r.Context(), r.PathValue("id"))
+	respond(w, result, err)
+}
+
+func (s *Server) trustHostKey(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Fingerprint string `json:"fingerprint"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.TrustHostKey(r.Context(), r.PathValue("id"), input.Fingerprint, actor(r))
+	respond(w, result, err)
+}
+
+func (s *Server) probeHost(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ProbeHost(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, err)
+		} else {
+			writeErrorStatus(w, err, http.StatusBadGateway)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) evaluate(w http.ResponseWriter, r *http.Request) {
+	var req domain.ExecRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	result, err := s.service.Evaluate(r.Context(), req)
+	respond(w, result, err)
+}
+
+func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
+	var req domain.ExecRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	result, err := s.service.Submit(r.Context(), req, actor(r))
+	respond(w, result, err)
+}
+
+func (s *Server) startTask(w http.ResponseWriter, r *http.Request) {
+	var req domain.ExecRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	result, err := s.service.StartTask(r.Context(), req, actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
+	task, result, taskErr, err := s.service.GetTask(r.PathValue("id"))
+	respond(w, map[string]any{"task": task, "result": result, "error": taskErr}, err)
+}
+
+func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
+	err := s.service.CancelTask(r.PathValue("id"), actor(r))
+	respond(w, map[string]any{"cancelled": err == nil}, err)
+}
+
+func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	result, err := s.service.ListApprovals(r.Context(), r.URL.Query().Get("status"), limit)
+	respond(w, result, err)
+}
+
+func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Challenge string `json:"challenge"`
+		Reason    string `json:"reason"`
+		Scope     string `json:"scope"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.ApproveWithScope(r.Context(), r.PathValue("id"), input.Challenge, input.Reason, input.Scope, actor(r))
+	respond(w, result, err)
+}
+
+func (s *Server) reject(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Reason string `json:"reason"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	err := s.service.Reject(r.Context(), r.PathValue("id"), input.Reason, actor(r))
+	respond(w, map[string]any{"rejected": err == nil}, err)
+}
+
+func (s *Server) searchRuns(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	result, err := s.service.SearchRuns(r.Context(), r.URL.Query().Get("q"), r.URL.Query().Get("host_id"), limit)
+	respond(w, result, err)
+}
+
+func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
+	includeRaw := r.URL.Query().Get("raw") == "1"
+	result, err := s.service.GetRun(r.Context(), r.PathValue("id"), includeRaw)
+	respond(w, result, err)
+}
+
+func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	result, err := s.service.ListAudit(r.Context(), r.URL.Query().Get("run_id"), limit)
+	respond(w, result, err)
+}
+
+func (s *Server) listArtifacts(w http.ResponseWriter, _ *http.Request) {
+	result, err := s.service.ListArtifacts()
+	respond(w, result, err)
+}
+
+func (s *Server) saveArtifact(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(100 << 20); err != nil {
+		writeErrorStatus(w, fmt.Errorf("invalid multipart artifact: %w", err), http.StatusBadRequest)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeErrorStatus(w, fmt.Errorf("file field is required: %w", err), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	name := r.FormValue("name")
+	if name == "" {
+		name = filepath.Base(header.Filename)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, (100<<20)+1))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := s.service.SaveArtifact(name, data)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
+	var input agent.TransferInput
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.UploadArtifact(r.Context(), input.HostID, input.ArtifactName, input.RemotePath, input.Reason, input.Rollback, actor(r))
+	respond(w, result, err)
+}
+
+func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
+	var input agent.TransferInput
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.DownloadArtifact(r.Context(), input.HostID, input.RemotePath, input.ArtifactName, input.Reason, actor(r))
+	respond(w, result, err)
+}
+
+func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
+	if s.agent == nil || !s.agent.Available() {
+		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
+		return
+	}
+	var input struct {
+		SessionID string `json:"session_id"`
+		Message   string `json:"message"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	if strings.TrimSpace(input.Message) == "" {
+		writeErrorStatus(w, fmt.Errorf("message is required"), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, fmt.Errorf("streaming is unavailable"))
+		return
+	}
+	var emitMu sync.Mutex
+	clientOpen := true
+	emit := func(event agent.Event) {
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		if !clientOpen {
+			return
+		}
+		data, _ := json.Marshal(event)
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data); err != nil {
+			clientOpen = false
+			observability.FromContext(r.Context()).DebugContext(r.Context(), "chat client disconnected; agent continues in background", "component", "agent", "session_id", event.SessionID, "error", err)
+			return
+		}
+		flusher.Flush()
+	}
+	queryCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
+	defer cancel()
+	_, err := s.agent.Query(queryCtx, input.SessionID, input.Message, emit)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		emit(agent.Event{Type: "error", Error: err.Error(), SessionID: input.SessionID})
+	}
+}
+
+func (s *Server) chatMessages(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	result, err := s.service.ListChatMessages(r.Context(), r.PathValue("id"), limit)
+	respond(w, result, err)
+}
+
+func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	messages, err := s.service.ListChatMessages(r.Context(), sessionID, 200)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var plan *domain.AgentPlan
+	currentPlan, planErr := s.service.GetAgentPlan(r.Context(), sessionID)
+	if planErr == nil {
+		plan = &currentPlan
+	} else if !errors.Is(planErr, store.ErrNotFound) {
+		writeError(w, planErr)
+		return
+	}
+	active := s.agent != nil && s.agent.IsSessionActive(sessionID)
+	writeJSON(w, http.StatusOK, map[string]any{"active": active, "messages": messages, "plan": plan})
+}
+
+func (s *Server) chatSessions(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	result, err := s.service.ListChatSessions(r.Context(), limit)
+	respond(w, result, err)
+}
+
+func (s *Server) deleteChatSession(w http.ResponseWriter, r *http.Request) {
+	if s.agent != nil && s.agent.IsSessionActive(r.PathValue("id")) {
+		writeErrorStatus(w, fmt.Errorf("cannot delete a conversation while its Agent run is active"), http.StatusConflict)
+		return
+	}
+	if err := s.service.DeleteChatSession(r.Context(), r.PathValue("id"), actor(r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func decode(w http.ResponseWriter, r *http.Request, target any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeErrorStatus(w, fmt.Errorf("invalid JSON: %w", err), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func respond(w http.ResponseWriter, value any, err error) {
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, value)
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	if errors.Is(err, store.ErrNotFound) {
+		status = http.StatusNotFound
+	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "mismatch") || strings.Contains(err.Error(), "already exists") {
+		status = http.StatusBadRequest
+	}
+	writeErrorStatus(w, err, status)
+}
+
+func writeErrorStatus(w http.ResponseWriter, err error, status int) {
+	writeJSON(w, status, map[string]any{"error": err.Error()})
+}
+
+func actor(r *http.Request) string {
+	if value := strings.TrimSpace(r.Header.Get("X-Local-Actor")); value != "" {
+		return value
+	}
+	return "local-web"
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Local-Actor")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				observability.FromContext(r.Context()).ErrorContext(r.Context(), "HTTP panic", "component", "http", "error", recovered, "path", r.URL.Path)
+				writeErrorStatus(w, fmt.Errorf("internal server error"), http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+type logResponseWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *logResponseWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *logResponseWriter) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	written, err := w.ResponseWriter.Write(data)
+	w.bytes += written
+	return written, err
+}
+
+func (w *logResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *logResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func requestLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		requestID := ids.New("request")
+		logger := slog.Default().With("request_id", requestID)
+		ctx := observability.WithLogger(r.Context(), logger)
+		r = r.WithContext(ctx)
+		w.Header().Set("X-Request-ID", requestID)
+		recorder := &logResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(recorder, r)
+		status := recorder.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		if r.URL.Path == "/api/v1/logs" || r.URL.Path == "/api/v1/health" || (strings.HasPrefix(r.URL.Path, "/api/v1/chat/") && strings.HasSuffix(r.URL.Path, "/state")) {
+			return
+		}
+		host := r.RemoteAddr
+		if parsed, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			host = parsed
+		}
+		level := slog.LevelDebug
+		if r.Method != http.MethodGet && r.Method != http.MethodOptions {
+			level = slog.LevelInfo
+		}
+		if status >= 500 {
+			level = slog.LevelError
+		} else if status >= 400 {
+			level = slog.LevelWarn
+		}
+		logger.With("component", "http").LogAttrs(ctx, level, "HTTP request completed",
+			slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Int("status", status),
+			slog.Int64("duration_ms", time.Since(started).Milliseconds()), slog.Int("response_bytes", recorder.bytes), slog.String("remote_ip", host))
+	})
+}
+
+func spaHandler(root string) http.Handler {
+	fileServer := http.FileServer(http.Dir(root))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
+			return
+		}
+		clean := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+		if clean == "." {
+			clean = "index.html"
+		}
+		if _, err := os.Stat(filepath.Join(root, clean)); err == nil {
+			if clean == "index.html" {
+				w.Header().Set("Cache-Control", "no-cache, max-age=0")
+			}
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		index, err := os.Open(filepath.Join(root, "index.html"))
+		if err != nil {
+			http.Error(w, "web UI is not built; run npm --prefix web run build", http.StatusNotFound)
+			return
+		}
+		defer index.Close()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, max-age=0")
+		_, _ = bufio.NewReader(index).WriteTo(w)
+	})
+}

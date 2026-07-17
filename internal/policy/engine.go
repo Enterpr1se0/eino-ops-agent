@@ -1,0 +1,361 @@
+package policy
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+
+	"eino-ops-agent/internal/domain"
+
+	"gopkg.in/yaml.v3"
+	"mvdan.cc/sh/v3/syntax"
+)
+
+type Rule struct {
+	Name     string   `yaml:"name"`
+	Action   string   `yaml:"action"`
+	Programs []string `yaml:"programs"`
+	Contains []string `yaml:"contains"`
+	Hosts    []string `yaml:"hosts"`
+	Paths    []string `yaml:"paths"`
+}
+
+type File struct {
+	Rules []Rule `yaml:"rules"`
+}
+
+type Engine struct {
+	rules []Rule
+}
+
+var safePrograms = stringSet(
+	"arch", "basename", "cat", "cut", "date", "df", "dirname", "dmesg", "du", "env", "find",
+	"free", "getent", "grep", "head", "hostname", "id", "ip", "journalctl", "last", "ls", "lscpu",
+	"lsblk", "lsof", "netstat", "pgrep", "printenv", "ps", "pwd", "ss", "stat", "tail", "top",
+	"uname", "uptime", "vmstat", "wc", "who", "whoami",
+)
+
+var changePrograms = stringSet(
+	"apt", "apt-get", "apk", "brew", "cargo", "chgrp", "chmod", "chown", "cp", "dnf", "docker",
+	"dpkg", "git", "go", "helm", "install", "kill", "kubectl", "make", "mkdir", "mv", "npm", "pip",
+	"pip3", "pkill", "podman", "python", "python3", "restorecon", "rm", "rmdir", "rsync", "scp", "sed",
+	"service", "sftp", "snap", "systemctl", "tar", "tee", "touch", "unzip", "yarn", "yum", "patch",
+)
+
+var criticalPrograms = stringSet(
+	"badblocks", "blkdiscard", "cfdisk", "chpasswd", "cryptsetup", "dd", "fdisk", "halt", "iptables",
+	"mkfs", "mkfs.btrfs", "mkfs.ext4", "mkfs.xfs", "mkswap", "nft", "parted", "passwd", "poweroff",
+	"reboot", "shutdown", "sudo", "swapoff", "ufw", "userdel", "visudo", "wipefs",
+)
+
+var forbiddenPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(?:^|[[:space:]])(?:cat|head|tail|less|more|cp|scp|sftp|curl)[^\n]*(?:\.ssh/(?:id_|authorized_keys)|/etc/shadow|master\.key)`),
+	regexp.MustCompile(`(?i)OPS_AGENT_MASTER_KEY`),
+	regexp.MustCompile(`(?i)(?:disable|stop|kill)[^\n]*(?:ops-agent|audit)`),
+}
+
+func Load(path string) (*Engine, error) {
+	engine := &Engine{}
+	if path == "" {
+		return engine, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return engine, nil
+		}
+		return nil, err
+	}
+	var file File
+	if err := yaml.Unmarshal(data, &file); err != nil {
+		return nil, fmt.Errorf("parse policy file: %w", err)
+	}
+	for i, rule := range file.Rules {
+		if rule.Name == "" {
+			return nil, fmt.Errorf("policy rule %d has no name", i)
+		}
+		switch rule.Action {
+		case "allow", "approval", "critical", "deny":
+		default:
+			return nil, fmt.Errorf("policy rule %q has invalid action %q", rule.Name, rule.Action)
+		}
+	}
+	engine.rules = file.Rules
+	return engine, nil
+}
+
+func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRequest) domain.Decision {
+	source, err := shellSource(req)
+	if err != nil {
+		return decision(domain.RiskCritical, domain.ActionBreakGlass, err.Error(), "invalid_request")
+	}
+	for _, pattern := range forbiddenPatterns {
+		if pattern.MatchString(source) {
+			return decision(domain.RiskForbidden, domain.ActionDeny, "operation attempts to access credentials or disable controls", "builtin_forbidden")
+		}
+	}
+
+	risk, hits, parseErr := analyzeShell(source)
+	if parseErr != nil {
+		return decision(domain.RiskCritical, domain.ActionBreakGlass, "shell syntax cannot be safely analyzed", "shell_parse_failed")
+	}
+	if req.Elevated {
+		risk = maxRisk(risk, domain.RiskCritical)
+		hits = append(hits, "managed_sudo")
+	}
+
+	for _, rule := range e.rules {
+		if !ruleMatches(rule, host, source, req) {
+			continue
+		}
+		hits = append(hits, "yaml:"+rule.Name)
+		switch rule.Action {
+		case "deny":
+			return domain.Decision{Risk: domain.RiskForbidden, Action: domain.ActionDeny, Reason: "denied by policy rule " + rule.Name, RuleHits: unique(hits)}
+		case "critical":
+			risk = maxRisk(risk, domain.RiskCritical)
+		case "approval":
+			risk = maxRisk(risk, domain.RiskChange)
+		case "allow":
+			if risk == domain.RiskChange {
+				risk = domain.RiskReadOnly
+			}
+		}
+	}
+
+	sort.Strings(hits)
+	switch risk {
+	case domain.RiskReadOnly:
+		return domain.Decision{Risk: risk, Action: domain.ActionAllow, Reason: "read-only command", RuleHits: unique(hits)}
+	case domain.RiskChange:
+		return domain.Decision{Risk: risk, Action: domain.ActionApprove, Reason: "operation may change remote state", RuleHits: unique(hits)}
+	case domain.RiskCritical:
+		return domain.Decision{Risk: risk, Action: domain.ActionBreakGlass, Reason: "privileged or destructive operation", RuleHits: unique(hits)}
+	default:
+		return domain.Decision{Risk: domain.RiskForbidden, Action: domain.ActionDeny, Reason: "operation is forbidden", RuleHits: unique(hits)}
+	}
+}
+
+func analyzeShell(source string) (domain.RiskLevel, []string, error) {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(source), "remote.sh")
+	if err != nil {
+		return domain.RiskCritical, nil, err
+	}
+	risk := domain.RiskReadOnly
+	var hits []string
+	commandCount := 0
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.CallExpr:
+			if len(typed.Args) == 0 {
+				return true
+			}
+			program := baseProgram(printNode(typed.Args[0]))
+			commandCount++
+			switch {
+			case criticalPrograms[program]:
+				risk = maxRisk(risk, domain.RiskCritical)
+				hits = append(hits, "critical_program:"+program)
+			case changePrograms[program]:
+				if program == "rm" {
+					risk = maxRisk(risk, domain.RiskCritical)
+					hits = append(hits, "critical_program:rm")
+				} else {
+					risk = maxRisk(risk, domain.RiskChange)
+					hits = append(hits, "change_program:"+program)
+				}
+			case safePrograms[program]:
+				hits = append(hits, "read_program:"+program)
+			default:
+				risk = maxRisk(risk, domain.RiskChange)
+				hits = append(hits, "unknown_program:"+program)
+			}
+		case *syntax.Redirect:
+			risk = maxRisk(risk, domain.RiskChange)
+			hits = append(hits, "shell_redirection")
+		case *syntax.CmdSubst, *syntax.ProcSubst:
+			risk = maxRisk(risk, domain.RiskCritical)
+			hits = append(hits, "dynamic_shell_expansion")
+		}
+		return true
+	})
+	if commandCount == 0 {
+		return domain.RiskCritical, hits, fmt.Errorf("no executable command found")
+	}
+	lower := strings.ToLower(source)
+	if regexp.MustCompile(`(?:curl|wget)[^\n|]*\|\s*(?:ba)?sh`).MatchString(lower) {
+		risk = domain.RiskCritical
+		hits = append(hits, "download_pipe_shell")
+	}
+	if regexp.MustCompile(`\b(?:eval|source)\b`).MatchString(lower) {
+		risk = domain.RiskCritical
+		hits = append(hits, "dynamic_code_execution")
+	}
+	return risk, unique(hits), nil
+}
+
+func ContainsProgram(req domain.ExecRequest, name string) (bool, error) {
+	source, err := shellSource(req)
+	if err != nil {
+		return false, err
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(source), "remote.sh")
+	if err != nil {
+		return false, err
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		if baseProgram(printNode(call.Args[0])) == name {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found, nil
+}
+
+func shellSource(req domain.ExecRequest) (string, error) {
+	if req.Mode == "" {
+		if req.Script != "" {
+			req.Mode = domain.ExecScript
+		} else {
+			req.Mode = domain.ExecProgram
+		}
+	}
+	switch req.Mode {
+	case domain.ExecProgram:
+		if !regexp.MustCompile(`^[A-Za-z0-9_./+:-]+$`).MatchString(req.Program) {
+			return "", fmt.Errorf("program contains unsupported characters")
+		}
+		parts := []string{shellQuote(req.Program)}
+		for _, arg := range req.Args {
+			parts = append(parts, shellQuote(arg))
+		}
+		return strings.Join(parts, " "), nil
+	case domain.ExecScript:
+		if strings.TrimSpace(req.Script) == "" {
+			return "", fmt.Errorf("script is empty")
+		}
+		return req.Script, nil
+	case domain.ExecUpload:
+		if req.ArtifactName == "" || !filepath.IsAbs(req.RemotePath) {
+			return "", fmt.Errorf("upload requires an artifact and absolute remote path")
+		}
+		return "sftp put " + shellQuote(req.ArtifactName) + " " + shellQuote(req.RemotePath), nil
+	case domain.ExecDownload:
+		if req.ArtifactName == "" || !filepath.IsAbs(req.RemotePath) {
+			return "", fmt.Errorf("download requires an artifact and absolute remote path")
+		}
+		return "sftp get " + shellQuote(req.RemotePath) + " " + shellQuote(req.ArtifactName), nil
+	default:
+		return "", fmt.Errorf("unsupported execution mode %q", req.Mode)
+	}
+}
+
+func ruleMatches(rule Rule, host domain.Host, source string, req domain.ExecRequest) bool {
+	if len(rule.Hosts) > 0 && !contains(rule.Hosts, host.ID) && !contains(rule.Hosts, host.Name) && !contains(rule.Hosts, "*") {
+		return false
+	}
+	if len(rule.Programs) > 0 {
+		program := baseProgram(req.Program)
+		matched := false
+		for _, candidate := range rule.Programs {
+			if candidate == "*" || candidate == program {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	if len(rule.Contains) > 0 {
+		matched := false
+		for _, fragment := range rule.Contains {
+			if strings.Contains(source, fragment) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	if len(rule.Paths) > 0 {
+		matched := false
+		for _, path := range rule.Paths {
+			if strings.HasPrefix(filepath.Clean(req.Cwd), filepath.Clean(path)) || strings.Contains(source, path) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func decision(risk domain.RiskLevel, action domain.DecisionAction, reason, hit string) domain.Decision {
+	return domain.Decision{Risk: risk, Action: action, Reason: reason, RuleHits: []string{hit}}
+}
+
+func maxRisk(left, right domain.RiskLevel) domain.RiskLevel {
+	rank := map[domain.RiskLevel]int{domain.RiskReadOnly: 0, domain.RiskChange: 1, domain.RiskCritical: 2, domain.RiskForbidden: 3}
+	if rank[right] > rank[left] {
+		return right
+	}
+	return left
+}
+
+func baseProgram(value string) string {
+	value = strings.Trim(value, "'\"")
+	return filepath.Base(value)
+}
+
+func printNode(node syntax.Node) string {
+	var buf bytes.Buffer
+	_ = syntax.NewPrinter().Print(&buf, node)
+	return buf.String()
+}
+
+func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
+
+func contains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSet(values ...string) map[string]bool {
+	result := make(map[string]bool, len(values))
+	for _, value := range values {
+		result[value] = true
+	}
+	return result
+}
+
+func unique(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}

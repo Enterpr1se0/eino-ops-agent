@@ -1,0 +1,24 @@
+.data/
+bin/
+dist/
+web/node_modules/
+web/dist/
+.env
+*.log
+coverage.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TypeScript / Vite build artifacts
+*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+

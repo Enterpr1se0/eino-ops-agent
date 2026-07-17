@@ -1,0 +1,33 @@
+listen_address: 0.0.0.0:8080
+data_dir: .data
+database_path: .data/ops-agent.db
+artifacts_dir: .data/artifacts
+policy_path: configs/policy.yaml
+
+logging:
+  level: info # use debug for detailed HTTP, Agent, policy, and SSH lifecycle logs
+  format: text # terminal format: text or json; the rotating file is always JSONL
+  file: .data/ops-agent.log # set to "-" to disable file output
+  add_source: false
+  max_size_mb: 20
+  max_backups: 3
+  recent_limit: 2000 # in-memory entries available to the Web Logs page
+
+openssh:
+  ssh_path: ssh
+  ssh_keyscan_path: ssh-keyscan
+  ssh_keygen_path: ssh-keygen
+  sftp_path: sftp
+  default_known_hosts: .data/known_hosts
+
+model:
+  base_url: ""
+  name: gpt-4o-mini
+
+limits:
+  sync_timeout_seconds: 60
+  max_timeout_seconds: 600
+  max_output_bytes: 10485760
+  model_output_bytes: 32768
+  global_concurrency: 8
+  host_concurrency: 2

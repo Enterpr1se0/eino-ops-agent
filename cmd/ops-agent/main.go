@@ -1,0 +1,386 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"eino-ops-agent/internal/agent"
+	"eino-ops-agent/internal/config"
+	"eino-ops-agent/internal/domain"
+	"eino-ops-agent/internal/httpapi"
+	"eino-ops-agent/internal/mcpserver"
+	"eino-ops-agent/internal/observability"
+	"eino-ops-agent/internal/policy"
+	"eino-ops-agent/internal/security"
+	"eino-ops-agent/internal/service"
+	"eino-ops-agent/internal/sshx"
+	"eino-ops-agent/internal/store"
+)
+
+const version = "0.1.0"
+
+type application struct {
+	config  config.Config
+	store   *store.Store
+	service *service.Service
+	agent   *agent.Runtime
+}
+
+func main() {
+	if err := run(context.Background(), os.Args[1:]); err != nil {
+		slog.Error("command failed", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, args []string) error {
+	configPath := os.Getenv("OPS_AGENT_CONFIG")
+	if len(args) >= 2 && args[0] == "--config" {
+		configPath = args[1]
+		args = args[2:]
+	}
+	if len(args) == 0 {
+		usage()
+		return nil
+	}
+	if args[0] == "version" {
+		fmt.Println(version)
+		return nil
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	if err := observability.Configure(cfg.Logging); err != nil {
+		return fmt.Errorf("configure logging: %w", err)
+	}
+	slog.InfoContext(ctx, "logging initialized", "component", "server", "level", cfg.Logging.Level, "format", cfg.Logging.Format, "file", cfg.Logging.File)
+	app, err := newApplication(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer app.store.Close()
+
+	switch args[0] {
+	case "serve":
+		return serve(ctx, app)
+	case "mcp":
+		return mcpserver.New(app.service, version).Run(ctx)
+	case "host":
+		return hostCommand(ctx, app, args[1:])
+	case "exec":
+		return execCommand(ctx, app, args[1:])
+	case "approval":
+		return approvalCommand(ctx, app, args[1:])
+	case "audit":
+		return auditCommand(ctx, app, args[1:])
+	case "artifact":
+		return artifactCommand(ctx, app, args[1:])
+	case "chat":
+		return chatCommand(ctx, app)
+	default:
+		usage()
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func newApplication(ctx context.Context, cfg config.Config) (*application, error) {
+	started := time.Now()
+	st, err := store.Open(ctx, cfg.DatabasePath)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	encryptor, err := security.NewEncryptor(cfg.MasterKey, cfg.DataDir)
+	if err != nil {
+		st.Close()
+		return nil, fmt.Errorf("initialize audit encryption: %w", err)
+	}
+	engine, err := policy.Load(cfg.PolicyPath)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	transport := sshx.NewOpenSSHTransport(cfg.OpenSSH, cfg.Limits, cfg.ArtifactsDir)
+	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), cfg.Limits, cfg.ArtifactsDir)
+	runtime, err := agent.New(ctx, cfg.Model, svc, st)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	slog.InfoContext(ctx, "application initialized", "component", "server", "duration_ms", time.Since(started).Milliseconds(), "agent_available", runtime.Available())
+	return &application{config: cfg, store: st, service: svc, agent: runtime}, nil
+}
+
+func serve(ctx context.Context, app *application) error {
+	server := &http.Server{
+		Addr: app.config.ListenAddress, Handler: httpapi.New(app.service, app.agent).Handler(),
+		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
+	}
+	shutdownCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-shutdownCtx.Done()
+		slog.Info("server shutdown requested", "component", "server")
+		graceCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(graceCtx)
+	}()
+	slog.Info("Ops Agent listening", "component", "server", "address", app.config.ListenAddress, "agent_available", app.agent.Available())
+	err := server.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		slog.Info("server stopped", "component", "server")
+		return nil
+	}
+	return err
+}
+
+func hostCommand(ctx context.Context, app *application, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("host command requires add, list, probe, scan-key, trust, or delete")
+	}
+	switch args[0] {
+	case "list":
+		hosts, err := app.service.ListHosts(ctx)
+		return printJSON(hosts, err)
+	case "add":
+		fs := flag.NewFlagSet("host add", flag.ContinueOnError)
+		var host domain.Host
+		fs.StringVar(&host.Name, "name", "", "host name")
+		fs.StringVar(&host.Address, "address", "", "host address")
+		fs.IntVar(&host.Port, "port", 22, "SSH port")
+		fs.StringVar(&host.User, "user", "", "SSH user")
+		fs.StringVar(&host.ConfigAlias, "alias", "", "OpenSSH config alias")
+		fs.StringVar(&host.IdentityFile, "identity", "", "private key path reference")
+		fs.StringVar(&host.ProxyJump, "jump", "", "ProxyJump target")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		created, err := app.service.AddHost(ctx, host, "local-cli")
+		return printJSON(created, err)
+	case "probe", "scan-key", "delete":
+		if len(args) < 2 {
+			return fmt.Errorf("host ID is required")
+		}
+		if args[0] == "probe" {
+			value, err := app.service.ProbeHost(ctx, args[1])
+			return printJSON(value, err)
+		}
+		if args[0] == "scan-key" {
+			value, err := app.service.ScanHostKey(ctx, args[1])
+			return printJSON(value, err)
+		}
+		return app.service.DeleteHost(ctx, args[1], "local-cli")
+	case "trust":
+		if len(args) < 3 {
+			return fmt.Errorf("usage: host trust HOST_ID FINGERPRINT")
+		}
+		value, err := app.service.TrustHostKey(ctx, args[1], args[2], "local-cli")
+		return printJSON(value, err)
+	default:
+		return fmt.Errorf("unknown host command %q", args[0])
+	}
+}
+
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+func (s *stringList) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
+func execCommand(ctx context.Context, app *application, args []string) error {
+	fs := flag.NewFlagSet("exec", flag.ContinueOnError)
+	var req domain.ExecRequest
+	var arguments stringList
+	fs.StringVar(&req.HostID, "host", "", "registered host ID or name")
+	fs.StringVar(&req.Program, "program", "", "remote program")
+	fs.Var(&arguments, "arg", "program argument; repeat as needed")
+	fs.StringVar(&req.Script, "script", "", "bash script")
+	fs.StringVar(&req.Cwd, "cwd", "", "remote working directory")
+	fs.IntVar(&req.TimeoutSeconds, "timeout", 60, "timeout seconds")
+	fs.StringVar(&req.Reason, "reason", "local operator request", "operational reason")
+	fs.StringVar(&req.ExpectedChanges, "changes", "", "expected changes")
+	fs.StringVar(&req.Rollback, "rollback", "", "rollback instructions")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	req.Args = arguments
+	if req.Script != "" {
+		req.Mode = domain.ExecScript
+	} else {
+		req.Mode = domain.ExecProgram
+	}
+	result, err := app.service.Submit(ctx, req, "local-cli")
+	return printJSON(result, err)
+}
+
+func approvalCommand(ctx context.Context, app *application, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("approval command requires list, approve, or reject")
+	}
+	switch args[0] {
+	case "list":
+		status := "pending"
+		if len(args) > 1 {
+			status = args[1]
+		}
+		value, err := app.service.ListApprovals(ctx, status, 100)
+		return printJSON(value, err)
+	case "approve":
+		fs := flag.NewFlagSet("approval approve", flag.ContinueOnError)
+		challenge := fs.String("challenge", "", "break-glass challenge")
+		reason := fs.String("reason", "approved by local operator", "approval reason")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 {
+			return fmt.Errorf("approval ID is required")
+		}
+		value, err := app.service.Approve(ctx, fs.Arg(0), *challenge, *reason, "local-cli")
+		return printJSON(value, err)
+	case "reject":
+		if len(args) < 2 {
+			return fmt.Errorf("approval ID is required")
+		}
+		reason := "rejected by local operator"
+		if len(args) > 2 {
+			reason = strings.Join(args[2:], " ")
+		}
+		return app.service.Reject(ctx, args[1], reason, "local-cli")
+	default:
+		return fmt.Errorf("unknown approval command %q", args[0])
+	}
+}
+
+func auditCommand(ctx context.Context, app *application, args []string) error {
+	if len(args) == 0 {
+		runs, err := app.service.SearchRuns(ctx, "", "", 50)
+		return printJSON(runs, err)
+	}
+	switch args[0] {
+	case "search":
+		query := strings.Join(args[1:], " ")
+		runs, err := app.service.SearchRuns(ctx, query, "", 100)
+		return printJSON(runs, err)
+	case "show":
+		if len(args) < 2 {
+			return fmt.Errorf("run ID is required")
+		}
+		raw := len(args) > 2 && args[2] == "--raw"
+		result, err := app.service.GetRun(ctx, args[1], raw)
+		return printJSON(result, err)
+	default:
+		return fmt.Errorf("unknown audit command %q", args[0])
+	}
+}
+
+func artifactCommand(ctx context.Context, app *application, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("artifact command requires add, list, upload, or download")
+	}
+	switch args[0] {
+	case "list":
+		items, err := app.service.ListArtifacts()
+		return printJSON(items, err)
+	case "add":
+		if len(args) != 3 {
+			return fmt.Errorf("usage: artifact add NAME LOCAL_PATH")
+		}
+		data, err := os.ReadFile(args[2])
+		if err != nil {
+			return err
+		}
+		item, err := app.service.SaveArtifact(args[1], data)
+		return printJSON(item, err)
+	case "upload", "download":
+		fs := flag.NewFlagSet("artifact "+args[0], flag.ContinueOnError)
+		hostID := fs.String("host", "", "registered host ID")
+		name := fs.String("name", "", "local artifact name")
+		remote := fs.String("remote", "", "absolute remote path")
+		reason := fs.String("reason", "artifact transfer", "transfer reason")
+		rollback := fs.String("rollback", "remove uploaded artifact", "upload rollback")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if args[0] == "upload" {
+			result, err := app.service.UploadArtifact(ctx, *hostID, *name, *remote, *reason, *rollback, "local-cli")
+			return printJSON(result, err)
+		}
+		result, err := app.service.DownloadArtifact(ctx, *hostID, *remote, *name, *reason, "local-cli")
+		return printJSON(result, err)
+	default:
+		return fmt.Errorf("unknown artifact command %q", args[0])
+	}
+}
+
+func chatCommand(ctx context.Context, app *application) error {
+	if !app.agent.Available() {
+		return agent.ErrUnavailable
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	sessionID := ""
+	for {
+		fmt.Print("ops> ")
+		if !scanner.Scan() {
+			return scanner.Err()
+		}
+		query := strings.TrimSpace(scanner.Text())
+		if query == "" {
+			continue
+		}
+		if query == "/exit" || query == "/quit" {
+			return nil
+		}
+		_, err := app.agent.Query(ctx, sessionID, query, func(event agent.Event) {
+			if event.SessionID != "" {
+				sessionID = event.SessionID
+			}
+			if event.Type == "message" && event.Content != "" {
+				fmt.Print(event.Content)
+			}
+		})
+		fmt.Println()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+		}
+	}
+}
+
+func printJSON(value any, err error) error {
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
+}
+
+func usage() {
+	fmt.Println(`Ops Agent ` + version + `
+
+Usage:
+  ops-agent [--config FILE] serve
+  ops-agent [--config FILE] chat
+  ops-agent [--config FILE] mcp
+  ops-agent [--config FILE] host add|list|probe|scan-key|trust|delete
+  ops-agent [--config FILE] exec --host ID --program PROGRAM --arg ARG
+  ops-agent [--config FILE] approval list|approve|reject
+  ops-agent [--config FILE] audit search|show
+  ops-agent [--config FILE] artifact add|list|upload|download
+  ops-agent version`)
+}
+
+var _ = strconv.Itoa
