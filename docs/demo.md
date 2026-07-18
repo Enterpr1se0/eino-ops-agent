@@ -2,7 +2,9 @@
 
 该演示使用一台一次性 Linux 虚拟机或容器 SSH 测试机。不要在没有快照的生产服务器上演示变更操作。
 
-## 0. 模型热切换
+## 0. 登录与模型热切换
+
+首次启动时通过 `OPS_AGENT_ADMIN_PASSWORD` 设置至少 12 位的强密码。打开 Web 后先展示管理员登录页；登录成功后说明浏览器只保存 HttpOnly Session Cookie，修改类 API 还要求 CSRF Token，SSH 密码、模型 Key 和审计原文不会进入前端存储。
 
 打开 Models 页面，分别配置一个云端 OpenAI-compatible 提供商和一个本地 Ollama 端点。点击 Fetch models 自动获取可用模型并展开下拉框选择；保存前点击 Test model，展示后端发送 `Hello`、模型返回非空文本和调用延迟。保存后 API Key 只显示“Encrypted key stored”，再点击 Use model。Agent 状态和聊天输入区中的模型名会立即变化，服务进程不需要重启。
 
@@ -30,7 +32,7 @@
 
 > 根据证据重启 demo-api，说明影响、验证和回滚。
 
-展示 Agent 的 Tool 调用停在审批点且服务尚未重启。审批对话框会直接覆盖当前会话；检查精确命令、主机、原因、摘要和回滚，再选择“仅允许本次”或“本会话允许相同操作”。批准后原 Tool Call 获得执行结果并继续推理。也可以在说明框输入替代方案并选择“拒绝并告诉 LLM”，替代方案会返回被暂停的 Tool，让 Agent 在同一次运行中自动改走更安全的方案。
+展示 Agent 的 Tool 调用停在审批点且服务尚未重启。审批对话框会直接覆盖当前会话；先展开“双 SubAgent 审查”，查看小白解释、风险依据、缺失证据、控制措施和置信度，再检查精确命令、主机、原因、摘要和回滚。强调这两位 Agent 没有 Tool、不能批准，只能辅助用户判断，较高风险会单向升级到 break-glass。随后选择“仅允许本次”或“本会话允许相同操作”。批准后原 Tool Call 获得执行结果并继续推理。也可以在说明框输入替代方案并选择“拒绝并告诉 LLM”，替代方案会返回被暂停的 Tool，让 Agent 在同一次运行中自动改走更安全的方案。
 
 ## 4. Critical 破窗
 
@@ -52,3 +54,19 @@
 ## 6. MCP 复用
 
 连接 MCP Client，调用 `ssh_history_search`。展示 MCP 与 Web Agent 看到同一条审计记录，并且 MCP 也无法批准自己的命令。
+
+## 7. 事务化修改远端配置
+
+向 Agent 输入：
+
+> 检查 demo 主机的 nginx 配置；如果确实需要修改，只调整 server_tokens，修改前绑定当前 SHA256，使用 nginx validator，并保留可恢复的 operation ID。
+
+展示 `ssh_file_read` 返回 mode、owner、mtime 和 SHA256。`ssh_config_apply` 审批框应展示完整目标、expected SHA256、变更内容、validator、备份与回滚策略。批准后检查 before/after SHA256 和 operation ID；随后在测试环境调用 `ssh_config_restore`，证明恢复只能引用已记录的操作，不能让模型任意填写备份路径。
+
+在另一个终端于审批期间修改目标文件，再批准原请求。展示系统返回 `conflict` 和重新读取建议，而不是覆盖较新的内容。
+
+## 8. Workspace 与持久长任务
+
+直接在 Agent 对话左侧的 Workspace 文件栏选择 `default`，上传一次性示例仓库文件或压缩包。展示文件浏览、子目录导航、文本预览、二进制元数据提示和可恢复删除；强调点击文件只会预览，不会自动给 LLM 发送任务。输入框上方仍保留一键上传，同时说明模型看不到宿主绝对路径、不能调用宿主 Shell。随后明确要求 Agent 读取 README、搜索启动入口并提交一个单文件 unified diff；patch 必须绑定 SHA256，且只允许配置中声明的 validator。
+
+再启动一个短时后台诊断任务，刷新页面后用 `ssh_task_list` 和 `ssh_task_tail` 找回任务及输出。最后演示取消任务。说明服务重启后无法重新附着到旧 SSH 进程，数据库会把未完成任务明确标为 `interrupted`，不会假装仍在运行。

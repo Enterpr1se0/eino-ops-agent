@@ -48,6 +48,7 @@ export interface Approval {
   status: string
   challenge?: string
   reason?: string
+  ai_review?: CommandReview
   created_at: string
   expires_at: string
 }
@@ -73,8 +74,38 @@ export interface Run {
   stdout_redacted?: string
   stderr_redacted?: string
   error?: string
+  ai_review?: CommandReview
   started_at: string
   completed_at?: string
+}
+
+export interface CommandExplanation {
+  summary: string
+  mechanism: string
+  effects: string[]
+  risks: string[]
+  beginner_tips: string[]
+  rollback_guide: string
+}
+
+export interface AIRiskReview {
+  risk: Risk
+  recommendation: 'allow' | 'human_required' | 'deny'
+  confidence: number
+  reasons: string[]
+  missing_evidence: string[]
+  required_controls: string[]
+}
+
+export interface CommandReview {
+  status: 'completed' | 'degraded' | 'unavailable'
+  model?: string
+  deterministic_risk: Risk
+  effective_risk: Risk
+  explanation?: CommandExplanation
+  risk_review?: AIRiskReview
+  errors?: string[]
+  reviewed_at: string
 }
 
 export interface ServerLogEntry {
@@ -184,6 +215,7 @@ export interface ModelCatalog {
 
 export interface ModelStatus {
   available: boolean
+  review_agents_available: boolean
   source: 'database' | 'environment' | 'none'
   provider_id?: string
   name?: string
@@ -208,9 +240,87 @@ export interface Health {
 
 export interface SystemSettings {
   agent_max_iterations: number
+  subagent_reviews_enabled: boolean
+  beginner_explanations_enabled: boolean
   updated_at: string
 }
 
 export interface SystemSettingsInput {
   agent_max_iterations: number
+  subagent_reviews_enabled?: boolean
+  beginner_explanations_enabled?: boolean
+}
+
+export interface AuthSession {
+  authenticated: boolean
+  csrf_token: string
+  expires_at: string
+}
+
+export interface FileMetadata {
+	operation_id?: string
+  path: string
+  size?: number
+  mode?: string
+  owner?: string
+  group?: string
+  modified_unix?: number
+  sha256?: string
+  before_sha256?: string
+  backup_path?: string
+  validator?: string
+  validation_ok?: boolean
+  sensitive?: boolean
+  offset_bytes?: number
+  returned_bytes?: number
+}
+
+export interface WorkspaceCapability {
+  id: string
+  access: 'read_only' | 'read_write'
+  validators?: string[]
+  root?: string
+}
+
+export interface WorkspaceUploadResult {
+  workspace_id: string
+  path: string
+  size: number
+  sha256: string
+}
+
+export interface WorkspaceFileEntry {
+  name: string
+  type: 'file' | 'directory'
+  size?: number
+}
+
+export interface WorkspaceFileList {
+  workspace_id: string
+  path: string
+  entries: WorkspaceFileEntry[]
+  truncated?: boolean
+}
+
+export interface WorkspaceFilePreview {
+  workspace_id: string
+  path: string
+  size: number
+  sha256: string
+  content?: string
+  truncated?: boolean
+  binary?: boolean
+}
+
+export interface WorkspaceDeleteResult {
+  workspace_id: string
+  path: string
+  size: number
+  sha256: string
+  trash_id: string
+  recoverable: boolean
+}
+
+export interface ToolCapabilities {
+  workspaces: WorkspaceCapability[]
 }

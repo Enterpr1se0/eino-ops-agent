@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -21,28 +20,43 @@ import (
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/ids"
 	"eino-ops-agent/internal/observability"
+	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/service"
 	"eino-ops-agent/internal/store"
 )
 
 type Server struct {
-	service *service.Service
-	agent   *agent.Runtime
-	mux     *http.ServeMux
+	service       *service.Service
+	agent         *agent.Runtime
+	auth          *security.WebAuth
+	secureCookies bool
+	mux           *http.ServeMux
+	loginMu       sync.Mutex
+	loginAttempts map[string]loginAttempt
 }
 
-func New(svc *service.Service, runtime *agent.Runtime) *Server {
-	s := &Server{service: svc, agent: runtime, mux: http.NewServeMux()}
+type loginAttempt struct {
+	Count int
+	Reset time.Time
+}
+
+func New(svc *service.Service, runtime *agent.Runtime, auth *security.WebAuth, secureCookies ...bool) *Server {
+	secure := len(secureCookies) > 0 && secureCookies[0]
+	s := &Server{service: svc, agent: runtime, auth: auth, secureCookies: secure, mux: http.NewServeMux(), loginAttempts: make(map[string]loginAttempt)}
 	s.routes()
 	return s
 }
 
 func (s *Server) Handler() http.Handler {
-	return requestLogMiddleware(recoverMiddleware(corsMiddleware(s.mux)))
+	return requestLogMiddleware(recoverMiddleware(corsMiddleware(s.authMiddleware(s.mux))))
 }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/health", s.health)
+	s.mux.HandleFunc("GET /api/v1/auth/session", s.authSession)
+	s.mux.HandleFunc("POST /api/v1/auth/login", s.login)
+	s.mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
+	s.mux.HandleFunc("PUT /api/v1/auth/password", s.changePassword)
 	s.mux.HandleFunc("GET /api/v1/model-providers", s.listModelProviders)
 	s.mux.HandleFunc("POST /api/v1/model-providers", s.saveModelProvider)
 	s.mux.HandleFunc("POST /api/v1/model-providers/discover", s.discoverModels)
@@ -51,6 +65,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/model-providers/{id}/activate", s.activateModelProvider)
 	s.mux.HandleFunc("POST /api/v1/model-providers/{id}/test", s.testModelProvider)
 	s.mux.HandleFunc("GET /api/v1/settings", s.systemSettings)
+	s.mux.HandleFunc("GET /api/v1/capabilities", s.capabilities)
+	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/files", s.listWorkspaceFiles)
+	s.mux.HandleFunc("POST /api/v1/workspaces/{id}/files", s.uploadWorkspaceFile)
+	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}/files", s.deleteWorkspaceFile)
+	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/preview", s.previewWorkspaceFile)
 	s.mux.HandleFunc("PUT /api/v1/settings", s.saveSystemSettings)
 	s.mux.HandleFunc("GET /api/v1/hosts", s.listHosts)
 	s.mux.HandleFunc("POST /api/v1/hosts", s.saveHost)
@@ -65,22 +84,204 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", s.cancelTask)
 	s.mux.HandleFunc("GET /api/v1/approvals", s.listApprovals)
+	s.mux.HandleFunc("POST /api/v1/approvals/{id}/review/retry", s.retryApprovalReview)
 	s.mux.HandleFunc("POST /api/v1/approvals/{id}/approve", s.approve)
 	s.mux.HandleFunc("POST /api/v1/approvals/{id}/reject", s.reject)
 	s.mux.HandleFunc("GET /api/v1/runs", s.searchRuns)
 	s.mux.HandleFunc("GET /api/v1/runs/{id}", s.getRun)
 	s.mux.HandleFunc("GET /api/v1/audit", s.listAudit)
 	s.mux.HandleFunc("GET /api/v1/logs", s.logs)
-	s.mux.HandleFunc("GET /api/v1/artifacts", s.listArtifacts)
-	s.mux.HandleFunc("POST /api/v1/artifacts", s.saveArtifact)
-	s.mux.HandleFunc("POST /api/v1/transfers/upload", s.uploadArtifact)
-	s.mux.HandleFunc("POST /api/v1/transfers/download", s.downloadArtifact)
 	s.mux.HandleFunc("POST /api/v1/chat", s.chat)
 	s.mux.HandleFunc("GET /api/v1/chat/sessions", s.chatSessions)
 	s.mux.HandleFunc("DELETE /api/v1/chat/{id}", s.deleteChatSession)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/messages", s.chatMessages)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/state", s.chatState)
+	s.mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, _ *http.Request) {
+		writeErrorStatus(w, fmt.Errorf("API endpoint not found"), http.StatusNotFound)
+	})
 	s.mux.Handle("/", spaHandler("web/dist"))
+}
+
+func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"workspaces": s.service.ListAdminWorkspaceCapabilities()})
+}
+
+func (s *Server) listWorkspaceFiles(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ListAdminWorkspaceFiles(r.PathValue("id"), r.URL.Query().Get("path"))
+	respond(w, result, err)
+}
+
+func (s *Server) previewWorkspaceFile(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.PreviewAdminWorkspaceFile(r.PathValue("id"), r.URL.Query().Get("path"))
+	respond(w, result, err)
+}
+
+func (s *Server) deleteWorkspaceFile(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.DeleteAdminWorkspaceFile(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"), actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) uploadWorkspaceFile(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, (100<<20)+(1<<20))
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		status := http.StatusBadRequest
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeErrorStatus(w, fmt.Errorf("invalid workspace upload: %w", err), status)
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeErrorStatus(w, fmt.Errorf("file is required"), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	if header.Size > 100<<20 {
+		writeErrorStatus(w, fmt.Errorf("workspace upload exceeds 100 MiB"), http.StatusRequestEntityTooLarge)
+		return
+	}
+	result, err := s.service.UploadWorkspaceFile(r.Context(), r.PathValue("id"), r.FormValue("path"), header.Filename, file, actor(r))
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, store.ErrNotFound) {
+			status = http.StatusNotFound
+		} else if strings.Contains(err.Error(), "already exists") {
+			status = http.StatusConflict
+		}
+		writeErrorStatus(w, err, status)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.auth == nil || !strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1/health" || r.URL.Path == "/api/v1/auth/login" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		cookie, err := r.Cookie(security.SessionCookieName)
+		if err != nil {
+			writeErrorStatus(w, fmt.Errorf("authentication required"), http.StatusUnauthorized)
+			return
+		}
+		session, err := s.auth.Authenticate(r.Context(), cookie.Value)
+		if err != nil {
+			s.clearSessionCookie(w)
+			writeErrorStatus(w, fmt.Errorf("authentication required"), http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			provided := strings.TrimSpace(r.Header.Get("X-CSRF-Token"))
+			if provided == "" || provided != session.CSRFToken {
+				writeErrorStatus(w, fmt.Errorf("invalid CSRF token"), http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil {
+		writeErrorStatus(w, fmt.Errorf("web authentication is unavailable"), http.StatusServiceUnavailable)
+		return
+	}
+	remote := remoteIP(r)
+	if !s.allowLoginAttempt(remote) {
+		writeErrorStatus(w, fmt.Errorf("too many login attempts; retry later"), http.StatusTooManyRequests)
+		return
+	}
+	var input struct {
+		Password string `json:"password"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	token, session, err := s.auth.Login(r.Context(), input.Password)
+	if err != nil {
+		time.Sleep(250 * time.Millisecond)
+		writeErrorStatus(w, fmt.Errorf("invalid administrator credentials"), http.StatusUnauthorized)
+		return
+	}
+	s.resetLoginAttempts(remote)
+	http.SetCookie(w, &http.Cookie{Name: security.SessionCookieName, Value: token, Path: "/", HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteStrictMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt})
+}
+
+func (s *Server) authSession(w http.ResponseWriter, r *http.Request) {
+	cookie, _ := r.Cookie(security.SessionCookieName)
+	session, err := s.auth.Authenticate(r.Context(), cookie.Value)
+	if err != nil {
+		writeErrorStatus(w, fmt.Errorf("authentication required"), http.StatusUnauthorized)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt})
+}
+
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	cookie, _ := r.Cookie(security.SessionCookieName)
+	if cookie != nil {
+		_ = s.auth.Logout(r.Context(), cookie.Value)
+	}
+	s.clearSessionCookie(w)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Current     string `json:"current_password"`
+		Replacement string `json:"new_password"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	if err := s.auth.ChangePassword(r.Context(), input.Current, input.Replacement); err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	s.clearSessionCookie(w)
+	writeJSON(w, http.StatusOK, map[string]any{"changed": true, "login_required": true})
+}
+
+func (s *Server) clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: security.SessionCookieName, Value: "", Path: "/", HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+}
+
+func (s *Server) allowLoginAttempt(remote string) bool {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	now := time.Now()
+	attempt := s.loginAttempts[remote]
+	if now.After(attempt.Reset) {
+		attempt = loginAttempt{Reset: now.Add(5 * time.Minute)}
+	}
+	attempt.Count++
+	s.loginAttempts[remote] = attempt
+	return attempt.Count <= 10
+}
+
+func (s *Server) resetLoginAttempts(remote string) {
+	s.loginMu.Lock()
+	delete(s.loginAttempts, remote)
+	s.loginMu.Unlock()
+}
+
+func remoteIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
@@ -350,6 +551,11 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) {
 	respond(w, result, err)
 }
 
+func (s *Server) retryApprovalReview(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.RetryApprovalReview(r.Context(), r.PathValue("id"), actor(r))
+	respond(w, result, err)
+}
+
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Challenge string `json:"challenge"`
@@ -389,57 +595,6 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	result, err := s.service.ListAudit(r.Context(), r.URL.Query().Get("run_id"), limit)
-	respond(w, result, err)
-}
-
-func (s *Server) listArtifacts(w http.ResponseWriter, _ *http.Request) {
-	result, err := s.service.ListArtifacts()
-	respond(w, result, err)
-}
-
-func (s *Server) saveArtifact(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(100 << 20); err != nil {
-		writeErrorStatus(w, fmt.Errorf("invalid multipart artifact: %w", err), http.StatusBadRequest)
-		return
-	}
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		writeErrorStatus(w, fmt.Errorf("file field is required: %w", err), http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
-	name := r.FormValue("name")
-	if name == "" {
-		name = filepath.Base(header.Filename)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, (100<<20)+1))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	result, err := s.service.SaveArtifact(name, data)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, result)
-}
-
-func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
-	var input agent.TransferInput
-	if !decode(w, r, &input) {
-		return
-	}
-	result, err := s.service.UploadArtifact(r.Context(), input.HostID, input.ArtifactName, input.RemotePath, input.Reason, input.Rollback, actor(r))
-	respond(w, result, err)
-}
-
-func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
-	var input agent.TransferInput
-	if !decode(w, r, &input) {
-		return
-	}
-	result, err := s.service.DownloadArtifact(r.Context(), input.HostID, input.RemotePath, input.ArtifactName, input.Reason, actor(r))
 	respond(w, result, err)
 }
 
@@ -561,9 +716,9 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
-	if errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
 		status = http.StatusNotFound
-	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "mismatch") || strings.Contains(err.Error(), "already exists") {
+	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "mismatch") || strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "not a regular file") || strings.Contains(err.Error(), "can be deleted") {
 		status = http.StatusBadRequest
 	}
 	writeErrorStatus(w, err, status)
@@ -574,10 +729,7 @@ func writeErrorStatus(w http.ResponseWriter, err error, status int) {
 }
 
 func actor(r *http.Request) string {
-	if value := strings.TrimSpace(r.Header.Get("X-Local-Actor")); value != "" {
-		return value
-	}
-	return "local-web"
+	return "admin-web"
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
@@ -586,7 +738,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 		if origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Local-Actor")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {

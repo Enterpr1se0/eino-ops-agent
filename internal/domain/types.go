@@ -110,12 +110,23 @@ type ModelCatalog struct {
 const DefaultAgentMaxIterations = 20
 
 type SystemSettings struct {
-	AgentMaxIterations int       `json:"agent_max_iterations"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	AgentMaxIterations          int       `json:"agent_max_iterations"`
+	SubagentReviewsEnabled      bool      `json:"subagent_reviews_enabled"`
+	BeginnerExplanationsEnabled bool      `json:"beginner_explanations_enabled"`
+	UpdatedAt                   time.Time `json:"updated_at"`
 }
 
 type SystemSettingsInput struct {
-	AgentMaxIterations int `json:"agent_max_iterations"`
+	AgentMaxIterations          int   `json:"agent_max_iterations"`
+	SubagentReviewsEnabled      *bool `json:"subagent_reviews_enabled,omitempty"`
+	BeginnerExplanationsEnabled *bool `json:"beginner_explanations_enabled,omitempty"`
+}
+
+type WebSession struct {
+	TokenHash string    `json:"-"`
+	CSRFToken string    `json:"csrf_token"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type ChatSession struct {
@@ -152,10 +163,13 @@ type AgentPlanStep struct {
 type ExecMode string
 
 const (
-	ExecProgram  ExecMode = "program"
-	ExecScript   ExecMode = "script"
-	ExecUpload   ExecMode = "upload"
-	ExecDownload ExecMode = "download"
+	ExecProgram         ExecMode = "program"
+	ExecScript          ExecMode = "script"
+	ExecWorkspaceRead   ExecMode = "workspace_read"
+	ExecWorkspaceList   ExecMode = "workspace_list"
+	ExecWorkspaceSearch ExecMode = "workspace_search"
+	ExecWorkspacePatch  ExecMode = "workspace_patch"
+	ExecWorkspaceUpload ExecMode = "workspace_upload"
 )
 
 type ExecRequest struct {
@@ -171,17 +185,28 @@ type ExecRequest struct {
 	Reason          string            `json:"reason" jsonschema:"why this command is necessary"`
 	ExpectedChanges string            `json:"expected_changes,omitempty" jsonschema:"expected server changes"`
 	Rollback        string            `json:"rollback,omitempty" jsonschema:"rollback instructions for mutations"`
-	ArtifactName    string            `json:"artifact_name,omitempty" jsonschema:"safe local artifact name managed by OpsPilot"`
 	RemotePath      string            `json:"remote_path,omitempty" jsonschema:"absolute remote file path for transfers"`
+	WorkspaceID     string            `json:"workspace_id,omitempty" jsonschema:"registered workspace identifier"`
+	RelativePath    string            `json:"relative_path,omitempty" jsonschema:"path relative to the workspace root"`
+	ExpectedSHA256  string            `json:"expected_sha256,omitempty" jsonschema:"workspace file version observed before mutation"`
+	Validator       string            `json:"validator,omitempty" jsonschema:"allowlisted validator identifier"`
+	SearchPattern   string            `json:"search_pattern,omitempty" jsonschema:"literal workspace search pattern"`
+	OffsetBytes     int64             `json:"offset_bytes,omitempty" jsonschema:"bounded file read offset"`
+	MaxBytes        int               `json:"max_bytes,omitempty" jsonschema:"bounded file read length"`
+	LocalPath       string            `json:"-"`
 }
 
-type Artifact struct {
-	Name      string    `json:"name"`
-	Size      int64     `json:"size"`
-	CreatedAt time.Time `json:"created_at"`
+type ToolMeta struct {
+	ToolVersion string `json:"tool_version,omitempty"`
+	OK          bool   `json:"ok"`
+	Code        string `json:"code,omitempty"`
+	Message     string `json:"message,omitempty"`
+	Retryable   bool   `json:"retryable,omitempty"`
+	NextAction  string `json:"next_action,omitempty"`
 }
 
 type ExecResult struct {
+	ToolMeta
 	RunID               string        `json:"run_id"`
 	Status              string        `json:"status"`
 	Risk                RiskLevel     `json:"risk"`
@@ -195,6 +220,38 @@ type ExecResult struct {
 	Duration            time.Duration `json:"duration,omitempty"`
 	PolicyHits          []string      `json:"policy_hits,omitempty"`
 	CompletedAt         time.Time     `json:"completed_at,omitempty"`
+	File                *FileMetadata `json:"file,omitempty"`
+}
+
+type FileMetadata struct {
+	OperationID   string `json:"operation_id,omitempty"`
+	Path          string `json:"path"`
+	Size          int64  `json:"size,omitempty"`
+	Mode          string `json:"mode,omitempty"`
+	Owner         string `json:"owner,omitempty"`
+	Group         string `json:"group,omitempty"`
+	ModifiedUnix  int64  `json:"modified_unix,omitempty"`
+	SHA256        string `json:"sha256,omitempty"`
+	BeforeSHA256  string `json:"before_sha256,omitempty"`
+	BackupPath    string `json:"backup_path,omitempty"`
+	Validator     string `json:"validator,omitempty"`
+	ValidationOK  bool   `json:"validation_ok,omitempty"`
+	Sensitive     bool   `json:"sensitive,omitempty"`
+	OffsetBytes   int64  `json:"offset_bytes,omitempty"`
+	ReturnedBytes int    `json:"returned_bytes,omitempty"`
+}
+
+type FileOperation struct {
+	ID           string    `json:"id"`
+	RunID        string    `json:"run_id"`
+	HostID       string    `json:"host_id"`
+	Path         string    `json:"path"`
+	BackupPath   string    `json:"backup_path"`
+	BeforeSHA256 string    `json:"before_sha256"`
+	AfterSHA256  string    `json:"after_sha256"`
+	Validator    string    `json:"validator,omitempty"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type Decision struct {
@@ -204,44 +261,86 @@ type Decision struct {
 	RuleHits []string       `json:"rule_hits"`
 }
 
+type CommandReviewInput struct {
+	Request       ExecRequest    `json:"request"`
+	Policy        Decision       `json:"policy"`
+	Host          HostCapability `json:"host"`
+	PlanStep      string         `json:"plan_step,omitempty"`
+	RequestDigest string         `json:"request_digest"`
+	BeginnerMode  bool           `json:"beginner_mode"`
+}
+
+type CommandExplanation struct {
+	Summary       string   `json:"summary"`
+	Mechanism     string   `json:"mechanism"`
+	Effects       []string `json:"effects"`
+	Risks         []string `json:"risks"`
+	BeginnerTips  []string `json:"beginner_tips"`
+	RollbackGuide string   `json:"rollback_guide"`
+}
+
+type AIRiskReview struct {
+	Risk             RiskLevel `json:"risk"`
+	Recommendation   string    `json:"recommendation"`
+	Confidence       float64   `json:"confidence"`
+	Reasons          []string  `json:"reasons"`
+	MissingEvidence  []string  `json:"missing_evidence"`
+	RequiredControls []string  `json:"required_controls"`
+}
+
+type CommandReview struct {
+	Status            string              `json:"status"`
+	Model             string              `json:"model,omitempty"`
+	DeterministicRisk RiskLevel           `json:"deterministic_risk"`
+	EffectiveRisk     RiskLevel           `json:"effective_risk"`
+	Explanation       *CommandExplanation `json:"explanation,omitempty"`
+	RiskReview        *AIRiskReview       `json:"risk_review,omitempty"`
+	Errors            []string            `json:"errors,omitempty"`
+	ReviewedAt        time.Time           `json:"reviewed_at"`
+}
+
 type Run struct {
-	ID             string    `json:"id"`
-	SessionID      string    `json:"session_id,omitempty"`
-	HostID         string    `json:"host_id"`
-	RequestJSON    string    `json:"request_json"`
-	RequestCipher  string    `json:"-"`
-	RequestDigest  string    `json:"request_digest"`
-	Risk           RiskLevel `json:"risk"`
-	Status         string    `json:"status"`
-	ExitCode       int       `json:"exit_code"`
-	StdoutRedacted string    `json:"stdout_redacted,omitempty"`
-	StderrRedacted string    `json:"stderr_redacted,omitempty"`
-	StdoutCipher   string    `json:"-"`
-	StderrCipher   string    `json:"-"`
-	Truncated      bool      `json:"truncated"`
-	Error          string    `json:"error,omitempty"`
-	StartedAt      time.Time `json:"started_at"`
-	CompletedAt    time.Time `json:"completed_at,omitempty"`
+	ID             string         `json:"id"`
+	SessionID      string         `json:"session_id,omitempty"`
+	HostID         string         `json:"host_id"`
+	RequestJSON    string         `json:"request_json"`
+	RequestCipher  string         `json:"-"`
+	RequestDigest  string         `json:"request_digest"`
+	Risk           RiskLevel      `json:"risk"`
+	Status         string         `json:"status"`
+	ExitCode       int            `json:"exit_code"`
+	StdoutRedacted string         `json:"stdout_redacted,omitempty"`
+	StderrRedacted string         `json:"stderr_redacted,omitempty"`
+	StdoutCipher   string         `json:"-"`
+	StderrCipher   string         `json:"-"`
+	Truncated      bool           `json:"truncated"`
+	Error          string         `json:"error,omitempty"`
+	AIReviewJSON   string         `json:"-"`
+	AIReview       *CommandReview `json:"ai_review,omitempty"`
+	StartedAt      time.Time      `json:"started_at"`
+	CompletedAt    time.Time      `json:"completed_at,omitempty"`
 }
 
 type Approval struct {
-	ID            string    `json:"id"`
-	RunID         string    `json:"run_id"`
-	SessionID     string    `json:"session_id,omitempty"`
-	HostID        string    `json:"host_id"`
-	RequestJSON   string    `json:"request_json"`
-	RequestCipher string    `json:"-"`
-	RequestDigest string    `json:"request_digest"`
-	Risk          RiskLevel `json:"risk"`
-	Status        string    `json:"status"`
-	Challenge     string    `json:"challenge,omitempty"`
-	Reason        string    `json:"reason,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	ExpiresAt     time.Time `json:"expires_at"`
-	DecidedAt     time.Time `json:"decided_at,omitempty"`
+	ID            string         `json:"id"`
+	RunID         string         `json:"run_id"`
+	SessionID     string         `json:"session_id,omitempty"`
+	HostID        string         `json:"host_id"`
+	RequestJSON   string         `json:"request_json"`
+	RequestCipher string         `json:"-"`
+	RequestDigest string         `json:"request_digest"`
+	Risk          RiskLevel      `json:"risk"`
+	Status        string         `json:"status"`
+	Challenge     string         `json:"challenge,omitempty"`
+	Reason        string         `json:"reason,omitempty"`
+	AIReview      *CommandReview `json:"ai_review,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	ExpiresAt     time.Time      `json:"expires_at"`
+	DecidedAt     time.Time      `json:"decided_at,omitempty"`
 }
 
 type Task struct {
+	ToolMeta
 	ID        string    `json:"id"`
 	RunID     string    `json:"run_id"`
 	HostID    string    `json:"host_id"`

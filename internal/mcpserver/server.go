@@ -32,72 +32,135 @@ func New(svc *service.Service, version string) *Server {
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_exec", Description: "Execute one remote program with separate arguments through deterministic policy, approval, and audit controls."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ExecInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := svc.Submit(ctx, execRequest(input), "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_run_script", Description: "Analyze and run a Bash script. State changes return approval_required without executing."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ScriptInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := svc.Submit(ctx, scriptRequest(input), "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_start", Description: "Start a cancellable long-running SSH command."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ExecInput) (*mcp.CallToolResult, domain.Task, error) {
 			output, err := svc.StartTask(ctx, execRequest(input), "mcp-client")
+			output, err = agent.NormalizeTaskStart(output, err)
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_status", Description: "Read task status and bounded redacted output."},
 		func(_ context.Context, _ *mcp.CallToolRequest, input agent.TaskInput) (*mcp.CallToolResult, agent.TaskOutput, error) {
 			task, result, taskErr, err := svc.GetTask(input.TaskID)
-			return nil, agent.TaskOutput{Task: task, Result: result, Error: taskErr}, err
+			output, err := agent.TaskToolOutput(task, result, taskErr, err)
+			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_tail", Description: "Read the latest bounded redacted output accumulated by a running SSH task."},
 		func(_ context.Context, _ *mcp.CallToolRequest, input agent.TaskInput) (*mcp.CallToolResult, agent.TaskOutput, error) {
 			task, result, taskErr, err := svc.GetTask(input.TaskID)
-			return nil, agent.TaskOutput{Task: task, Result: result, Error: taskErr}, err
+			output, err := agent.TaskToolOutput(task, result, taskErr, err)
+			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_cancel", Description: "Cancel a running SSH task."},
 		func(_ context.Context, _ *mcp.CallToolRequest, input agent.TaskInput) (*mcp.CallToolResult, map[string]any, error) {
 			err := svc.CancelTask(input.TaskID, "mcp-client")
-			return nil, map[string]any{"task_id": input.TaskID, "cancelled": err == nil}, err
+			if err != nil {
+				return nil, map[string]any{"tool_version": "1.1", "ok": false, "code": "not_running", "message": err.Error(), "task_id": input.TaskID, "cancelled": false}, nil
+			}
+			return nil, map[string]any{"tool_version": "1.1", "ok": true, "code": "cancelled", "task_id": input.TaskID, "cancelled": true}, nil
+		})
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_list", Description: "List persisted recent SSH tasks."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, agent.TaskListOutput, error) {
+			tasks, err := svc.ListTasks(ctx, 50)
+			output := agent.TaskListOutput{Tasks: tasks}
+			output.ToolVersion = "1.1"
+			output.OK = err == nil
+			if err != nil {
+				output.Code, output.Message = "unavailable", err.Error()
+				return nil, output, nil
+			}
+			output.Code = "completed"
+			return nil, output, nil
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read a bounded remote file. Credential paths are denied."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileReadInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.ReadFile(ctx, input.HostID, input.Path, input.MaxBytes, "mcp-client")
+			output, err := svc.ReadFileAdvanced(ctx, input.HostID, input.Path, input.MaxBytes, input.OffsetBytes, input.TailLines, input.Elevated, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
+			return nil, output, err
+		})
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_search", Description: "Search bounded literal matches in one remote file."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileSearchInput) (*mcp.CallToolResult, domain.ExecResult, error) {
+			output, err := svc.SearchFile(ctx, input.HostID, input.Path, input.Pattern, input.ContextLines, input.MaxMatches, input.Elevated, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_list", Description: "List a remote directory without changing it."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileListInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := svc.ListFiles(ctx, input.HostID, input.Path, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_write", Description: "Request replacement of a remote file. Exact content requires human approval."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileWriteInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.WriteFile(ctx, input.HostID, input.Path, input.Content, input.Elevated, input.Reason, input.Rollback, "mcp-client")
+			output, err := svc.ApplyRemoteConfig(ctx, input.HostID, input.Path, input.Content, "", input.ExpectedSHA256, input.Validator, input.Elevated, input.Reason, input.Rollback, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_stat", Description: "Inspect metadata for one remote file."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileListInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := svc.StatFile(ctx, input.HostID, input.Path, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_apply_patch", Description: "Apply an exact unified diff after human approval."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FilePatchInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.ApplyPatch(ctx, input.HostID, input.Cwd, input.Patch, input.Elevated, input.Reason, input.Rollback, "mcp-client")
+			output, err := svc.ApplyPatchChecked(ctx, input.HostID, input.Cwd, input.Patch, input.ExpectedSHA256, input.Validator, input.Elevated, input.Reason, input.Rollback, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_upload", Description: "Upload a named local artifact through approved SFTP."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.TransferInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.UploadArtifact(ctx, input.HostID, input.ArtifactName, input.RemotePath, input.Reason, input.Rollback, "mcp-client")
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_config_apply", Description: "Atomically replace or patch one remote configuration with conflict detection, backup, validation, and rollback."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ConfigApplyInput) (*mcp.CallToolResult, domain.ExecResult, error) {
+			output, err := svc.ApplyRemoteConfigVersioned(ctx, input.HostID, input.Path, input.Content, input.Patch, input.ExpectedSHA256, input.Validator, input.Elevated, input.Reason, input.Rollback, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_download", Description: "Download a remote file into a named local artifact through approved SFTP."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.TransferInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.DownloadArtifact(ctx, input.HostID, input.RemotePath, input.ArtifactName, input.Reason, "mcp-client")
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_config_restore", Description: "Restore the protected backup from an audited configuration operation."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileRestoreInput) (*mcp.CallToolResult, domain.ExecResult, error) {
+			output, err := svc.RestoreRemoteConfig(ctx, input.OperationID, input.Elevated, input.Reason, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ops_artifact_list", Description: "List artifacts available for approved upload or created by approved download."},
-		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, agent.ArtifactListOutput, error) {
-			items, err := svc.ListArtifacts()
-			return nil, agent.ArtifactListOutput{Artifacts: items}, err
+	mcp.AddTool(server, &mcp.Tool{Name: "workspace_list", Description: "List allowlisted local workspaces without disclosing their host paths."},
+		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, agent.WorkspaceListOutput, error) {
+			return nil, agent.WorkspaceListOutput{Workspaces: svc.ListWorkspaceCapabilities()}, nil
+		})
+	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_list", Description: "List a directory inside an allowlisted workspace."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspacePathInput) (*mcp.CallToolResult, domain.ExecResult, error) {
+			output, err := svc.ListWorkspaceFiles(ctx, input.WorkspaceID, input.Path, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
+			return nil, output, err
+		})
+	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_read", Description: "Read a bounded workspace file with SHA256 metadata."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspaceReadInput) (*mcp.CallToolResult, domain.ExecResult, error) {
+			output, err := svc.ReadWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.MaxBytes, input.OffsetBytes, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
+			return nil, output, err
+		})
+	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_search", Description: "Search literal text in a bounded workspace file."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspaceSearchInput) (*mcp.CallToolResult, domain.ExecResult, error) {
+			output, err := svc.SearchWorkspace(ctx, input.WorkspaceID, input.Path, input.Pattern, input.MaxMatches, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
+			return nil, output, err
+		})
+	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_apply_patch", Description: "Apply an approved, version-bound patch inside a read_write workspace."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspacePatchInput) (*mcp.CallToolResult, domain.ExecResult, error) {
+			output, err := svc.ApplyWorkspacePatch(ctx, input.WorkspaceID, input.Path, input.Patch, input.ExpectedSHA256, input.Validator, input.Reason, input.Rollback, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
+			return nil, output, err
+		})
+	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_upload", Description: "Upload one SHA256-bound Workspace file directly to a registered SSH host through approved SFTP."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspaceUploadInput) (*mcp.CallToolResult, domain.ExecResult, error) {
+			output, err := svc.UploadWorkspaceFileToHost(ctx, input.HostID, input.WorkspaceID, input.Path, input.ExpectedSHA256, input.RemotePath, input.Reason, input.Rollback, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
+			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_history_search", Description: "Search previous commands and redacted outputs."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.HistorySearchInput) (*mcp.CallToolResult, agent.HistorySearchOutput, error) {

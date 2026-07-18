@@ -11,7 +11,11 @@ LLM、Prompt、Skill、远程输出和 MCP Client 都不属于可信计算基。
 5. 仅在实际执行前解密所需 SSH/sudo 密码，获取并发令牌，通过 OpenSSH Transport 执行。
 6. 加密原始请求和输出，生成脱敏视图并追加审计事件。
 
-Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。
+Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。预期失败被规范化为带 `code/retryable/next_action` 的 Tool 结果；只有上下文取消或内部持久化损坏会成为 ToolNode fatal error。
+
+Web/API 位于单管理员认证边界之后。首次密码由环境变量初始化为 Argon2id 哈希；后续请求使用只保存哈希的服务端 Session、HttpOnly/SameSite Cookie 和 CSRF Token。MCP stdio 与 CLI 仍属于本机进程边界，不复用浏览器 Cookie。
+
+对于确定性 Policy 已判为 Change 或 Critical 的请求，Service 在创建审批前调用 `CommandExplainerAgent` 与 `RiskReviewerAgent`。它们是两个独立的 Eino `ChatModelAgent`/Runner，`MaxIterations=1`、无 Tool，并行返回严格 JSON。解释 Agent 负责面向初学者说明机制、影响、风险和回滚；风险 Agent 负责给出风险、置信度、判断依据、缺失证据与必要控制。Service 会覆盖模型声称的 deterministic risk，拒绝任何降级结果，只接受从 Change 到 Critical 的单向升级。模型建议永远不能变成 allow，也不能绕过 Policy、challenge 或用户审批；评审失败按 degraded/unavailable 持久化并继续走原审批路径。
 
 ## Packages
 
@@ -30,6 +34,14 @@ Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。
 `ssh_exec` 接收 program 与 args，服务对每个参数进行 POSIX 单引号编码。Go 使用 `exec.CommandContext` 参数数组启动本地 `ssh`，不经过本地 shell。
 
 `ssh_run_script` 将脚本通过 stdin 传给远端 `bash -se`。脚本先由 `mvdan.cc/sh` 完整解析；解析失败、命令替换、动态执行、下载后管道到 shell 等模式会升级为 Critical。
+
+无 PTY 的交互式 Shell、编辑器与 `systemctl edit` 会在 Service 层拒绝；apt/dnf/yum/pacman 的变更操作必须显式提供对应非交互参数。脚本、argv、环境和路径还有独立大小与格式上限，检测到秘密的环境变量不会进入执行请求。
+
+## Transactional files and Workspace
+
+`ssh_file_read` 在同一次受审计操作中返回有界内容、mode/owner/mtime 与 SHA256。`ssh_config_apply` 把 expected SHA256、目标内容或单文件 diff、validator 和回滚绑定进审批摘要；执行时重新验证版本，在同目录写入并同步临时文件，保存 `0600` 备份，运行白名单 argv validator，原子 rename，并在后置校验失败时恢复。成功操作写入 `file_operations`，`ssh_config_restore` 只能引用该 ID。
+
+Workspace 根只能来自启动配置。未声明显式列表时，控制面创建启动目录下的 `workspace/` 并注册为 `default/read_write`；可通过启动配置或环境变量改位置，也可显式关闭。受 Cookie/CSRF 保护的管理员 API 可以显示真实根目录、上传、预览和删除文件，但 LLM 的 `workspace_list` 使用独立的安全能力视图，不包含根路径。上传限制为 100 MiB，拒绝敏感路径和覆盖，通过同目录临时文件、`fsync` 与原子 hard-link 提交；预览限制为 1 MiB 并识别二进制内容；Web 删除使用原子重命名移动到不可浏览的 `.opspilot-trash`，保留摘要与审计证据供人工恢复。Workspace 文件到远端只使用 `workspace_file_upload`：审批同时绑定 Workspace ID、相对路径、读取所得 SHA256、目标主机和远端路径，执行前重新解析白名单路径并校验 SHA256，绝对本地路径通过 `json:"-"` 的内部字段传给 OpenSSH transport。每个 Workspace 使用隐藏的受管目标复用 Run/Approval/Audit 状态机，但模型读写由 Go 文件 API 完成；真实路径、符号链接越界、`.env*`、`.ssh`、控制面 `.data` 等不会暴露给模型。唯一可能启动的本地子进程是配置中固定的 workspace validator，使用 `exec.CommandContext` argv、固定环境与超时，不经过 Shell。
 
 密钥和 ssh-agent 连接固定启用批处理模式：
 
@@ -59,13 +71,13 @@ Critical 审批除摘要外还需要动态 challenge 和原因。审批写入后
 
 Eino Agent 请求会在 context 中启用 blocking approval。Service 创建审批后先通过 SSE notifier 立即通知 Web，再让原 Tool goroutine 轮询持久化的 approval/run 状态；批准接口负责执行精确载荷，完成后结果回到原 Tool Call，拒绝说明则以 `operator_instruction` 回到模型。CLI、MCP 和直接 HTTP 执行保持非阻塞的 `approval_required` 返回契约。等待期间每 15 秒发送一次 SSE approval heartbeat。
 
-HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消信号的后台 context，并额外施加 30 分钟上限。浏览器断开后只停止 SSE 写入，原 Agent/Tool goroutine 继续等待审批；Runtime 按 session ID 记录 active 状态并拒绝同会话并发运行。Web 刷新后通过 `GET /api/v1/chat/{id}/state` 同步 active 状态和持久化消息，直到原循环完成。活动会话不能删除。该机制覆盖页面刷新和临时网络中断，不承诺跨服务进程重启恢复内存中的 Agent Loop。
+HTTP Chat Handler 使用保留 request logger/value、但移除浏览器取消信号的后台 context，并额外施加 30 分钟上限。浏览器断开后只停止 SSE 写入，原 Agent/Tool goroutine 继续等待审批；Runtime 按 session ID 记录 active 状态并拒绝同会话并发运行。Web 刷新后通过 `GET /api/v1/chat/{id}/state` 同步 active 状态和持久化消息，直到原循环完成。活动会话不能删除。该机制覆盖页面刷新和临时网络中断，不承诺跨服务进程重启恢复内存中的 Agent Loop。独立 SSH Task 的元数据与有界输出会持久化；重启时仍处于活动态的旧进程无法重新附着，会被恢复流程明确标记为 `interrupted`。
 
 ## Sequential task plans
 
 复杂任务通过 Eino 专用的 `ops_plan_create`、`ops_plan_get` 和 `ops_plan_step_update` 三个强类型 Tool 编排。计划和步骤分别写入 `agent_plans`、`agent_plan_steps`，session ID 只取可信 Go context，模型不能为其他会话读写计划。创建时只允许 2–8 个不重复步骤，第一步自动进入 `in_progress`；Store 在单个 SQLite 事务中只接受当前步骤的 `completed` 或 `blocked` 转移，完成后自动激活下一步，因而数据库层始终最多只有一个进行中步骤。
 
-计划创建与每次状态转移均写入审计。Chat state 同时返回消息、后台运行状态和最新计划，Web 使用同一恢复轮询展示总进度、当前步骤与完成证据。Agent Loop 达到迭代上限不会删除计划；下一条 `continue` 可调用 `ops_plan_get` 继续当前步骤。计划是编排状态而非额外权限，所有 SSH Tool 仍独立通过 Policy、审批和加密审计。
+计划创建与每次状态转移均写入审计。Chat state 同时返回消息、后台运行状态和最新计划，Web 使用同一恢复轮询展示总进度、当前步骤与完成证据。Agent Loop 达到迭代上限不会删除计划；下一条 `continue` 可调用 `ops_plan_get` 继续当前步骤。旧会话或简单会话没有计划时，`ops_plan_get` 返回可恢复的 `found:false`，而不是用 `ErrNotFound` 中止 Eino ToolNode。计划是编排状态而非额外权限，所有 SSH Tool 仍独立通过 Policy、审批和加密审计。
 
 ## Audit storage
 

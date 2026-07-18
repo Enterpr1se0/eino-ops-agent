@@ -1,0 +1,121 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"eino-ops-agent/internal/config"
+	"eino-ops-agent/internal/domain"
+	"eino-ops-agent/internal/policy"
+	"eino-ops-agent/internal/security"
+	"eino-ops-agent/internal/service"
+	"eino-ops-agent/internal/store"
+
+	"github.com/cloudwego/eino/components/tool"
+)
+
+func TestPlanGetToolTreatsMissingPlanAsRecoverableState(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/tools.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, err := policy.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	tools, err := BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var planTool tool.InvokableTool
+	for _, candidate := range tools {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "ops_plan_get" {
+			planTool = candidate.(tool.InvokableTool)
+			break
+		}
+	}
+	if planTool == nil {
+		t.Fatal("ops_plan_get tool was not registered")
+	}
+
+	sessionCtx := service.WithSessionID(ctx, "session_without_plan")
+	resultJSON, err := planTool.InvokableRun(sessionCtx, `{}`)
+	if err != nil {
+		t.Fatalf("a missing optional plan aborted the ToolNode: %v", err)
+	}
+	var missing PlanGetOutput
+	if err := json.Unmarshal([]byte(resultJSON), &missing); err != nil {
+		t.Fatal(err)
+	}
+	if missing.Found || missing.Plan != nil || missing.Guidance == "" {
+		t.Fatalf("unexpected missing-plan result: %#v", missing)
+	}
+
+	created, err := svc.CreateAgentPlan(sessionCtx, "Diagnose the service", []string{"Collect evidence", "Verify the cause"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultJSON, err = planTool.InvokableRun(sessionCtx, `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found PlanGetOutput
+	if err := json.Unmarshal([]byte(resultJSON), &found); err != nil {
+		t.Fatal(err)
+	}
+	if !found.Found || found.Plan == nil || found.Plan.SessionID != created.SessionID || len(found.Plan.Steps) != 2 {
+		t.Fatalf("existing plan was not returned: %#v", found)
+	}
+}
+
+func TestExecutionToolReturnsStructuredNotFoundWithoutAbortingToolNode(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/tools.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	tools, err := BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var execTool tool.InvokableTool
+	for _, candidate := range tools {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "ssh_exec" {
+			execTool = candidate.(tool.InvokableTool)
+		}
+	}
+	resultJSON, err := execTool.InvokableRun(ctx, `{"host_id":"missing","program":"id","reason":"inspect identity"}`)
+	if err != nil {
+		t.Fatalf("expected not_found Tool result, got fatal error: %v", err)
+	}
+	var result domain.ExecResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.Code != "not_found" || result.Retryable {
+		t.Fatalf("unexpected structured failure: %#v", result)
+	}
+}

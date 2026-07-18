@@ -1,8 +1,36 @@
 listen_address: 0.0.0.0:8080
 data_dir: .data
 database_path: .data/ops-agent.db
-artifacts_dir: .data/artifacts
 policy_path: configs/policy.yaml
+
+web_auth:
+  # Set OPS_AGENT_ADMIN_PASSWORD for the first authenticated start. The
+  # plaintext password is never persisted. Enable this when served over HTTPS.
+  secure_cookies: false
+
+# When workspaces is empty, OpsPilot creates this directory relative to its
+# startup working directory and exposes it as read_write Workspace "default".
+# Set it to "" to disable the automatic Workspace, or override it with
+# OPS_AGENT_DEFAULT_WORKSPACE.
+default_workspace_dir: workspace
+
+# Explicit absolute roots available to workspace_* tools. Defining one or more
+# entries replaces the automatic default. These cannot be changed in Web.
+workspaces: []
+# Example:
+#  - id: demo-app
+#    root: /srv/opspilot-workspaces/demo-app
+#    access: read_write
+
+# Validators are argv templates, never shell snippets. {{path}} is substituted
+# as one quoted remote argument or one local exec.Command argument.
+validators:
+  - id: nginx
+    scope: remote
+    program: nginx
+    args: ["-t", "-c", "{{path}}"]
+    timeout_seconds: 15
+    path_patterns: ["/etc/nginx/**"]
 
 logging:
   level: info # use debug for detailed HTTP, Agent, policy, and SSH lifecycle logs

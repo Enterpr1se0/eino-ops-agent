@@ -2,11 +2,11 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 're
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  Activity, Bot, BrainCircuit, Check, ChevronRight, CircleDot, Clock3, Cpu, Edit3, FileText, History, KeyRound,
-  ListChecks, LoaderCircle, Plus, RefreshCw, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, TerminalSquare, Trash2, X, Zap,
+  Activity, Bot, BrainCircuit, Check, ChevronRight, CircleDot, Clock3, Cpu, Edit3, FileText, FolderOpen, History, KeyRound, LockKeyhole, LogOut,
+  ListChecks, LoaderCircle, Plus, RefreshCw, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, TerminalSquare, Trash2, UploadCloud, X, Zap,
 } from 'lucide-react'
 import { api, streamChat } from './api'
-import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, Health, Host, HostAuthType, HostInput, HostSudoMode, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings } from './types'
+import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, ToolCapabilities, WorkspaceCapability, WorkspaceFilePreview } from './types'
 
 type Page = 'chat' | 'config' | 'audit' | 'logs'
 type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; active?: boolean }
@@ -16,7 +16,7 @@ function historyEntries(messages:ChatMessage[]):ChatEntry[]{
 }
 
 function planFromToolContent(content:string):AgentPlan|null{
-  try{const value=JSON.parse(content) as AgentPlan;return value&&typeof value.goal==='string'&&Array.isArray(value.steps)?value:null}catch{return null}
+  try{const value=JSON.parse(content) as AgentPlan&{found?:boolean;plan?:AgentPlan};const plan=value?.plan||value;return plan&&typeof plan.goal==='string'&&Array.isArray(plan.steps)?plan:null}catch{return null}
 }
 
 let clientIdCounter = 0
@@ -47,25 +47,31 @@ function rememberSession(id: string) { try { localStorage.setItem('opspilot.acti
 function recalledSession() { try { return localStorage.getItem('opspilot.activeSession') || '' } catch { return '' } }
 
 function App() {
+	const [auth,setAuth]=useState<'checking'|'authenticated'|'guest'>('checking')
   const [page, setPage] = useState<Page>('chat')
   const [health, setHealth] = useState<Health | null>(null)
   const [hosts, setHosts] = useState<Host[]>([])
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const [settings, setSettings] = useState<SystemSettings | null>(null)
+	const [capabilities,setCapabilities]=useState<ToolCapabilities>({workspaces:[]})
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [runs, setRuns] = useState<Run[]>([])
   const [error, setError] = useState('')
 
   const refresh = useCallback(async () => {
     try {
-      const [nextHealth, nextHosts, nextProviders, nextSettings, nextApprovals, nextRuns] = await Promise.all([
-        api.health(), api.hosts(), api.modelProviders(), api.systemSettings(), api.approvals(), api.runs(),
+	  const [nextHealth, nextHosts, nextProviders, nextSettings, nextCapabilities, nextApprovals, nextRuns] = await Promise.all([
+		api.health(), api.hosts(), api.modelProviders(), api.systemSettings(), api.capabilities(), api.approvals(), api.runs(),
       ])
-      setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setSettings(nextSettings); setApprovals(nextApprovals); setRuns(nextRuns); setError('')
-    } catch (err) { setError(errorText(err)) }
+	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setSettings(nextSettings);setCapabilities(nextCapabilities); setApprovals(nextApprovals); setRuns(nextRuns); setError('')
+	} catch (err) { const message=errorText(err);if(/authentication required/i.test(message))setAuth('guest');setError(message) }
   }, [])
 
-  useEffect(() => { refresh(); const timer = window.setInterval(refresh, 10000); return () => window.clearInterval(timer) }, [refresh])
+	useEffect(()=>{api.authSession().then(()=>setAuth('authenticated')).catch(()=>setAuth('guest'))},[])
+	useEffect(() => { if(auth!=='authenticated')return;refresh(); const timer = window.setInterval(refresh, 10000); return () => window.clearInterval(timer) }, [auth,refresh])
+
+	if(auth==='checking')return <div className="auth-screen"><div className="auth-loading"><LoaderCircle className="spin" size={25}/><span>Securing control plane…</span></div></div>
+	if(auth==='guest')return <LoginPage onAuthenticated={()=>setAuth('authenticated')}/>
 
   const title = { chat: 'Agent Workspace', config: 'Configuration Center', audit: 'Audit Explorer', logs: 'Server Logs' }[page]
 
@@ -80,6 +86,7 @@ function App() {
       </nav>
       <div className="sidebar-foot">
         <div className="security-card"><ShieldCheck size={18}/><div><b>Policy enforced</b><span>Every action is audited</span></div></div>
+		<button className="logout-button" onClick={async()=>{try{await api.logout()}finally{setAuth('guest')}}}><LogOut size={15}/>Sign out</button>
         <div className="build">v0.1.0 · LOCAL MODE</div>
       </div>
     </aside>
@@ -90,8 +97,8 @@ function App() {
       </div></header>
       {error && <div className="global-error"><ShieldAlert size={17}/>{error}<button onClick={() => setError('')}><X size={15}/></button></div>}
       <section className="workspace">
-        {page === 'chat' && <ChatPage hosts={hosts} approvals={approvals} runs={runs} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh}/>} 
-        {page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} settings={settings} health={health} refresh={refresh}/>} 
+		{page === 'chat' && <ChatPage hosts={hosts} approvals={approvals} runs={runs} capabilities={capabilities} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh}/>}
+		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} settings={settings} capabilities={capabilities} health={health} refresh={refresh}/>}
         {page === 'audit' && <AuditPage runs={runs}/>} 
         {page === 'logs' && <LogsPage/>}
       </section>
@@ -99,9 +106,17 @@ function App() {
   </div>
 }
 
+function LoginPage({onAuthenticated}:{onAuthenticated:()=>void}){
+	const [password,setPassword]=useState('')
+	const [busy,setBusy]=useState(false)
+	const [error,setError]=useState('')
+	const submit=async(event:FormEvent)=>{event.preventDefault();setBusy(true);setError('');try{await api.login(password);setPassword('');onAuthenticated()}catch(err){setError(errorText(err))}finally{setBusy(false)}}
+	return <div className="auth-screen"><section className="login-card"><div className="login-mark"><TerminalSquare size={29}/></div><span>OPS PILOT · SECURE CONTROL PLANE</span><h1>Administrator sign in</h1><p>SSH credentials, approvals, logs and workspace operations are protected by the local administrator session.</p><form onSubmit={submit}><label><span>Administrator password</span><div className="login-input"><LockKeyhole size={17}/><input type="password" autoComplete="current-password" value={password} onChange={event=>setPassword(event.target.value)} autoFocus required minLength={12}/></div></label>{error&&<div className="login-error"><ShieldAlert size={15}/>{error}</div>}<button className="primary" disabled={busy||password.length<12}>{busy?<LoaderCircle className="spin" size={17}/>:<ShieldCheck size={17}/>}<span>{busy?'Authenticating…':'Enter control plane'}</span></button></form><small>Initial password: <code>OPS_AGENT_ADMIN_PASSWORD</code></small></section></div>
+}
+
 type ConfigurationSection = 'models' | 'hosts' | 'system'
 
-function ConfigurationPage({hosts,providers,settings,health,refresh}:{hosts:Host[];providers:ModelProvider[];settings:SystemSettings|null;health:Health|null;refresh:()=>Promise<void>}) {
+function ConfigurationPage({hosts,providers,settings,capabilities,health,refresh}:{hosts:Host[];providers:ModelProvider[];settings:SystemSettings|null;capabilities:ToolCapabilities;health:Health|null;refresh:()=>Promise<void>}) {
   const [section,setSection]=useState<ConfigurationSection>('models')
   const tabs:[ConfigurationSection,React.ReactNode,string,string][]=[
     ['models',<Cpu size={17}/>, 'Model providers', `${providers.length} configured`],
@@ -114,37 +129,52 @@ function ConfigurationPage({hosts,providers,settings,health,refresh}:{hosts:Host
     <div className="configuration-content" role="tabpanel">
       {section==='models'&&<ModelsPage providers={providers} health={health} refresh={refresh}/>} 
       {section==='hosts'&&<HostsPage hosts={hosts} refresh={refresh}/>} 
-      {section==='system'&&<SystemSettingsPage settings={settings} refresh={refresh}/>} 
+	  {section==='system'&&<SystemSettingsPage settings={settings} capabilities={capabilities} reviewAgentsAvailable={!!health?.model?.review_agents_available} refresh={refresh}/>}
     </div>
   </div>
 }
 
-function SystemSettingsPage({settings,refresh}:{settings:SystemSettings|null;refresh:()=>Promise<void>}) {
+function SystemSettingsPage({settings,capabilities,reviewAgentsAvailable,refresh}:{settings:SystemSettings|null;capabilities:ToolCapabilities;reviewAgentsAvailable:boolean;refresh:()=>Promise<void>}) {
   const savedValue=settings?.agent_max_iterations??20
+  const savedReviews=settings?.subagent_reviews_enabled??true
+  const savedExplanations=settings?.beginner_explanations_enabled??true
   const [maxIterations,setMaxIterations]=useState(savedValue)
+  const [reviewsEnabled,setReviewsEnabled]=useState(savedReviews)
+  const [explanationsEnabled,setExplanationsEnabled]=useState(savedExplanations)
   const [dirty,setDirty]=useState(false)
   const [saving,setSaving]=useState(false)
   const [notice,setNotice]=useState('')
-  useEffect(()=>{if(!dirty)setMaxIterations(savedValue)},[savedValue,dirty])
+  useEffect(()=>{if(!dirty){setMaxIterations(savedValue);setReviewsEnabled(savedReviews);setExplanationsEnabled(savedExplanations)}},[savedValue,savedReviews,savedExplanations,dirty])
   const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(50,value||5)));setDirty(true);setNotice('')}
-  const save=async(event:FormEvent)=>{event.preventDefault();setSaving(true);try{const result=await api.saveSystemSettings({agent_max_iterations:maxIterations});setMaxIterations(result.agent_max_iterations);setDirty(false);setNotice(`Saved · New Agent runs can use up to ${result.agent_max_iterations} model iterations.`);await refresh()}catch(err){setNotice(errorText(err))}finally{setSaving(false)}}
+  const toggleReviews=(value:boolean)=>{setReviewsEnabled(value);if(!value)setExplanationsEnabled(false);setDirty(true);setNotice('')}
+  const toggleExplanations=(value:boolean)=>{setExplanationsEnabled(value);setDirty(true);setNotice('')}
+  const save=async(event:FormEvent)=>{event.preventDefault();setSaving(true);try{const result=await api.saveSystemSettings({agent_max_iterations:maxIterations,subagent_reviews_enabled:reviewsEnabled,beginner_explanations_enabled:explanationsEnabled});setMaxIterations(result.agent_max_iterations);setReviewsEnabled(result.subagent_reviews_enabled);setExplanationsEnabled(result.beginner_explanations_enabled);setDirty(false);setNotice(`Saved · Agent loop ${result.agent_max_iterations} rounds · Review SubAgents ${result.subagent_reviews_enabled?'enabled':'disabled'}.`);await refresh()}catch(err){setNotice(errorText(err))}finally{setSaving(false)}}
   return <div className="system-settings page-stack">
     <div className="page-actions"><div><p>Agent runtime safeguards</p><span>Runtime changes are persisted locally, audited and applied to new Agent runs without a server restart.</span></div></div>
     {notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
     <form className="settings-panel panel" onSubmit={save}><div className="settings-panel-head"><div className="settings-glyph"><SlidersHorizontal size={20}/></div><div><span>AGENT LOOP</span><h3>Maximum model iterations</h3><p>Limits how many model → tool → model decision rounds a single message may consume.</p></div><strong>{maxIterations}</strong></div>
       <div className="iteration-editor"><input aria-label="Maximum model iterations" type="range" min="5" max="50" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>Rounds</span><input type="number" min="5" max="50" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div>
       <div className="iteration-presets"><span>QUICK PRESETS</span>{[10,20,30].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b><small>{value===10?'Short diagnosis':value===20?'Recommended':'Long deployment'}</small></button>)}</div>
+      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>Approval intelligence</b><p>Two isolated, tool-free Eino agents review commands before the existing human approval gate.</p></div><em className={reviewAgentsAvailable?'ready':'offline'}><CircleDot size={9}/>{reviewAgentsAvailable?'2 runners ready':'model unavailable'}</em></div><label><span><b>Risk reviewer SubAgent</b><small>May maintain or raise risk. It can never approve, execute, or lower deterministic policy.</small></span><input type="checkbox" checked={reviewsEnabled} onChange={event=>toggleReviews(event.target.checked)}/><i/></label><label className={!reviewsEnabled?'disabled':''}><span><b>Beginner command explanation</b><small>Shows effects, risks, practical tips and rollback guidance in the approval dialog.</small></span><input type="checkbox" checked={explanationsEnabled} disabled={!reviewsEnabled} onChange={event=>toggleExplanations(event.target.checked)}/><i/></label></div>
+	  <div className="workspace-capabilities"><div><FileText size={17}/><span><b>Allowlisted Workspaces</b><small>Startup allowlist only. Browse and upload files directly from the Agent conversation.</small></span><em>{capabilities.workspaces.length}</em></div>{capabilities.workspaces.length?capabilities.workspaces.map(workspace=><section className="workspace-summary-row" key={workspace.id}><div><code>{workspace.id}</code><span className={workspace.access}>{workspace.access.replace('_',' ')}</span></div><code title={workspace.root}>{workspace.root}</code><small>{workspace.validators?.length?`validators · ${workspace.validators.join(', ')}`:'no validators'}</small></section>):<p>No local Workspace is exposed. The Agent remains SSH-only.</p>}</div>
       <div className="settings-advice"><ShieldCheck size={17}/><div><b>The safety limit remains enforced</b><p>Higher values support installations and multi-step recovery, but can increase token usage and tool calls. Values are restricted to 5–50.</p></div></div>
-      <div className="settings-footer"><span>{settings?.updated_at?`Last updated ${new Date(settings.updated_at).toLocaleString()}`:'Using system default'}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setDirty(false);setNotice('')}}>Discard</button><button className="primary" disabled={!dirty||saving}>{saving?'Applying…':'Save & apply'}</button></div>
+      <div className="settings-footer"><span>{settings?.updated_at?`Last updated ${new Date(settings.updated_at).toLocaleString()}`:'Using system default'}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setReviewsEnabled(savedReviews);setExplanationsEnabled(savedExplanations);setDirty(false);setNotice('')}}>Discard</button><button className="primary" disabled={!dirty||saving}>{saving?'Applying…':'Save & apply'}</button></div>
     </form>
+	<AdminPasswordPanel/>
   </div>
+}
+
+function AdminPasswordPanel(){
+	const [current,setCurrent]=useState(''),[replacement,setReplacement]=useState(''),[confirmation,setConfirmation]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false)
+	const submit=async(event:FormEvent)=>{event.preventDefault();if(replacement!==confirmation){setNotice('New password confirmation does not match.');return}setBusy(true);setNotice('');try{await api.changePassword(current,replacement);window.location.reload()}catch(err){setNotice(errorText(err))}finally{setBusy(false)}}
+	return <form className="admin-password-panel panel" onSubmit={submit}><div><LockKeyhole size={19}/><span><b>Administrator password</b><small>Changing it revokes every active Web session. CLI recovery uses <code>admin reset-password</code>.</small></span></div><section><label><span>Current</span><input type="password" autoComplete="current-password" value={current} onChange={event=>setCurrent(event.target.value)} required/></label><label><span>New password</span><input type="password" autoComplete="new-password" minLength={12} value={replacement} onChange={event=>setReplacement(event.target.value)} required/></label><label><span>Confirm</span><input type="password" autoComplete="new-password" minLength={12} value={confirmation} onChange={event=>setConfirmation(event.target.value)} required/></label><button className="primary" disabled={busy||replacement.length<12}>{busy?'Changing…':'Change & sign out'}</button></section>{notice&&<p>{notice}</p>}</form>
 }
 
 function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon:React.ReactNode;label:string;count?:number;warn?:boolean;onClick:()=>void}) {
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
 }
 
-function ChatPage({ hosts, approvals, runs, agentAvailable, modelName, refresh }: {hosts:Host[];approvals:Approval[];runs:Run[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>}) {
+function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelName, refresh }: {hosts:Host[];approvals:Approval[];runs:Run[];capabilities:ToolCapabilities;agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>}) {
   const [entries, setEntries] = useState<ChatEntry[]>([])
   const [message, setMessage] = useState('')
   const [sessionId, setSessionId] = useState('')
@@ -156,11 +186,14 @@ function ChatPage({ hosts, approvals, runs, agentAvailable, modelName, refresh }
   const [reasoningSeen, setReasoningSeen] = useState(false)
   const [plan,setPlan]=useState<AgentPlan|null>(null)
   const [approvalNotice,setApprovalNotice]=useState('')
+	const [workspaceID,setWorkspaceID]=useState('')
   const messagesRef=useRef<HTMLDivElement>(null)
   const stickToLatest=useRef(true)
   const hostNames = useMemo(() => hosts.map((host) => host.name).join(', '), [hosts])
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
   const sessionBusy=running||detachedRunning
+	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
+	useEffect(()=>{if(selectedWorkspace&&workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -263,6 +296,7 @@ function ChatPage({ hosts, approvals, runs, agentAvailable, modelName, refresh }
   const streamingResponseStarted=entries.some((item)=>item.id==='streaming'&&item.content!=='')
 
   return <div className="chat-layout">
+	<ChatWorkspacePanel workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} onSelect={setWorkspaceID} refresh={refresh}/>
     <div className="chat-main panel">
       <div className="panel-header"><div><Bot size={18}/><span>OpsPilot session</span></div><span className="session-id">{sessionId ? sessionId.slice(0, 20) : 'NEW SESSION'}</span></div>
       <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} refresh={refresh} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
@@ -275,14 +309,40 @@ function ChatPage({ hosts, approvals, runs, agentAvailable, modelName, refresh }
         {running && !reasoningSeen && !streamingResponseStarted && <div className="thinking"><span/><span/><span/> 等待模型响应</div>}
         {detachedRunning&&!running&&<div className="thinking background-agent"><span/><span/><span/> Agent 正在后台继续执行，刷新页面不会中断</div>}
       </div>
-      <form className="composer" onSubmit={submit}><div className="context-line"><span><Server size={13}/>{hosts.length ? `${hosts.length} hosts: ${hostNames}` : 'No hosts registered'}</span><span><Cpu size={13}/>{modelName || 'No active model'}</span><span><ShieldCheck size={13}/>Guarded execution</span></div><div className="input-row"><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder={!agentAvailable?'Configure and activate a model provider':sessionBusy?'Agent is still running in this conversation…':'Describe an incident or deployment goal…'} disabled={!agentAvailable||sessionBusy} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button disabled={!agentAvailable || sessionBusy || !message.trim()}><Send size={18}/></button></div></form>
+	  <form className="composer" onSubmit={submit}>{sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>LLM 运行中</b></div>}<div className="context-line"><span><Server size={13}/>{hosts.length ? `${hosts.length} hosts: ${hostNames}` : 'No hosts registered'}</span><span className="composer-workspace"><FolderOpen size={13}/>{selectedWorkspace?`Workspace: ${selectedWorkspace.id}`:'No Workspace'}</span>{selectedWorkspace?.access==='read_write'&&<QuickWorkspaceUpload workspace={selectedWorkspace} refresh={refresh}/>}<span><Cpu size={13}/>{modelName || 'No active model'}</span><span><ShieldCheck size={13}/>Guarded execution</span></div><div className="input-row"><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder={!agentAvailable?'Configure and activate a model provider':sessionBusy?'Agent is still running in this conversation…':'Describe an incident or deployment goal…'} disabled={!agentAvailable||sessionBusy} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button disabled={!agentAvailable || sessionBusy || !message.trim()}><Send size={18}/></button></div></form>
     </div>
-    <aside className="context-panel conversation-panel panel"><div className="panel-header"><div><History size={17}/><span>Conversations</span></div><button className="new-chat-button" onClick={newChat} disabled={running} title="New conversation"><Plus size={14}/>New</button></div><div className="session-list">
+	<aside className="context-panel conversation-panel panel"><div className="panel-header"><div><History size={17}/><span>Conversations</span></div><button className="new-chat-button" onClick={newChat} disabled={running} title="New conversation"><Plus size={14}/>New</button></div><div className="session-list">
       {historyError&&<div className="history-error">{historyError}</div>}
       {!sessions.length&&!historyError&&<div className="history-empty">No saved conversations yet.</div>}
       {sessions.map(session=>{const pending=approvals.filter(item=>item.session_id===session.id).length;const active=session.id===sessionId&&detachedRunning;return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>loadSession(session.id)} disabled={running||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{pending} approval</em>}{active&&<em className="session-running-count">running</em>}</b><span>{new Date(session.updated_at).toLocaleString()} · {session.message_count} messages</span></button><button className="session-delete" onClick={()=>removeSession(session)} disabled={running||active} title={active?'Agent is still running':'Delete conversation'}><Trash2 size={13}/></button></div>})}
     </div><div className="session-summary"><Metric label="Saved" value={sessions.length.toString()} tone="green"/><Metric label="Hosts" value={hosts.length.toString()}/></div></aside>
   </div>
+}
+
+function formatFileSize(size:number){if(size<1024)return `${size} B`;if(size<1024*1024)return `${(size/1024).toFixed(1)} KiB`;return `${(size/1024/1024).toFixed(1)} MiB`}
+
+function ChatWorkspacePanel({workspaces,workspaceID,onSelect,refresh}:{workspaces:WorkspaceCapability[];workspaceID:string;onSelect:(id:string)=>void;refresh:()=>Promise<void>}){
+	const workspace=workspaces.find(item=>item.id===workspaceID)||workspaces[0]
+	const [path,setPath]=useState('.'),[entries,setEntries]=useState<{name:string;type:'file'|'directory';size?:number}[]>([]),[loading,setLoading]=useState(false),[error,setError]=useState('')
+	const [file,setFile]=useState<File|null>(null),[target,setTarget]=useState(''),[uploading,setUploading]=useState(false),[notice,setNotice]=useState(''),[inputKey,setInputKey]=useState(0)
+	const [preview,setPreview]=useState<WorkspaceFilePreview|null>(null),[previewLoading,setPreviewLoading]=useState(''),[deleting,setDeleting]=useState('')
+	const load=useCallback(async()=>{if(!workspace)return;setLoading(true);try{const result=await api.workspaceFiles(workspace.id,path);setEntries(result.entries||[]);setError('')}catch(err){setEntries([]);setError(errorText(err))}finally{setLoading(false)}},[workspace,path])
+	useEffect(()=>{setPath('.');setFile(null);setTarget('');setNotice('');setPreview(null)},[workspace?.id])
+	useEffect(()=>{void load()},[load])
+	const choose=(event:React.ChangeEvent<HTMLInputElement>)=>{const selected=event.target.files?.[0]||null;setFile(selected);setTarget(selected?(path==='.'?selected.name:`${path}/${selected.name}`):'');setNotice('')}
+	const upload=async()=>{if(!workspace||!file||!target.trim())return;setUploading(true);setNotice('');try{const result=await api.uploadWorkspaceFile(workspace.id,file,target.trim());setNotice(`Uploaded · ${result.path}`);setFile(null);setTarget('');setInputKey(value=>value+1);await load();await refresh()}catch(err){setNotice(errorText(err))}finally{setUploading(false)}}
+	const openEntry=async(name:string,type:'file'|'directory')=>{const next=path==='.'?name:`${path}/${name}`;if(type==='directory'){setPath(next);return}if(!workspace)return;setPreviewLoading(next);setNotice('');try{setPreview(await api.previewWorkspaceFile(workspace.id,next))}catch(err){setNotice(errorText(err))}finally{setPreviewLoading('')}}
+	const removeEntry=async(name:string)=>{if(!workspace)return;const next=path==='.'?name:`${path}/${name}`;if(!confirm(`Delete “${next}”?\n\nThe file will be moved to OpsPilot's recovery area.`))return;setDeleting(next);setNotice('');try{const result=await api.deleteWorkspaceFile(workspace.id,next);if(preview?.path===next)setPreview(null);setNotice(`Deleted · recoverable as ${result.trash_id}`);await load();await refresh()}catch(err){setNotice(errorText(err))}finally{setDeleting('')}}
+	const up=()=>{if(path==='.')return;const parts=path.split('/');parts.pop();setPath(parts.join('/')||'.')}
+	if(!workspace)return <aside className="workspace-browser-panel panel empty"><div className="panel-header"><div><FolderOpen size={17}/><span>Workspace</span></div></div><div className="workspace-empty"><FolderOpen size={23}/><span>No Workspace configured</span></div></aside>
+	return <><aside className="workspace-browser-panel panel"><div className="panel-header"><div><FolderOpen size={17}/><span>Workspace</span></div>{workspaces.length>1?<select value={workspace.id} onChange={event=>onSelect(event.target.value)}>{workspaces.map(item=><option value={item.id} key={item.id}>{item.id}</option>)}</select>:<code>{workspace.id}</code>}</div><div className="chat-workspace-head"><span><b>Local files</b><small title={workspace.root}>{workspace.root}</small></span><em className={workspace.access}>{workspace.access.replace('_',' ')}</em></div><div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title="Parent directory">‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label title="Upload file"><UploadCloud size={14}/><input key={inputKey} type="file" onChange={choose}/></label>}<button onClick={()=>void load()} title="Refresh files"><RefreshCw size={12}/></button></div>{file&&<div className="chat-upload-row"><input value={target} onChange={event=>setTarget(event.target.value)} aria-label="Relative upload path"/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'…':'Upload'}</button><button onClick={()=>{setFile(null);setTarget('');setInputKey(value=>value+1)}} title="Cancel upload"><X size={11}/></button></div>}<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>Loading</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=path==='.'?entry.name:`${path}/${entry.name}`;return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?'Preview file':'Open directory'}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{entry.type==='file'&&workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>void removeEntry(entry.name)} disabled={deleting===fullPath} title="Delete file"><Trash2 size={12}/></button>}</div>}):<span className="workspace-files-state">This directory is empty. Upload a file here.</span>}</div>{notice&&<div className={`chat-workspace-notice ${notice.startsWith('Uploaded')||notice.startsWith('Deleted')?'success':'error'}`}>{notice}</div>}<div className="workspace-browser-hint"><FileText size={12}/><span>Click a file to preview it. Nothing is added to the conversation automatically.</span></div></aside>{preview&&<div className="workspace-preview-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)setPreview(null)}}><section className="workspace-preview-dialog" role="dialog" aria-modal="true" aria-label={`Preview ${preview.path}`}><header><div><FileText size={18}/><span><b>{preview.path}</b><small>{formatFileSize(preview.size)} · SHA-256 {preview.sha256}</small></span></div><button onClick={()=>setPreview(null)} title="Close preview"><X size={16}/></button></header>{preview.binary?<div className="workspace-binary-preview"><FileText size={30}/><b>Binary file</b><span>This file cannot be rendered as text. Its size and checksum are shown above.</span></div>:<pre>{preview.content||''}</pre>}{preview.truncated&&<footer>Preview is limited to the first 1 MiB. The original file was not modified.</footer>}</section></div>}</>
+}
+
+function QuickWorkspaceUpload({workspace,refresh}:{workspace:WorkspaceCapability;refresh:()=>Promise<void>}){
+	const [busy,setBusy]=useState(false),[status,setStatus]=useState(''),[inputKey,setInputKey]=useState(0)
+	useEffect(()=>{if(status!=='Uploaded')return;const timer=window.setTimeout(()=>setStatus(''),3000);return()=>window.clearTimeout(timer)},[status])
+	const choose=async(event:React.ChangeEvent<HTMLInputElement>)=>{const file=event.target.files?.[0];if(!file)return;setBusy(true);setStatus('');try{await api.uploadWorkspaceFile(workspace.id,file,file.name);setStatus('Uploaded');await refresh()}catch(err){setStatus(errorText(err))}finally{setBusy(false);setInputKey(value=>value+1)}}
+	return <label className={`quick-workspace-upload ${busy?'busy':''} ${status&&status!=='Uploaded'?'error':''}`} title={status||`Upload to Workspace ${workspace.id}`}><UploadCloud size={12}/><b>{busy?'Uploading…':status==='Uploaded'?'Uploaded':status?'Upload failed':'Upload file'}</b><input key={inputKey} type="file" disabled={busy} onChange={event=>void choose(event)}/></label>
 }
 
 function SessionPlan({plan}:{plan:AgentPlan}){
@@ -317,7 +377,7 @@ function ReasoningCard({content,active}:{content:string;active:boolean}){
 }
 
 type JsonRecord = Record<string,unknown>
-const toolLabels:Record<string,string>={ssh_exec:'执行远程命令',ssh_run_script:'执行 Bash 脚本',ssh_file_read:'读取远程文件',ssh_file_list:'列出远程目录',ssh_file_stat:'读取文件信息',ssh_file_write:'写入远程文件',ssh_file_apply_patch:'应用远程补丁',ssh_file_upload:'上传制品',ssh_file_download:'下载文件',ssh_task_start:'启动远程任务',ssh_task_status:'查看任务状态',ssh_task_tail:'查看任务输出',ssh_host_list:'列出主机',ssh_host_inspect:'检查主机',ssh_history_search:'搜索执行历史',ssh_history_get:'读取执行历史',ssh_approval_status:'查询审批状态',ops_skill_list:'列出 Skills',ops_skill_get:'加载 Skill',ops_plan_create:'创建任务计划',ops_plan_get:'读取任务计划',ops_plan_step_update:'推进任务步骤'}
+const toolLabels:Record<string,string>={ssh_exec:'执行远程命令',ssh_run_script:'执行 Bash 脚本',ssh_file_read:'读取远程文件',ssh_file_search:'搜索远程文件',ssh_file_list:'列出远程目录',ssh_file_stat:'读取文件信息',ssh_file_write:'事务写入远程文件',ssh_file_apply_patch:'事务应用远程补丁',ssh_config_apply:'应用远程配置事务',ssh_config_restore:'恢复远程配置备份',ssh_task_start:'启动远程任务',ssh_task_status:'查看任务状态',ssh_task_tail:'查看任务输出',ssh_task_list:'列出持久任务',ssh_host_list:'列出主机',ssh_host_inspect:'检查主机',workspace_list:'列出 Workspace',workspace_file_list:'列出 Workspace 目录',workspace_file_read:'读取 Workspace 文件',workspace_file_search:'搜索 Workspace 文件',workspace_file_apply_patch:'应用 Workspace 补丁',workspace_file_upload:'上传 Workspace 文件',ssh_history_search:'搜索执行历史',ssh_history_get:'读取执行历史',ssh_approval_status:'查询审批状态',ops_skill_list:'列出 Skills',ops_skill_get:'加载 Skill',ops_plan_create:'创建任务计划',ops_plan_get:'读取任务计划',ops_plan_step_update:'推进任务步骤'}
 function jsonRecord(value:unknown):JsonRecord|undefined{return value!==null&&typeof value==='object'&&!Array.isArray(value)?value as JsonRecord:undefined}
 function parseRecord(value:string):JsonRecord{try{return jsonRecord(JSON.parse(value))||{value:JSON.parse(value)}}catch{return{value}}}
 function requestFromRun(run?:Run):JsonRecord|undefined{if(!run)return;try{return jsonRecord(JSON.parse(run.request_json))}catch{return}}
@@ -341,15 +401,22 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
   const program=request?fullProgram(request):''
   const script=request?textValue(request.script):''
   const remotePath=request?textValue(request.remote_path):''
+	const workspaceID=request?textValue(request.workspace_id):''
+	const relativePath=request?textValue(request.relative_path):''
+	const requestMode=request?textValue(request.mode):''
+	const workspaceTransfer=requestMode==='workspace_upload'
+	const file=jsonRecord(payload.file)
+	const filePath=textValue(file?.path)||remotePath||relativePath
+	const transferSummary=workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:''
   const planSteps=Array.isArray(payload.steps)?payload.steps.map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
   const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
-  const operation=script?'Bash script':program||remotePath||toolLabels[entry.tool||'']||entry.tool||'Tool result'
+	const operation=filePath||(script?'Bash script':program||toolLabels[entry.tool||'']||entry.tool||'Tool result')
   const args=request&&Array.isArray(request.args)?request.args.map(value=>String(value)):[]
   const env=request?jsonRecord(request.env):undefined
   const stdout=textValue(payload.stdout)||run?.stdout_redacted||''
   const stderr=textValue(payload.stderr)||run?.stderr_redacted||run?.error||''
   const stdoutPreview=latestOutput(stdout)
-  const commandSummary=script?compactScript(script):program||remotePath||planSummary||operation
+	const commandSummary=transferSummary||filePath||program||(script?compactScript(script):'')||planSummary||operation
   const instruction=textValue(payload.operator_instruction)
   const rawPayload={...payload};delete rawPayload._display
   const [expanded,setExpanded]=useState(false)
@@ -359,23 +426,31 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
     <div className="tool-event-body">
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
-          <div className="tool-command-head"><span>LLM 请求运行的完整{script?'脚本':'命令'}</span>{request.elevated===true&&<em><ShieldAlert size={12}/>受控 sudo</em>}</div>
-          <div className="tool-command-block">{script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{textValue(request.mode)} {remotePath}</pre>}</div>
+		  <div className="tool-command-head"><span>{filePath?'受控文件操作':`LLM 请求运行的完整${script?'脚本':'命令'}`}</span>{request.elevated===true&&<em><ShieldAlert size={12}/>受控 sudo</em>}</div>
+		  <div className="tool-command-block">{workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
+		  {filePath&&script&&<details className="tool-raw"><summary>查看完整事务脚本 / Patch</summary><pre>{script}</pre></details>}
           {program&&<CompactTable title="ARGV · 原始参数" columns={['INDEX','VALUE']} rows={[[0,textValue(request.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>} 
           {env&&Object.keys(env).length>0&&<CompactTable title="环境变量" columns={['KEY','VALUE']} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>} 
         </section>
         <aside className="tool-context-pane">
-          <dl className="tool-context-grid"><div><dt>目标主机</dt><dd>{hostName}</dd></div><div><dt>工作目录</dt><dd>{textValue(request.cwd)||'默认目录'}</dd></div><div><dt>权限</dt><dd>{request.elevated===true?'managed sudo':'普通用户'}</dd></div><div><dt>风险</dt><dd>{risk||'—'}</dd></div><div><dt>状态</dt><dd>{status}</dd></div><div><dt>退出码</dt><dd>{exitCode}</dd></div><div><dt>耗时</dt><dd>{formatDuration(payload.duration,run)}</dd></div><div><dt>Run ID</dt><dd>{runID||'—'}</dd></div></dl>
+		  <dl className="tool-context-grid"><div><dt>{workspaceTransfer?'目标主机':workspaceID?'Workspace':'目标主机'}</dt><dd>{workspaceTransfer?hostName:workspaceID||hostName}</dd></div><div><dt>{workspaceTransfer?'源文件':filePath?'文件路径':'工作目录'}</dt><dd>{workspaceTransfer?`${workspaceID}:${relativePath}`:filePath||textValue(request.cwd)||'默认目录'}</dd></div><div><dt>权限</dt><dd>{request.elevated===true?'managed sudo':'普通用户'}</dd></div><div><dt>风险</dt><dd>{risk||'—'}</dd></div><div><dt>状态</dt><dd>{status}</dd></div><div><dt>退出码</dt><dd>{exitCode}</dd></div><div><dt>耗时</dt><dd>{formatDuration(payload.duration,run)}</dd></div><div><dt>Run ID</dt><dd>{runID||'—'}</dd></div></dl>
           {textValue(request.reason)&&<div className="tool-reason"><span>执行原因</span><p>{textValue(request.reason)}</p></div>}
           {textValue(request.expected_changes)&&<div className="tool-reason change"><span>预期变化</span><p>{textValue(request.expected_changes)}</p></div>}
           {textValue(request.rollback)&&<div className="tool-reason rollback"><span>回滚方案</span><p>{textValue(request.rollback)}</p></div>}
         </aside>
       </div>:<GenericToolResult payload={payload}/>} 
+	  {file&&<FileMetadataPanel file={file}/>}
+	  {(textValue(payload.message)||textValue(payload.next_action))&&<div className={`tool-guidance ${payload.ok===false?'error':''}`}><ShieldAlert size={15}/><div><b>{textValue(payload.code)||'Tool result'}</b>{textValue(payload.message)&&<p>{textValue(payload.message)}</p>}{textValue(payload.next_action)&&<small>Next · {textValue(payload.next_action)}</small>}</div></div>}
       {instruction&&<div className="tool-instruction"><ShieldAlert size={15}/><div><b>Operator instruction</b><p>{instruction}</p></div></div>}
       {(stdout||stderr)&&<div className="tool-output-grid">{stdout&&<div className="tool-output stdout"><span>STDOUT</span><pre>{stdout}</pre></div>}{stderr&&<div className="tool-output stderr"><span>STDERR / RESULT</span><pre>{stderr}</pre></div>}</div>}
       <details className="tool-raw"><summary>原始 Tool JSON · 排错用</summary><pre>{JSON.stringify(rawPayload,null,2)}</pre></details>
     </div>
   </details>
+}
+
+function FileMetadataPanel({file}:{file:JsonRecord}){
+	const before=textValue(file.before_sha256),after=textValue(file.sha256),backup=textValue(file.backup_path),validator=textValue(file.validator),operationID=textValue(file.operation_id)
+	return <section className="file-metadata-panel"><div className="file-metadata-head"><FileText size={16}/><div><b>文件事务证据</b><span>{textValue(file.path)}</span></div>{file.validation_ok===true&&<em><Check size={12}/>validated</em>}</div><dl><div><dt>读取大小</dt><dd>{typeof file.returned_bytes==='number'?`${file.returned_bytes} B`:'—'}</dd></div><div><dt>Mode</dt><dd>{textValue(file.mode)||'—'}</dd></div><div><dt>Owner</dt><dd>{[textValue(file.owner),textValue(file.group)].filter(Boolean).join(':')||'—'}</dd></div><div><dt>Validator</dt><dd>{validator||'—'}</dd></div></dl>{operationID&&<div className="hash-row"><span>Operation</span><code>{operationID}</code></div>}{before&&<div className="hash-row"><span>Before</span><code>{before}</code></div>}{after&&<div className="hash-row"><span>After</span><code>{after}</code></div>}{backup&&<div className="hash-row"><span>Backup</span><code>{backup}</code></div>}{file.sensitive===true&&<div className="file-sensitive"><ShieldAlert size={13}/>敏感内容已在模型视图中脱敏，禁止用占位符覆盖原文件。</div>}</section>
 }
 
 function CompactTable({title,columns,rows}:{title:string;columns:string[];rows:Array<Array<unknown>>}){
@@ -414,6 +489,21 @@ function StructuredObject({label,value}:{label:string;value:JsonRecord}){
   return <section className="tool-object-section"><h4>{label.replaceAll('_',' ')}</h4><dl className="tool-generic-grid">{Object.entries(value).map(([key,item])=><div key={key}><dt>{key.replaceAll('_',' ')}</dt><dd>{displayValue(item)}</dd></div>)}</dl></section>
 }
 
+const recommendationLabels={allow:'建议按现有策略处理',human_required:'需要人工判断',deny:'建议拒绝'} as const
+
+function ReviewList({title,items,tone}:{title:string;items?:string[];tone?:string}){
+  if(!items?.length)return null
+  return <div className={`review-list ${tone||''}`}><b>{title}</b><ul>{items.map((item,index)=><li key={`${title}_${index}`}>{item}</li>)}</ul></div>
+}
+
+function CommandReviewPanel({review}:{review?:CommandReview}){
+  if(!review)return null
+  const risk=review.risk_review
+  const explanation=review.explanation
+  const recommendation=risk?.recommendation?recommendationLabels[risk.recommendation]:null
+  return <details className={`command-review-panel ${review.status}`}><summary><span className="review-agent-icon"><BrainCircuit size={17}/></span><span><b>双 SubAgent 审查</b><small>{review.status==='completed'?'解释与风险评审已完成':review.status==='degraded'?'部分评审不可用，策略仍然有效':'评审不可用，继续由确定性策略与人工审批处理'}</small></span><em>{review.deterministic_risk.replace('_',' ')} → {review.effective_risk.replace('_',' ')}</em><ChevronRight size={14}/></summary><div className="command-review-body"><div className="review-advisory"><ShieldCheck size={14}/><span>AI 仅提供辅助建议，不能执行命令或批准请求；确定性 Policy 与当前用户是最终权限边界。</span></div>{explanation&&<section className="review-explanation"><div className="review-section-title"><span>01</span><div><b>小白解释 Agent</b><small>{explanation.summary}</small></div></div><p>{explanation.mechanism}</p><div className="review-list-grid"><ReviewList title="会产生什么影响" items={explanation.effects}/><ReviewList title="需要注意的风险" items={explanation.risks} tone="warn"/><ReviewList title="操作提示" items={explanation.beginner_tips}/></div>{explanation.rollback_guide&&<div className="review-rollback"><b>回滚建议</b><p>{explanation.rollback_guide}</p></div>}</section>}{risk&&<section className="review-risk"><div className="review-section-title"><span>02</span><div><b>风险评审 Agent</b><small>{recommendation} · 置信度 {Math.round(risk.confidence*100)}%</small></div><em className={`risk ${risk.risk}`}>{risk.risk.replace('_',' ')}</em></div><div className="review-list-grid"><ReviewList title="判断依据" items={risk.reasons}/><ReviewList title="缺失证据" items={risk.missing_evidence} tone="warn"/><ReviewList title="必要控制措施" items={risk.required_controls}/></div></section>}{review.errors&&review.errors.length>0&&<div className="review-errors"><b>降级信息</b>{review.errors.map((item,index)=><code key={index}>{item}</code>)}</div>}<div className="review-meta">Model {review.model||'unavailable'} · {new Date(review.reviewed_at).toLocaleString()}</div></div></details>
+}
+
 function ApprovalDialog({approval,pendingCount,hosts,running,refresh,onNotice}:{approval:Approval;pendingCount:number;hosts:Host[];running:boolean;refresh:()=>Promise<void>;onNotice:(message:string)=>void}) {
   const [challenge,setChallenge]=useState('')
   const [note,setNote]=useState('')
@@ -422,8 +512,14 @@ function ApprovalDialog({approval,pendingCount,hosts,running,refresh,onNotice}:{
   let request:Record<string,unknown>={}
   try{request=JSON.parse(approval.request_json)}catch{request={request:approval.request_json}}
   const script=textValue(request.script)
-  const operation=fullProgram(request)||script||`${textValue(request.mode)} ${textValue(request.remote_path)}`.trim()||'受控操作'
-  const hostName=hosts.find(host=>host.id===approval.host_id)?.name||approval.host_id
+	const workspaceID=textValue(request.workspace_id)
+	const filePath=textValue(request.remote_path)||textValue(request.relative_path)
+	const requestMode=textValue(request.mode),relativePath=textValue(request.relative_path),remotePath=textValue(request.remote_path)
+	const workspaceTransfer=requestMode==='workspace_upload'
+  const operation=workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:fullProgram(request)||script||`${requestMode} ${filePath}`.trim()||'受控操作'
+	const targetHost=hosts.find(host=>host.id===approval.host_id)?.name||approval.host_id
+	const hostName=workspaceTransfer?targetHost:workspaceID?`Workspace / ${workspaceID}`:targetHost
+	const expectedSHA=textValue(request.expected_sha256),validator=textValue(request.validator)
   const decide=async(scope:'once'|'session')=>{
     setBusy(scope);setError('')
     try{const result=await api.approve(approval.id,challenge,note.trim()||'Reviewed and approved in the current Agent session.',scope);onNotice(`审批已通过 · ${result.status} · ${result.run_id}`);await refresh()}
@@ -434,8 +530,18 @@ function ApprovalDialog({approval,pendingCount,hosts,running,refresh,onNotice}:{
     setBusy('reject');setError('')
     try{await api.reject(approval.id,instruction);onNotice('审批已拒绝 · OpsPilot 正在按你的替代方案继续。');await refresh()}catch(err){setError(errorText(err))}finally{setBusy('')}
   }
+  const retryReview=async()=>{
+    setBusy('review');setError('')
+    try{
+      const updated=await api.retryApprovalReview(approval.id)
+      const status=updated.ai_review?.status
+      onNotice(status==='completed'?'SubAgent 审查已重新完成。':'SubAgent 已重试，但模型仍处于降级状态。')
+      setChallenge('')
+      await refresh()
+    }catch(err){setError(errorText(err))}finally{setBusy('')}
+  }
   const disabled=!!busy
-  return <div className="approval-modal-backdrop"><section className={`approval-dialog ${approval.risk}`} role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title"><div className="approval-dialog-head"><div className="approval-dialog-icon"><ShieldAlert size={20}/></div><div><span>HUMAN APPROVAL · {pendingCount>1?`1 OF ${pendingCount}`:'CURRENT SESSION'}</span><h2 id="approval-dialog-title">OpsPilot 请求执行受控操作</h2></div><em className={`risk ${approval.risk}`}>{approval.risk.replace('_',' ')}</em></div><div className="approval-operation"><span className="approval-command-label">LLM 请求运行的完整{script?'脚本':'命令'}</span><pre className="approval-command-preview">{script||`$ ${operation}`}</pre><dl><div><dt>Host</dt><dd>{hostName}</dd></div><div><dt>Expires</dt><dd><Clock3 size={12}/>{new Date(approval.expires_at).toLocaleTimeString()}</dd></div><div><dt>Digest</dt><dd>{approval.request_digest.slice(0,12)}</dd></div></dl>{typeof request.reason==='string'&&<p>{request.reason}</p>}</div>{approval.challenge&&<label className="approval-challenge-input"><span>Break-glass challenge · 输入 <code>{approval.challenge}</code></span><input value={challenge} onChange={event=>setChallenge(event.target.value)} placeholder="输入上方 challenge" autoComplete="off" autoFocus/></label>}<label className="approval-guidance"><span>审批说明 / 拒绝后告诉 LLM 应该改做什么</span><textarea value={note} maxLength={2000} onChange={event=>setNote(event.target.value)} placeholder="例如：不要重启服务，先只读取最近 100 行日志并分析原因。" autoFocus={!approval.challenge}/></label>{error&&<div className="approval-dialog-error"><ShieldAlert size={14}/>{error}</div>}<details className="approval-request-detail"><summary>查看完整请求</summary><pre>{JSON.stringify(request,null,2)}</pre></details><div className="approval-choice-grid"><button className="allow-once" disabled={disabled} onClick={()=>decide('once')}><Check size={16}/><span><b>{busy==='once'?'正在执行…':'仅允许本次'}</b><small>只批准当前请求摘要</small></span></button><button className="allow-session" disabled={disabled||approval.risk==='critical'} onClick={()=>decide('session')} title={approval.risk==='critical'?'Critical 操作不能会话级放行':''}><ShieldCheck size={16}/><span><b>{busy==='session'?'正在授权…':'本会话允许相同操作'}</b><small>{approval.risk==='critical'?'Critical 不可用':'主机、命令和参数必须完全一致'}</small></span></button><button className="reject-guidance" disabled={disabled||!note.trim()} onClick={reject}><X size={16}/><span><b>{busy==='reject'?'正在反馈…':'拒绝并告诉 LLM'}</b><small>将输入框内容作为新指令</small></span></button></div><p className="approval-wait">{running?'当前 Agent 已暂停在这个 Tool 调用，审批后会从原位置继续。':'原 Agent 连接已结束；本次决定仍会被执行并写入审计。'}</p></section></div>
+	return <div className="approval-modal-backdrop"><section className={`approval-dialog ${approval.risk}`} role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title"><div className="approval-dialog-head"><div className="approval-dialog-icon"><ShieldAlert size={20}/></div><div><span>HUMAN APPROVAL · {pendingCount>1?`1 OF ${pendingCount}`:'CURRENT SESSION'}</span><h2 id="approval-dialog-title">OpsPilot 请求执行受控操作</h2></div><em className={`risk ${approval.risk}`}>{approval.risk.replace('_',' ')}</em></div><div className="approval-operation"><span className="approval-command-label">{filePath?'完整受控文件事务':`LLM 请求运行的完整${script?'脚本':'命令'}`}</span>{filePath&&<div className="approval-file-target"><FileText size={15}/><div><b>{workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:filePath}</b><span>{expectedSHA?`Expected SHA256 · ${expectedSHA}`:'未绑定已有版本'}{validator?` · Validator ${validator}`:''}</span></div></div>}<pre className="approval-command-preview">{script||`$ ${operation}`}</pre><dl><div><dt>{workspaceTransfer?'Host':workspaceID?'Workspace':'Host'}</dt><dd>{hostName}</dd></div><div><dt>Expires</dt><dd><Clock3 size={12}/>{new Date(approval.expires_at).toLocaleTimeString()}</dd></div><div><dt>Digest</dt><dd>{approval.request_digest.slice(0,12)}</dd></div></dl>{typeof request.reason==='string'&&<p>{request.reason}</p>}</div><CommandReviewPanel review={approval.ai_review}/><div className="review-retry-row"><span>只重新运行只读审查，不会执行或批准命令。</span><button disabled={disabled} onClick={retryReview}><RefreshCw className={busy==='review'?'spin':''} size={13}/>{busy==='review'?'SubAgent 正在重试…':'重试 SubAgent 审查'}</button></div>{approval.challenge&&<label className="approval-challenge-input"><span>Break-glass challenge · 输入 <code>{approval.challenge}</code></span><input value={challenge} onChange={event=>setChallenge(event.target.value)} placeholder="输入上方 challenge" autoComplete="off" autoFocus/></label>}<label className="approval-guidance"><span>审批说明 / 拒绝后告诉 LLM 应该改做什么</span><textarea value={note} maxLength={2000} onChange={event=>setNote(event.target.value)} placeholder="例如：不要重启服务，先只读取最近 100 行日志并分析原因。" autoFocus={!approval.challenge}/></label>{error&&<div className="approval-dialog-error"><ShieldAlert size={14}/>{error}</div>}<details className="approval-request-detail"><summary>查看完整请求</summary><pre>{JSON.stringify(request,null,2)}</pre></details><div className="approval-choice-grid"><button className="allow-once" disabled={disabled} onClick={()=>decide('once')}><Check size={16}/><span><b>{busy==='once'?'正在执行…':'仅允许本次'}</b><small>只批准当前请求摘要</small></span></button><button className="allow-session" disabled={disabled||approval.risk==='critical'} onClick={()=>decide('session')} title={approval.risk==='critical'?'Critical 操作不能会话级放行':''}><ShieldCheck size={16}/><span><b>{busy==='session'?'正在授权…':'本会话允许相同操作'}</b><small>{approval.risk==='critical'?'Critical 不可用':'目标、内容和参数必须完全一致'}</small></span></button><button className="reject-guidance" disabled={disabled||!note.trim()} onClick={reject}><X size={16}/><span><b>{busy==='reject'?'正在反馈…':'拒绝并告诉 LLM'}</b><small>将输入框内容作为新指令</small></span></button></div><p className="approval-wait">{running?'当前 Agent 已暂停在这个 Tool 调用，审批后会从原位置继续。':'原 Agent 连接已结束；本次决定仍会被执行并写入审计。'}</p></section></div>
 }
 
 const emptyHostForm: HostInput = {name:'',address:'',port:22,user:'',auth_type:'agent',config_alias:'',identity_file:'',known_hosts_file:'',proxy_jump:'',password:'',sudo_mode:'none',sudo_password:''}

@@ -1,0 +1,91 @@
+package httpapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"eino-ops-agent/internal/security"
+	"eino-ops-agent/internal/store"
+)
+
+func TestWebAuthenticationCookieAndCSRF(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/http-auth.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	auth := security.NewWebAuth(st, time.Hour)
+	if err := auth.Initialize(ctx, "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(nil, nil, auth).Handler()
+
+	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"password":"correct horse battery staple"}`))
+	login.Header.Set("Content-Type", "application/json")
+	login.RemoteAddr = "127.0.0.1:12345"
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, login)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
+	}
+	var session struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if err := json.Unmarshal(loginResponse.Body.Bytes(), &session); err != nil || session.CSRF == "" {
+		t.Fatalf("invalid login response: %v %s", err, loginResponse.Body.String())
+	}
+	var cookie *http.Cookie
+	for _, candidate := range loginResponse.Result().Cookies() {
+		if candidate.Name == security.SessionCookieName {
+			cookie = candidate
+		}
+	}
+	if cookie == nil || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("secure session cookie missing: %#v", cookie)
+	}
+
+	withoutCSRF := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", bytes.NewBufferString(`{}`))
+	withoutCSRF.AddCookie(cookie)
+	withoutCSRFResponse := httptest.NewRecorder()
+	handler.ServeHTTP(withoutCSRFResponse, withoutCSRF)
+	if withoutCSRFResponse.Code != http.StatusForbidden {
+		t.Fatalf("unsafe request without CSRF returned %d", withoutCSRFResponse.Code)
+	}
+
+	logout := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", bytes.NewBufferString(`{}`))
+	logout.AddCookie(cookie)
+	logout.Header.Set("X-CSRF-Token", session.CSRF)
+	logoutResponse := httptest.NewRecorder()
+	handler.ServeHTTP(logoutResponse, logout)
+	if logoutResponse.Code != http.StatusNoContent {
+		t.Fatalf("logout status=%d body=%s", logoutResponse.Code, logoutResponse.Body.String())
+	}
+
+	stale := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	stale.AddCookie(cookie)
+	staleResponse := httptest.NewRecorder()
+	handler.ServeHTTP(staleResponse, stale)
+	if staleResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("logged out cookie returned %d", staleResponse.Code)
+	}
+}
+
+func TestUnknownAPIRouteReturnsJSONNotSPA(t *testing.T) {
+	handler := New(nil, nil, nil).Handler()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/no-such-endpoint", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown API status=%d body=%s", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("unknown API returned content type %q", contentType)
+	}
+}

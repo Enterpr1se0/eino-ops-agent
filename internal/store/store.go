@@ -46,6 +46,151 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+func (s *Store) AdminPasswordHash(ctx context.Context) (string, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM admin_credentials WHERE id=1`).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return hash, err
+}
+
+func (s *Store) SetAdminPasswordHash(ctx context.Context, hash string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO admin_credentials(id,password_hash,updated_at) VALUES(1,?,?)
+ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash,updated_at=excluded.updated_at`, hash, formatTime(time.Now().UTC()))
+	return err
+}
+
+func (s *Store) CreateWebSession(ctx context.Context, session domain.WebSession) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO web_sessions(token_hash,csrf_token,created_at,expires_at) VALUES(?,?,?,?)`,
+		session.TokenHash, session.CSRFToken, formatTime(session.CreatedAt), formatTime(session.ExpiresAt))
+	return err
+}
+
+func (s *Store) GetWebSession(ctx context.Context, tokenHash string) (domain.WebSession, error) {
+	var session domain.WebSession
+	var created, expires string
+	err := s.db.QueryRowContext(ctx, `SELECT token_hash,csrf_token,created_at,expires_at FROM web_sessions WHERE token_hash=?`, tokenHash).Scan(
+		&session.TokenHash, &session.CSRFToken, &created, &expires,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.WebSession{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.WebSession{}, err
+	}
+	session.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	session.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
+	if time.Now().UTC().After(session.ExpiresAt) {
+		_ = s.DeleteWebSession(ctx, tokenHash)
+		return domain.WebSession{}, ErrNotFound
+	}
+	return session, nil
+}
+
+func (s *Store) DeleteWebSession(ctx context.Context, tokenHash string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM web_sessions WHERE token_hash=?`, tokenHash)
+	return err
+}
+
+func (s *Store) DeleteAllWebSessions(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM web_sessions`)
+	return err
+}
+
+func (s *Store) CreateFileOperation(ctx context.Context, operation domain.FileOperation) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO file_operations(id,run_id,host_id,path,backup_path,before_sha256,after_sha256,validator,status,created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?)`, operation.ID, operation.RunID, operation.HostID, operation.Path, operation.BackupPath,
+		operation.BeforeSHA256, operation.AfterSHA256, operation.Validator, operation.Status, formatTime(operation.CreatedAt))
+	return err
+}
+
+func (s *Store) GetFileOperation(ctx context.Context, id string) (domain.FileOperation, error) {
+	var operation domain.FileOperation
+	var created string
+	err := s.db.QueryRowContext(ctx, `SELECT id,run_id,host_id,path,backup_path,before_sha256,after_sha256,validator,status,created_at FROM file_operations WHERE id=?`, id).Scan(
+		&operation.ID, &operation.RunID, &operation.HostID, &operation.Path, &operation.BackupPath, &operation.BeforeSHA256,
+		&operation.AfterSHA256, &operation.Validator, &operation.Status, &created,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.FileOperation{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.FileOperation{}, err
+	}
+	operation.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	return operation, nil
+}
+
+func (s *Store) UpsertTask(ctx context.Context, task domain.Task, result domain.ExecResult, taskError string) error {
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	var ended any
+	if !task.EndedAt.IsZero() {
+		ended = formatTime(task.EndedAt)
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO tasks(id,run_id,host_id,status,result_json,error,started_at,ended_at) VALUES(?,?,?,?,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,status=excluded.status,result_json=excluded.result_json,error=excluded.error,ended_at=excluded.ended_at`,
+		task.ID, task.RunID, task.HostID, task.Status, string(resultJSON), taskError, formatTime(task.StartedAt), ended)
+	return err
+}
+
+func (s *Store) GetTask(ctx context.Context, id string) (domain.Task, domain.ExecResult, string, error) {
+	var task domain.Task
+	var resultJSON, taskError, started string
+	var ended sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT id,run_id,host_id,status,result_json,error,started_at,ended_at FROM tasks WHERE id=?`, id).Scan(
+		&task.ID, &task.RunID, &task.HostID, &task.Status, &resultJSON, &taskError, &started, &ended,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Task{}, domain.ExecResult{}, "", ErrNotFound
+	}
+	if err != nil {
+		return domain.Task{}, domain.ExecResult{}, "", err
+	}
+	task.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+	if ended.Valid {
+		task.EndedAt, _ = time.Parse(time.RFC3339Nano, ended.String)
+	}
+	var result domain.ExecResult
+	_ = json.Unmarshal([]byte(resultJSON), &result)
+	return task, result, taskError, nil
+}
+
+func (s *Store) ListTasks(ctx context.Context, limit int) ([]domain.Task, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,run_id,host_id,status,started_at,ended_at FROM tasks ORDER BY started_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]domain.Task, 0)
+	for rows.Next() {
+		var task domain.Task
+		var started string
+		var ended sql.NullString
+		if err := rows.Scan(&task.ID, &task.RunID, &task.HostID, &task.Status, &started, &ended); err != nil {
+			return nil, err
+		}
+		task.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+		if ended.Valid {
+			task.EndedAt, _ = time.Parse(time.RFC3339Nano, ended.String)
+		}
+		result = append(result, task)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) InterruptActiveTasks(ctx context.Context) error {
+	now := formatTime(time.Now().UTC())
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET status='interrupted',error=CASE WHEN error='' THEN 'control plane restarted before the task completed' ELSE error END,ended_at=? WHERE status IN ('running','waiting_for_approval','approval_required')`, now)
+	return err
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS hosts (
@@ -81,6 +226,7 @@ CREATE TABLE IF NOT EXISTS runs (
   stderr_cipher TEXT NOT NULL DEFAULT '',
   truncated INTEGER NOT NULL DEFAULT 0,
   error TEXT NOT NULL DEFAULT '',
+  ai_review_json TEXT NOT NULL DEFAULT '',
   started_at TEXT NOT NULL,
   completed_at TEXT,
   FOREIGN KEY(host_id) REFERENCES hosts(id)
@@ -148,6 +294,45 @@ CREATE TABLE IF NOT EXISTS session_approval_grants (
   expires_at TEXT NOT NULL,
   PRIMARY KEY(session_id, request_fingerprint)
 );
+	CREATE TABLE IF NOT EXISTS admin_credentials (
+	  id INTEGER PRIMARY KEY CHECK(id=1),
+	  password_hash TEXT NOT NULL,
+	  updated_at TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS web_sessions (
+	  token_hash TEXT PRIMARY KEY,
+	  csrf_token TEXT NOT NULL,
+	  created_at TEXT NOT NULL,
+	  expires_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at);
+CREATE TABLE IF NOT EXISTS file_operations (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  host_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  backup_path TEXT NOT NULL DEFAULT '',
+  before_sha256 TEXT NOT NULL DEFAULT '',
+  after_sha256 TEXT NOT NULL DEFAULT '',
+  validator TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id),
+  FOREIGN KEY(host_id) REFERENCES hosts(id)
+);
+CREATE INDEX IF NOT EXISTS idx_file_operations_host_created ON file_operations(host_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL DEFAULT '',
+  host_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  result_json TEXT NOT NULL DEFAULT '{}',
+  error TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  FOREIGN KEY(host_id) REFERENCES hosts(id)
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_started ON tasks(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_session_approval_grants_expiry ON session_approval_grants(expires_at);
 CREATE TABLE IF NOT EXISTS checkpoints (
   id TEXT PRIMARY KEY,
@@ -169,6 +354,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_model_providers_active ON model_providers(
 CREATE TABLE IF NOT EXISTS system_settings (
   id INTEGER PRIMARY KEY CHECK(id=1),
   agent_max_iterations INTEGER NOT NULL,
+  subagent_reviews_enabled INTEGER NOT NULL DEFAULT 1,
+  beginner_explanations_enabled INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL
 );
 `
@@ -187,6 +374,9 @@ CREATE TABLE IF NOT EXISTS system_settings (
 		`ALTER TABLE hosts ADD COLUMN sudo_mode TEXT NOT NULL DEFAULT 'none'`,
 		`ALTER TABLE hosts ADD COLUMN sudo_password_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE chat_messages ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN ai_review_json TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE system_settings ADD COLUMN subagent_reviews_enabled INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE system_settings ADD COLUMN beginner_explanations_enabled INTEGER NOT NULL DEFAULT 1`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
@@ -317,25 +507,29 @@ func (s *Store) DeleteModelProvider(ctx context.Context, id string) error {
 
 func (s *Store) GetSystemSettings(ctx context.Context) (domain.SystemSettings, error) {
 	var settings domain.SystemSettings
+	var reviewsEnabled, explanationsEnabled int
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,updated_at FROM system_settings WHERE id=1`).Scan(
-		&settings.AgentMaxIterations, &updated,
+	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,subagent_reviews_enabled,beginner_explanations_enabled,updated_at FROM system_settings WHERE id=1`).Scan(
+		&settings.AgentMaxIterations, &reviewsEnabled, &explanationsEnabled, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.SystemSettings{AgentMaxIterations: domain.DefaultAgentMaxIterations}, nil
+		return domain.SystemSettings{AgentMaxIterations: domain.DefaultAgentMaxIterations, SubagentReviewsEnabled: true, BeginnerExplanationsEnabled: true}, nil
 	}
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
 	settings.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	settings.SubagentReviewsEnabled = reviewsEnabled != 0
+	settings.BeginnerExplanationsEnabled = explanationsEnabled != 0
 	return settings, nil
 }
 
 func (s *Store) SaveSystemSettings(ctx context.Context, settings domain.SystemSettings) (domain.SystemSettings, error) {
 	settings.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,updated_at) VALUES(1,?,?)
-ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,updated_at=excluded.updated_at`,
-		settings.AgentMaxIterations, formatTime(settings.UpdatedAt))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,subagent_reviews_enabled,beginner_explanations_enabled,updated_at) VALUES(1,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,subagent_reviews_enabled=excluded.subagent_reviews_enabled,
+beginner_explanations_enabled=excluded.beginner_explanations_enabled,updated_at=excluded.updated_at`,
+		settings.AgentMaxIterations, boolInt(settings.SubagentReviewsEnabled), boolInt(settings.BeginnerExplanationsEnabled), formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
@@ -363,7 +557,7 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 
 func (s *Store) ListHosts(ctx context.Context) ([]domain.Host, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,name,address,port,username,auth_type,config_alias,identity_file,
-known_hosts_file,proxy_jump,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts ORDER BY name`)
+known_hosts_file,proxy_jump,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE auth_type<>'workspace' ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -410,9 +604,9 @@ func scanHost(row scanner) (domain.Host, error) {
 }
 
 func (s *Store) CreateRun(ctx context.Context, run domain.Run) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
-started_at) VALUES(?,?,?,?,?,?,?,?,?)`, run.ID, run.SessionID, run.HostID, run.RequestJSON, run.RequestCipher, run.RequestDigest,
-		run.Risk, run.Status, formatTime(run.StartedAt))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,ai_review_json,
+started_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, run.ID, run.SessionID, run.HostID, run.RequestJSON, run.RequestCipher, run.RequestDigest,
+		run.Risk, run.Status, run.AIReviewJSON, formatTime(run.StartedAt))
 	return err
 }
 
@@ -430,7 +624,7 @@ stdout_cipher=?,stderr_cipher=?,truncated=?,error=?,completed_at=? WHERE id=?`, 
 
 func (s *Store) GetRun(ctx context.Context, id string) (domain.Run, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
-exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,truncated,error,started_at,completed_at
+exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,truncated,error,ai_review_json,started_at,completed_at
 FROM runs WHERE id=?`, id)
 	return scanRun(row)
 }
@@ -441,7 +635,7 @@ func (s *Store) SearchRuns(ctx context.Context, query, hostID string, limit int)
 	}
 	pattern := "%" + strings.ReplaceAll(query, "%", "\\%") + "%"
 	rows, err := s.db.QueryContext(ctx, `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
-exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,truncated,error,started_at,completed_at
+exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,truncated,error,ai_review_json,started_at,completed_at
 FROM runs WHERE (?='' OR host_id=?) AND (?='' OR request_json LIKE ? ESCAPE '\' OR stdout_redacted LIKE ? ESCAPE '\'
 OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC LIMIT ?`, hostID, hostID, query, pattern, pattern, pattern, limit)
 	if err != nil {
@@ -466,7 +660,7 @@ func scanRun(row scanner) (domain.Run, error) {
 	var truncated int
 	err := row.Scan(&run.ID, &run.SessionID, &run.HostID, &run.RequestJSON, &run.RequestCipher, &run.RequestDigest, &run.Risk,
 		&run.Status, &run.ExitCode, &run.StdoutRedacted, &run.StderrRedacted, &run.StdoutCipher,
-		&run.StderrCipher, &truncated, &run.Error, &started, &completed)
+		&run.StderrCipher, &truncated, &run.Error, &run.AIReviewJSON, &started, &completed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Run{}, ErrNotFound
 	}
@@ -474,6 +668,12 @@ func scanRun(row scanner) (domain.Run, error) {
 		return domain.Run{}, err
 	}
 	run.Truncated = truncated != 0
+	if run.AIReviewJSON != "" {
+		var review domain.CommandReview
+		if json.Unmarshal([]byte(run.AIReviewJSON), &review) == nil {
+			run.AIReview = &review
+		}
+	}
 	run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 	if completed.Valid {
 		run.CompletedAt, _ = time.Parse(time.RFC3339Nano, completed.String)
@@ -539,20 +739,60 @@ func (s *Store) DecideApproval(ctx context.Context, id, status, reason string) e
 	return nil
 }
 
-func (s *Store) DecideApprovalWithSessionGrant(ctx context.Context, id, reason, sessionID, fingerprint string, expiresAt time.Time) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE approvals SET status='approved',reason=?,decided_at=? WHERE id=? AND status='pending'`,
-		reason, formatTime(time.Now().UTC()), id)
+func (s *Store) ApprovePending(ctx context.Context, id, reason string, expectedRisk domain.RiskLevel, expectedChallenge string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE approvals SET status='approved',reason=?,decided_at=?
+WHERE id=? AND status='pending' AND risk=? AND challenge=?`, reason, formatTime(time.Now().UTC()), id, expectedRisk, expectedChallenge)
 	if err != nil {
 		return err
 	}
 	count, _ := result.RowsAffected()
 	if count == 0 {
-		return fmt.Errorf("approval is missing or no longer pending")
+		return fmt.Errorf("approval changed or is no longer pending; refresh and review the latest risk")
+	}
+	return nil
+}
+
+func (s *Store) UpdatePendingApprovalReview(ctx context.Context, approvalID, runID string, risk domain.RiskLevel, challenge, reviewJSON string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE approvals SET risk=?,challenge=? WHERE id=? AND run_id=? AND status='pending'`,
+		risk, challenge, approvalID, runID)
+	if err != nil {
+		return err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return fmt.Errorf("approval is no longer pending")
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE runs SET risk=?,ai_review_json=? WHERE id=? AND status='approval_required'`,
+		risk, reviewJSON, runID)
+	if err != nil {
+		return err
+	}
+	count, _ = result.RowsAffected()
+	if count == 0 {
+		return fmt.Errorf("approval run is no longer awaiting a decision")
+	}
+	return tx.Commit()
+}
+
+func (s *Store) DecideApprovalWithSessionGrant(ctx context.Context, id, reason, sessionID, fingerprint string, expiresAt time.Time, expectedRisk domain.RiskLevel, expectedChallenge string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE approvals SET status='approved',reason=?,decided_at=?
+WHERE id=? AND status='pending' AND risk=? AND challenge=?`, reason, formatTime(time.Now().UTC()), id, expectedRisk, expectedChallenge)
+	if err != nil {
+		return err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return fmt.Errorf("approval changed or is no longer pending; refresh and review the latest risk")
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO session_approval_grants(session_id,request_fingerprint,created_at,expires_at)
 VALUES(?,?,?,?) ON CONFLICT(session_id,request_fingerprint) DO UPDATE SET expires_at=excluded.expires_at`,

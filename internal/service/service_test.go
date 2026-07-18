@@ -25,6 +25,20 @@ type fakeTransport struct {
 	hosts []domain.Host
 }
 
+type fakeCommandReviewer struct {
+	mu     sync.Mutex
+	review domain.CommandReview
+	err    error
+	inputs []domain.CommandReviewInput
+}
+
+func (f *fakeCommandReviewer) Review(_ context.Context, input domain.CommandReviewInput) (domain.CommandReview, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inputs = append(f.inputs, input)
+	return f.review, f.err
+}
+
 func (f *fakeTransport) Exec(_ context.Context, host domain.Host, req domain.ExecRequest) (sshx.RawResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
@@ -118,6 +132,23 @@ func TestDirectSudoIsRejectedInProgramAndScriptModes(t *testing.T) {
 		}
 	}
 }
+
+func TestInteractiveCommandsAndPackagePromptsAreRejected(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	requests := []domain.ExecRequest{
+		{HostID: host.ID, Mode: domain.ExecProgram, Program: "bash", Reason: "open shell"},
+		{HostID: host.ID, Mode: domain.ExecProgram, Program: "pacman", Args: []string{"-S", "nginx"}, Reason: "install nginx", Rollback: "remove nginx"},
+		{HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"edit", "nginx"}, Reason: "edit unit", Rollback: "remove override"},
+	}
+	for _, request := range requests {
+		if _, err := svc.Submit(context.Background(), request, "test"); err == nil {
+			t.Fatalf("interactive request was accepted: %#v", request)
+		}
+	}
+	if len(transport.calls) != 0 {
+		t.Fatal("rejected interactive commands reached transport")
+	}
+}
 func (f *fakeTransport) Probe(context.Context, domain.Host) (sshx.HostInfo, error) {
 	return sshx.HostInfo{Hostname: "fixture"}, nil
 }
@@ -143,7 +174,7 @@ func newTestService(t *testing.T) (*Service, *fakeTransport, domain.Host) {
 	}
 	transport := &fakeTransport{}
 	limits := config.Default().Limits
-	svc := New(st, engine, transport, encryptor, security.NewRedactor(), limits, t.TempDir())
+	svc := New(st, engine, transport, encryptor, security.NewRedactor(), limits)
 	host, err := svc.AddHost(ctx, domain.Host{Name: "fixture", Address: "127.0.0.1", Port: 22, User: "test"}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -158,25 +189,154 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations {
+	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || !settings.SubagentReviewsEnabled || !settings.BeginnerExplanationsEnabled {
 		t.Fatalf("unexpected default max iterations: %#v", settings)
 	}
 	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 4}, "test"); err == nil {
 		t.Fatal("expected lower-bound validation error")
 	}
-	saved, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 30}, "test")
+	reviewsEnabled := false
+	explanationsEnabled := false
+	saved, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
+		AgentMaxIterations: 30, SubagentReviewsEnabled: &reviewsEnabled, BeginnerExplanationsEnabled: &explanationsEnabled,
+	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.AgentMaxIterations != 30 || saved.UpdatedAt.IsZero() {
+	if saved.AgentMaxIterations != 30 || saved.SubagentReviewsEnabled || saved.BeginnerExplanationsEnabled || saved.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected saved settings: %#v", saved)
 	}
 	reloaded, err := svc.SystemSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.AgentMaxIterations != 30 {
+	if reloaded.AgentMaxIterations != 30 || reloaded.SubagentReviewsEnabled || reloaded.BeginnerExplanationsEnabled {
 		t.Fatalf("system settings were not persisted: %#v", reloaded)
+	}
+}
+
+func TestCommandReviewerPersistsAdviceWithoutLoweringPolicyRisk(t *testing.T) {
+	svc, _, host := newTestService(t)
+	reviewer := &fakeCommandReviewer{review: domain.CommandReview{
+		Status: "completed", DeterministicRisk: domain.RiskReadOnly, EffectiveRisk: domain.RiskReadOnly,
+		Explanation: &domain.CommandExplanation{Summary: "重启服务", Mechanism: "由 systemd 停止并重新启动单元"},
+		RiskReview:  &domain.AIRiskReview{Risk: domain.RiskReadOnly, Recommendation: "allow", Confidence: 0.9}, ReviewedAt: time.Now().UTC(),
+	}}
+	svc.SetCommandReviewer(reviewer)
+	result, err := svc.Submit(context.Background(), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
+		Reason: "recover demo", Rollback: "restart the previous release",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "approval_required" || result.Risk != domain.RiskChange || result.Challenge != "" {
+		t.Fatalf("reviewer lowered or changed deterministic approval: %#v", result)
+	}
+	approvals, err := svc.ListApprovals(context.Background(), "pending", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(approvals) != 1 || approvals[0].AIReview == nil || approvals[0].AIReview.EffectiveRisk != domain.RiskChange {
+		t.Fatalf("structured review was not normalized and persisted: %#v", approvals)
+	}
+	if len(reviewer.inputs) != 1 || !reviewer.inputs[0].BeginnerMode || reviewer.inputs[0].RequestDigest == "" {
+		t.Fatalf("review coordinator did not receive bounded context: %#v", reviewer.inputs)
+	}
+}
+
+func TestCommandReviewerCanOnlyEscalateToBreakGlass(t *testing.T) {
+	svc, _, host := newTestService(t)
+	svc.SetCommandReviewer(&fakeCommandReviewer{review: domain.CommandReview{
+		Status: "completed", EffectiveRisk: domain.RiskCritical,
+		RiskReview: &domain.AIRiskReview{Risk: domain.RiskCritical, Recommendation: "human_required", Confidence: 0.75}, ReviewedAt: time.Now().UTC(),
+	}})
+	result, err := svc.Submit(context.Background(), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
+		Reason: "recover demo", Rollback: "restart the previous release",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "approval_required" || result.Risk != domain.RiskCritical || result.Challenge == "" {
+		t.Fatalf("higher AI risk did not require human break-glass: %#v", result)
+	}
+}
+
+func TestRetryApprovalReviewEscalatesPendingApprovalWithoutExecuting(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	ctx := context.Background()
+	pending, err := svc.Submit(ctx, domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
+		Reason: "recover demo", Rollback: "restart the previous release",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Risk != domain.RiskChange || pending.Challenge != "" {
+		t.Fatalf("unexpected initial approval: %#v", pending)
+	}
+	reviewer := &fakeCommandReviewer{review: domain.CommandReview{
+		Status: "completed", EffectiveRisk: domain.RiskCritical,
+		RiskReview: &domain.AIRiskReview{
+			Risk: domain.RiskCritical, Recommendation: "human_required", Confidence: 0.9,
+			Reasons: []string{"service restart may interrupt traffic"},
+		},
+		ReviewedAt: time.Now().UTC(),
+	}}
+	svc.SetCommandReviewer(reviewer)
+
+	updated, err := svc.RetryApprovalReview(ctx, pending.ApprovalID, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "pending" || updated.Risk != domain.RiskCritical || updated.Challenge == "" || updated.AIReview == nil {
+		t.Fatalf("retry did not safely escalate the pending approval: %#v", updated)
+	}
+	if len(transport.calls) != 0 {
+		t.Fatalf("review retry executed the operation: %#v", transport.calls)
+	}
+	if len(reviewer.inputs) != 1 || reviewer.inputs[0].RequestDigest != updated.RequestDigest {
+		t.Fatalf("review retry did not receive the exact pending request: %#v", reviewer.inputs)
+	}
+	if err := svc.store.ApprovePending(ctx, updated.ID, "stale approval", domain.RiskChange, ""); err == nil {
+		t.Fatal("a stale pre-escalation approval decision was accepted")
+	}
+	if _, err := svc.Approve(ctx, updated.ID, updated.Challenge, "reviewed escalated risk", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	if len(transport.calls) != 1 {
+		t.Fatalf("approved operation was not executed exactly once: %#v", transport.calls)
+	}
+}
+
+func TestRetryApprovalReviewPersistsDegradedResultAndKeepsPending(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	ctx := context.Background()
+	pending, err := svc.Submit(ctx, domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
+		Reason: "recover demo", Rollback: "restart the previous release",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetCommandReviewer(&fakeCommandReviewer{err: errors.New("model timed out")})
+	updated, err := svc.RetryApprovalReview(ctx, pending.ApprovalID, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "pending" || updated.Risk != domain.RiskChange || updated.AIReview == nil || updated.AIReview.Status != "unavailable" {
+		t.Fatalf("degraded retry changed the approval boundary: %#v", updated)
+	}
+	if len(updated.AIReview.Errors) != 1 || !strings.Contains(updated.AIReview.Errors[0], "model timed out") {
+		t.Fatalf("degraded retry error was not preserved: %#v", updated.AIReview)
+	}
+	if len(transport.calls) != 0 {
+		t.Fatalf("degraded review retry executed the operation: %#v", transport.calls)
+	}
+	listed, err := svc.ListApprovals(ctx, "pending", 10)
+	if err != nil || len(listed) != 1 || listed[0].AIReview == nil || listed[0].AIReview.Status != "unavailable" {
+		t.Fatalf("degraded retry was not persisted: approvals=%#v err=%v", listed, err)
 	}
 }
 
@@ -499,31 +659,6 @@ func TestForbiddenNeverCreatesApproval(t *testing.T) {
 	}
 	if result.Status != "denied" || result.ApprovalID != "" || len(transport.calls) != 0 {
 		t.Fatalf("unexpected forbidden result %#v", result)
-	}
-}
-
-func TestArtifactsAreNameScopedAndTransfersRequireApproval(t *testing.T) {
-	svc, transport, host := newTestService(t)
-	if _, err := svc.SaveArtifact("../escape", []byte("bad")); err == nil {
-		t.Fatal("path traversal artifact name was accepted")
-	}
-	artifact, err := svc.SaveArtifact("app.tar.gz", []byte("fixture"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if artifact.Name != "app.tar.gz" || artifact.Size != 7 {
-		t.Fatalf("unexpected artifact %#v", artifact)
-	}
-	items, err := svc.ListArtifacts()
-	if err != nil || len(items) != 1 {
-		t.Fatalf("unexpected artifacts %#v err=%v", items, err)
-	}
-	result, err := svc.UploadArtifact(context.Background(), host.ID, artifact.Name, "/tmp/app.tar.gz", "deploy fixture", "remove fixture", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != "approval_required" || len(transport.calls) != 0 {
-		t.Fatalf("upload bypassed approval: %#v", result)
 	}
 }
 

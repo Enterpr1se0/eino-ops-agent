@@ -38,6 +38,7 @@ var safePrograms = stringSet(
 	"free", "getent", "grep", "head", "hostname", "id", "ip", "journalctl", "last", "ls", "lscpu",
 	"lsblk", "lsof", "netstat", "pgrep", "printenv", "ps", "pwd", "ss", "stat", "tail", "top",
 	"uname", "uptime", "vmstat", "wc", "who", "whoami",
+	"cmp", "printf", "sha256sum", "sync", "test", "timeout",
 )
 
 var changePrograms = stringSet(
@@ -246,16 +247,19 @@ func shellSource(req domain.ExecRequest) (string, error) {
 			return "", fmt.Errorf("script is empty")
 		}
 		return req.Script, nil
-	case domain.ExecUpload:
-		if req.ArtifactName == "" || !filepath.IsAbs(req.RemotePath) {
-			return "", fmt.Errorf("upload requires an artifact and absolute remote path")
+	case domain.ExecWorkspaceRead:
+		return "cat " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
+	case domain.ExecWorkspaceList:
+		return "ls " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
+	case domain.ExecWorkspaceSearch:
+		return "grep " + shellQuote(req.SearchPattern) + " " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
+	case domain.ExecWorkspacePatch:
+		return "patch " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
+	case domain.ExecWorkspaceUpload:
+		if req.WorkspaceID == "" || req.RelativePath == "" || req.ExpectedSHA256 == "" || !filepath.IsAbs(req.RemotePath) {
+			return "", fmt.Errorf("workspace upload requires a workspace file, expected SHA256, and absolute remote path")
 		}
-		return "sftp put " + shellQuote(req.ArtifactName) + " " + shellQuote(req.RemotePath), nil
-	case domain.ExecDownload:
-		if req.ArtifactName == "" || !filepath.IsAbs(req.RemotePath) {
-			return "", fmt.Errorf("download requires an artifact and absolute remote path")
-		}
-		return "sftp get " + shellQuote(req.RemotePath) + " " + shellQuote(req.ArtifactName), nil
+		return "sftp put " + shellQuote(req.WorkspaceID+"/"+req.RelativePath) + " " + shellQuote(req.RemotePath), nil
 	default:
 		return "", fmt.Errorf("unsupported execution mode %q", req.Mode)
 	}

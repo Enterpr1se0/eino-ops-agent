@@ -3,6 +3,7 @@ bin/
 dist/
 web/node_modules/
 web/dist/
+workspace/
 .env
 *.log
 coverage.out
@@ -17,8 +18,7 @@ coverage.out
 .DS_Store
 Thumbs.db
 
-# TypeScript / Vite build artifacts
+# TypeScript / Vite generated files
 *.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts
-

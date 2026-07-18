@@ -66,7 +66,7 @@ func TestPasswordAuthenticationUsesAskPassWithoutSecretInProcessMetadata(t *test
 }
 
 func TestPasswordSSHArgsDisableBatchModeWithoutLeakingPassword(t *testing.T) {
-	transport := NewOpenSSHTransport(config.OpenSSH{}, config.Limits{}, "")
+	transport := NewOpenSSHTransport(config.OpenSSH{}, config.Limits{})
 	host := domain.Host{Address: "192.0.2.1", Port: 22, User: "ops", AuthType: "password", Password: "secret"}
 	args, err := transport.sshArgs(host, "id")
 	if err != nil {
@@ -78,6 +78,35 @@ func TestPasswordSSHArgsDisableBatchModeWithoutLeakingPassword(t *testing.T) {
 	}
 	if strings.Contains(joined, host.Password) {
 		t.Fatal("SSH password leaked into arguments")
+	}
+}
+
+func TestPasswordSFTPArgsOverrideImplicitBatchModeBeforeBatchFile(t *testing.T) {
+	transport := NewOpenSSHTransport(config.OpenSSH{}, config.Limits{})
+	host := domain.Host{Address: "192.0.2.1", Port: 22, User: "ops", AuthType: "password", Password: "secret"}
+	args, err := transport.sftpArgs(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batchOverride := -1
+	batchFile := -1
+	for index := range args {
+		if args[index] == "BatchMode=no" {
+			batchOverride = index
+		}
+		if args[index] == "-b" {
+			batchFile = index
+		}
+	}
+	if batchOverride < 0 || batchFile < 0 || batchOverride > batchFile {
+		t.Fatalf("password BatchMode override must precede -b because sftp injects BatchMode=yes: %q", args)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "PreferredAuthentications=password,keyboard-interactive") || !strings.Contains(joined, "PubkeyAuthentication=no") {
+		t.Fatalf("password authentication constraints missing: %s", joined)
+	}
+	if strings.Contains(joined, host.Password) {
+		t.Fatal("SSH password leaked into SFTP arguments")
 	}
 }
 

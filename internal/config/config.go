@@ -2,26 +2,54 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	ListenAddress  string        `yaml:"listen_address"`
-	DataDir        string        `yaml:"data_dir"`
-	DatabasePath   string        `yaml:"database_path"`
-	ArtifactsDir   string        `yaml:"artifacts_dir"`
-	Logging        Logging       `yaml:"logging"`
-	MasterKey      string        `yaml:"-"`
-	PolicyPath     string        `yaml:"policy_path"`
-	OpenSSH        OpenSSH       `yaml:"openssh"`
-	Model          Model         `yaml:"model"`
-	Limits         Limits        `yaml:"limits"`
-	AuditRetention time.Duration `yaml:"-"`
+	ListenAddress       string        `yaml:"listen_address"`
+	DataDir             string        `yaml:"data_dir"`
+	DatabasePath        string        `yaml:"database_path"`
+	Logging             Logging       `yaml:"logging"`
+	MasterKey           string        `yaml:"-"`
+	PolicyPath          string        `yaml:"policy_path"`
+	OpenSSH             OpenSSH       `yaml:"openssh"`
+	Model               Model         `yaml:"model"`
+	Limits              Limits        `yaml:"limits"`
+	AuditRetention      time.Duration `yaml:"-"`
+	WebAuth             WebAuth       `yaml:"web_auth"`
+	DefaultWorkspaceDir string        `yaml:"default_workspace_dir"`
+	Workspaces          []Workspace   `yaml:"workspaces"`
+	Validators          []Validator   `yaml:"validators"`
+}
+
+type WebAuth struct {
+	BootstrapPassword string        `yaml:"-"`
+	SecureCookies     bool          `yaml:"secure_cookies"`
+	SessionTTL        time.Duration `yaml:"-"`
+}
+
+type Workspace struct {
+	ID         string `yaml:"id" json:"id"`
+	Root       string `yaml:"root" json:"-"`
+	Access     string `yaml:"access" json:"access"`
+	AutoCreate bool   `yaml:"-" json:"-"`
+}
+
+type Validator struct {
+	ID             string   `yaml:"id" json:"id"`
+	Scope          string   `yaml:"scope" json:"scope"`
+	Program        string   `yaml:"program" json:"-"`
+	Args           []string `yaml:"args" json:"-"`
+	TimeoutSeconds int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+	PathPatterns   []string `yaml:"path_patterns" json:"path_patterns"`
 }
 
 type Logging struct {
@@ -62,7 +90,6 @@ func Default() Config {
 		ListenAddress: "0.0.0.0:8080",
 		DataDir:       ".data",
 		DatabasePath:  ".data/ops-agent.db",
-		ArtifactsDir:  ".data/artifacts",
 		PolicyPath:    "configs/policy.yaml",
 		Logging: Logging{
 			Level: "info", Format: "text", File: ".data/ops-agent.log",
@@ -84,7 +111,9 @@ func Default() Config {
 			GlobalConcurrency:  8,
 			HostConcurrency:    2,
 		},
-		AuditRetention: 30 * 24 * time.Hour,
+		AuditRetention:      30 * 24 * time.Hour,
+		WebAuth:             WebAuth{SessionTTL: 12 * time.Hour},
+		DefaultWorkspaceDir: "workspace",
 	}
 }
 
@@ -92,7 +121,6 @@ func Load(path string) (Config, error) {
 	cfg := Default()
 	defaultDataDir := cfg.DataDir
 	defaultDatabasePath := cfg.DatabasePath
-	defaultArtifactsDir := cfg.ArtifactsDir
 	defaultKnownHosts := cfg.OpenSSH.DefaultKnownHosts
 	defaultLogFile := cfg.Logging.File
 	if path != "" {
@@ -107,11 +135,19 @@ func Load(path string) (Config, error) {
 		}
 	}
 	applyEnv(&cfg)
+	if len(cfg.Workspaces) == 0 && strings.TrimSpace(cfg.DefaultWorkspaceDir) != "" {
+		root := filepath.Clean(strings.TrimSpace(cfg.DefaultWorkspaceDir))
+		if !filepath.IsAbs(root) {
+			absolute, err := filepath.Abs(root)
+			if err != nil {
+				return Config{}, fmt.Errorf("resolve default workspace: %w", err)
+			}
+			root = absolute
+		}
+		cfg.Workspaces = []Workspace{{ID: "default", Root: root, Access: "read_write", AutoCreate: true}}
+	}
 	if cfg.DatabasePath == "" || (cfg.DataDir != defaultDataDir && cfg.DatabasePath == defaultDatabasePath && os.Getenv("OPS_AGENT_DATABASE") == "") {
 		cfg.DatabasePath = filepath.Join(cfg.DataDir, "ops-agent.db")
-	}
-	if cfg.ArtifactsDir == "" || (cfg.DataDir != defaultDataDir && cfg.ArtifactsDir == defaultArtifactsDir && os.Getenv("OPS_AGENT_ARTIFACTS_DIR") == "") {
-		cfg.ArtifactsDir = filepath.Join(cfg.DataDir, "artifacts")
 	}
 	if cfg.OpenSSH.DefaultKnownHosts == "" || (cfg.DataDir != defaultDataDir && cfg.OpenSSH.DefaultKnownHosts == defaultKnownHosts) {
 		cfg.OpenSSH.DefaultKnownHosts = filepath.Join(cfg.DataDir, "known_hosts")
@@ -119,14 +155,72 @@ func Load(path string) (Config, error) {
 	if cfg.Logging.File == "" || (cfg.DataDir != defaultDataDir && cfg.Logging.File == defaultLogFile && os.Getenv("OPS_AGENT_LOG_FILE") == "") {
 		cfg.Logging.File = filepath.Join(cfg.DataDir, "ops-agent.log")
 	}
+	if err := validateOperationsConfig(&cfg); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func validateOperationsConfig(cfg *Config) error {
+	dataRoot, _ := filepath.Abs(cfg.DataDir)
+	seenWorkspaces := make(map[string]struct{}, len(cfg.Workspaces))
+	for index := range cfg.Workspaces {
+		workspace := &cfg.Workspaces[index]
+		workspace.ID = strings.TrimSpace(workspace.ID)
+		workspace.Root = filepath.Clean(strings.TrimSpace(workspace.Root))
+		workspace.Access = strings.TrimSpace(workspace.Access)
+		if workspace.Access == "" {
+			workspace.Access = "read_only"
+		}
+		if !regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`).MatchString(workspace.ID) {
+			return fmt.Errorf("workspace %d has invalid id", index+1)
+		}
+		if _, exists := seenWorkspaces[workspace.ID]; exists {
+			return fmt.Errorf("duplicate workspace id %q", workspace.ID)
+		}
+		seenWorkspaces[workspace.ID] = struct{}{}
+		if !filepath.IsAbs(workspace.Root) {
+			return fmt.Errorf("workspace %q root must be absolute", workspace.ID)
+		}
+		if workspace.Access != "read_only" && workspace.Access != "read_write" {
+			return fmt.Errorf("workspace %q access must be read_only or read_write", workspace.ID)
+		}
+		if sameOrWithin(workspace.Root, dataRoot) || sameOrWithin(dataRoot, workspace.Root) {
+			return fmt.Errorf("workspace %q cannot overlap the control-plane data directory", workspace.ID)
+		}
+	}
+	seenValidators := make(map[string]struct{}, len(cfg.Validators))
+	for index := range cfg.Validators {
+		validator := &cfg.Validators[index]
+		validator.ID = strings.TrimSpace(validator.ID)
+		validator.Scope = strings.TrimSpace(validator.Scope)
+		validator.Program = strings.TrimSpace(validator.Program)
+		if !regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`).MatchString(validator.ID) || validator.Program == "" {
+			return fmt.Errorf("validator %d is invalid", index+1)
+		}
+		if _, exists := seenValidators[validator.ID]; exists {
+			return fmt.Errorf("duplicate validator id %q", validator.ID)
+		}
+		seenValidators[validator.ID] = struct{}{}
+		if validator.Scope != "remote" && validator.Scope != "workspace" {
+			return fmt.Errorf("validator %q scope must be remote or workspace", validator.ID)
+		}
+		if validator.TimeoutSeconds <= 0 || validator.TimeoutSeconds > 60 {
+			return fmt.Errorf("validator %q timeout_seconds must be between 1 and 60", validator.ID)
+		}
+	}
+	return nil
+}
+
+func sameOrWithin(path, root string) bool {
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func applyEnv(cfg *Config) {
 	setString(&cfg.ListenAddress, "OPS_AGENT_LISTEN")
 	setString(&cfg.DataDir, "OPS_AGENT_DATA_DIR")
 	setString(&cfg.DatabasePath, "OPS_AGENT_DATABASE")
-	setString(&cfg.ArtifactsDir, "OPS_AGENT_ARTIFACTS_DIR")
 	setString(&cfg.PolicyPath, "OPS_AGENT_POLICY")
 	setString(&cfg.Logging.Level, "OPS_AGENT_LOG_LEVEL")
 	setString(&cfg.Logging.Format, "OPS_AGENT_LOG_FORMAT")
@@ -136,6 +230,9 @@ func applyEnv(cfg *Config) {
 	setInt(&cfg.Logging.MaxBackups, "OPS_AGENT_LOG_MAX_BACKUPS")
 	setInt(&cfg.Logging.RecentLimit, "OPS_AGENT_LOG_RECENT_LIMIT")
 	setString(&cfg.MasterKey, "OPS_AGENT_MASTER_KEY")
+	setString(&cfg.WebAuth.BootstrapPassword, "OPS_AGENT_ADMIN_PASSWORD")
+	setBool(&cfg.WebAuth.SecureCookies, "OPS_AGENT_SECURE_COOKIES")
+	setString(&cfg.DefaultWorkspaceDir, "OPS_AGENT_DEFAULT_WORKSPACE")
 	setString(&cfg.Model.APIKey, "OPENAI_API_KEY")
 	setString(&cfg.Model.BaseURL, "OPENAI_BASE_URL")
 	setString(&cfg.Model.Name, "OPENAI_MODEL")

@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"eino-ops-agent/internal/domain"
@@ -27,8 +28,7 @@ func TestDefaultPolicy(t *testing.T) {
 		{"dynamic expansion", domain.ExecRequest{Mode: domain.ExecScript, Script: "echo $(whoami)"}, domain.RiskCritical, domain.ActionBreakGlass},
 		{"credential read", domain.ExecRequest{Mode: domain.ExecScript, Script: "cat ~/.ssh/id_ed25519"}, domain.RiskForbidden, domain.ActionDeny},
 		{"unparseable", domain.ExecRequest{Mode: domain.ExecScript, Script: "if then"}, domain.RiskCritical, domain.ActionBreakGlass},
-		{"artifact upload", domain.ExecRequest{Mode: domain.ExecUpload, ArtifactName: "app.tar.gz", RemotePath: "/tmp/app.tar.gz"}, domain.RiskChange, domain.ActionApprove},
-		{"sensitive download", domain.ExecRequest{Mode: domain.ExecDownload, ArtifactName: "shadow", RemotePath: "/etc/shadow"}, domain.RiskForbidden, domain.ActionDeny},
+		{"workspace upload", domain.ExecRequest{Mode: domain.ExecWorkspaceUpload, WorkspaceID: "default", RelativePath: "app.yaml", ExpectedSHA256: strings.Repeat("a", 64), RemotePath: "/tmp/app.yaml"}, domain.RiskChange, domain.ActionApprove},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

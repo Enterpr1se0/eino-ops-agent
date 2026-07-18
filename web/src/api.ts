@@ -1,9 +1,18 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, ChatMessage, ChatSession, ChatState, Health, Host, HostInput, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Run, ServerLogResponse, SystemSettings, SystemSettingsInput } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatMessage, ChatSession, ChatState, Health, Host, HostInput, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Run, ServerLogResponse, SystemSettings, SystemSettingsInput, ToolCapabilities, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceUploadResult } from './types'
+
+let csrfToken = ''
+
+function rememberAuth(session: AuthSession | null) { csrfToken = session?.csrf_token || '' }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+	const method=(init?.method||'GET').toUpperCase()
+	const multipart=typeof FormData!=='undefined'&&init?.body instanceof FormData
+	const headers:Record<string,string> = { ...(multipart?{}:{'Content-Type':'application/json'}), ...(init?.headers as Record<string,string> || {}) }
+	if(!['GET','HEAD','OPTIONS'].includes(method)&&csrfToken)headers['X-CSRF-Token']=csrfToken
   const response = await fetch(path, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+	credentials:'same-origin',
+	headers,
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: response.statusText }))
@@ -19,8 +28,17 @@ async function requestList<T>(path: string): Promise<T[]> {
 }
 
 export const api = {
+	authSession: async()=>{const session=await request<AuthSession>('/api/v1/auth/session');rememberAuth(session);return session},
+	login: async(password:string)=>{const session=await request<AuthSession>('/api/v1/auth/login',{method:'POST',body:JSON.stringify({password})});rememberAuth(session);return session},
+	logout: async()=>{await request<void>('/api/v1/auth/logout',{method:'POST',body:'{}'});rememberAuth(null)},
+	changePassword: async(currentPassword:string,newPassword:string)=>{const result=await request<{changed:boolean;login_required:boolean}>('/api/v1/auth/password',{method:'PUT',body:JSON.stringify({current_password:currentPassword,new_password:newPassword})});rememberAuth(null);return result},
   health: () => request<Health>('/api/v1/health'),
-  systemSettings: () => request<SystemSettings>('/api/v1/settings'),
+	systemSettings: () => request<SystemSettings>('/api/v1/settings'),
+	capabilities: () => request<ToolCapabilities>('/api/v1/capabilities'),
+	workspaceFiles: (workspaceId:string,path='.') => request<WorkspaceFileList>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`),
+	previewWorkspaceFile: (workspaceId:string,path:string) => request<WorkspaceFilePreview>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/preview?path=${encodeURIComponent(path)}`),
+	uploadWorkspaceFile: (workspaceId:string,file:File,path:string) => {const body=new FormData();body.set('file',file);body.set('path',path);return request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files`,{method:'POST',body})},
+	deleteWorkspaceFile: (workspaceId:string,path:string) => request<WorkspaceDeleteResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`,{method:'DELETE'}),
   saveSystemSettings: (settings: SystemSettingsInput) => request<SystemSettings>('/api/v1/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   modelProviders: () => requestList<ModelProvider>('/api/v1/model-providers'),
   discoverModels: (input: ModelDiscoveryInput) => request<ModelCatalog>('/api/v1/model-providers/discover', { method: 'POST', body: JSON.stringify(input) }),
@@ -36,6 +54,7 @@ export const api = {
   trustKey: (id: string, fingerprint: string) => request(`/api/v1/hosts/${id}/trust-key`, { method: 'POST', body: JSON.stringify({ fingerprint }) }),
   probe: (id: string) => request<Record<string, string>>(`/api/v1/hosts/${id}/probe`, { method: 'POST', body: '{}' }),
   approvals: () => requestList<Approval>('/api/v1/approvals?status=pending&limit=100'),
+  retryApprovalReview: (id: string) => request<Approval>(`/api/v1/approvals/${id}/review/retry`, { method: 'POST', body: '{}' }),
   approve: (id: string, challenge: string, reason: string, scope: 'once'|'session' = 'once') => request<ApprovalExecutionResult>(`/api/v1/approvals/${id}/approve`, { method: 'POST', body: JSON.stringify({ challenge, reason, scope }) }),
   reject: (id: string, reason: string) => request(`/api/v1/approvals/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   runs: (query = '') => requestList<Run>(`/api/v1/runs?limit=100&q=${encodeURIComponent(query)}`),
@@ -56,7 +75,8 @@ export const api = {
 export async function streamChat(sessionId: string, message: string, onEvent: (event: AgentEvent) => void) {
   const response = await fetch('/api/v1/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+	credentials:'same-origin',
+	headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
     body: JSON.stringify({ session_id: sessionId, message }),
   })
   if (!response.ok || !response.body) {

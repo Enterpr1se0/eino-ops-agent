@@ -53,13 +53,12 @@ type StreamingTransport interface {
 }
 
 type OpenSSHTransport struct {
-	config      config.OpenSSH
-	limits      config.Limits
-	artifactDir string
+	config config.OpenSSH
+	limits config.Limits
 }
 
-func NewOpenSSHTransport(cfg config.OpenSSH, limits config.Limits, artifactDir string) *OpenSSHTransport {
-	return &OpenSSHTransport{config: cfg, limits: limits, artifactDir: artifactDir}
+func NewOpenSSHTransport(cfg config.OpenSSH, limits config.Limits) *OpenSSHTransport {
+	return &OpenSSHTransport{config: cfg, limits: limits}
 }
 
 func (t *OpenSSHTransport) Exec(ctx context.Context, host domain.Host, req domain.ExecRequest) (RawResult, error) {
@@ -74,7 +73,7 @@ func (t *OpenSSHTransport) execWithCallback(ctx context.Context, host domain.Hos
 	if err := validateHost(host); err != nil {
 		return RawResult{}, err
 	}
-	if req.Mode == domain.ExecUpload || req.Mode == domain.ExecDownload {
+	if req.Mode == domain.ExecWorkspaceUpload {
 		return t.transfer(ctx, host, req)
 	}
 	command, stdin, err := buildRemoteCommand(req)
@@ -143,26 +142,18 @@ func (t *OpenSSHTransport) execWithCallback(ctx context.Context, host domain.Hos
 }
 
 func (t *OpenSSHTransport) transfer(ctx context.Context, host domain.Host, req domain.ExecRequest) (RawResult, error) {
-	if filepath.Base(req.ArtifactName) != req.ArtifactName || !regexp.MustCompile(`^[A-Za-z0-9_.+-]+$`).MatchString(req.ArtifactName) {
-		return RawResult{}, fmt.Errorf("invalid artifact name")
-	}
 	if !filepath.IsAbs(req.RemotePath) || strings.ContainsAny(req.RemotePath, "\r\n\x00") {
 		return RawResult{}, fmt.Errorf("remote transfer path must be absolute and contain no control characters")
 	}
-	if err := os.MkdirAll(t.artifactDir, 0o700); err != nil {
-		return RawResult{}, err
+	localPath := req.LocalPath
+	if !filepath.IsAbs(localPath) || strings.ContainsAny(localPath, "\r\n\x00") {
+		return RawResult{}, fmt.Errorf("workspace upload source was not prepared by the control plane")
 	}
-	localPath := filepath.Join(t.artifactDir, req.ArtifactName)
-	var batch string
-	if req.Mode == domain.ExecUpload {
-		info, err := os.Stat(localPath)
-		if err != nil || !info.Mode().IsRegular() {
-			return RawResult{}, fmt.Errorf("artifact %q is missing or not a regular file", req.ArtifactName)
-		}
-		batch = "put " + sftpQuote(localPath) + " " + sftpQuote(req.RemotePath) + "\n"
-	} else {
-		batch = "get " + sftpQuote(req.RemotePath) + " " + sftpQuote(localPath) + "\n"
+	info, err := os.Stat(localPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return RawResult{}, fmt.Errorf("transfer source is missing or not a regular file")
 	}
+	batch := "put " + sftpQuote(localPath) + " " + sftpQuote(req.RemotePath) + "\n"
 	timeout := req.TimeoutSeconds
 	if timeout <= 0 {
 		timeout = t.limits.SyncTimeoutSeconds
@@ -391,7 +382,10 @@ func (t *OpenSSHTransport) sftpArgs(host domain.Host) ([]string, error) {
 	if host.AuthType == "password" {
 		batchMode = "no"
 	}
-	args := []string{"-b", "-", "-o", "BatchMode=" + batchMode, "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10"}
+	// sftp's -b option injects "-obatchmode yes" into the underlying ssh
+	// command. OpenSSH keeps the first value for each option, so our explicit
+	// password-host override must appear before -b or SSH_ASKPASS is never used.
+	args := []string{"-o", "BatchMode=" + batchMode, "-b", "-", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10"}
 	if host.AuthType == "password" {
 		args = append(args,
 			"-o", "NumberOfPasswordPrompts=1",

@@ -86,10 +86,10 @@ func run(ctx context.Context, args []string) error {
 		return approvalCommand(ctx, app, args[1:])
 	case "audit":
 		return auditCommand(ctx, app, args[1:])
-	case "artifact":
-		return artifactCommand(ctx, app, args[1:])
 	case "chat":
 		return chatCommand(ctx, app)
+	case "admin":
+		return adminCommand(ctx, app, args[1:])
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -98,6 +98,20 @@ func run(ctx context.Context, args []string) error {
 
 func newApplication(ctx context.Context, cfg config.Config) (*application, error) {
 	started := time.Now()
+	for _, workspace := range cfg.Workspaces {
+		if !workspace.AutoCreate {
+			continue
+		}
+		if info, err := os.Lstat(workspace.Root); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return nil, fmt.Errorf("default workspace %q must be a real directory, not a file or symbolic link", workspace.Root)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect default workspace: %w", err)
+		} else if err := os.MkdirAll(workspace.Root, 0o700); err != nil {
+			return nil, fmt.Errorf("create default workspace: %w", err)
+		}
+	}
 	st, err := store.Open(ctx, cfg.DatabasePath)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -112,8 +126,8 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 		st.Close()
 		return nil, err
 	}
-	transport := sshx.NewOpenSSHTransport(cfg.OpenSSH, cfg.Limits, cfg.ArtifactsDir)
-	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), cfg.Limits, cfg.ArtifactsDir)
+	transport := sshx.NewOpenSSHTransport(cfg.OpenSSH, cfg.Limits)
+	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), cfg.Limits, cfg)
 	runtime, err := agent.New(ctx, cfg.Model, svc, st)
 	if err != nil {
 		st.Close()
@@ -124,8 +138,15 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 }
 
 func serve(ctx context.Context, app *application) error {
+	if err := app.service.RecoverInterruptedTasks(ctx); err != nil {
+		return fmt.Errorf("recover persisted tasks: %w", err)
+	}
+	webAuth := security.NewWebAuth(app.store, app.config.WebAuth.SessionTTL)
+	if err := webAuth.Initialize(ctx, app.config.WebAuth.BootstrapPassword); err != nil {
+		return fmt.Errorf("initialize web authentication: %w", err)
+	}
 	server := &http.Server{
-		Addr: app.config.ListenAddress, Handler: httpapi.New(app.service, app.agent).Handler(),
+		Addr: app.config.ListenAddress, Handler: httpapi.New(app.service, app.agent, webAuth, app.config.WebAuth.SecureCookies).Handler(),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	shutdownCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -144,6 +165,22 @@ func serve(ctx context.Context, app *application) error {
 		return nil
 	}
 	return err
+}
+
+func adminCommand(ctx context.Context, app *application, args []string) error {
+	if len(args) != 1 || args[0] != "reset-password" {
+		return fmt.Errorf("admin command requires reset-password")
+	}
+	password := app.config.WebAuth.BootstrapPassword
+	if password == "" {
+		return fmt.Errorf("OPS_AGENT_ADMIN_PASSWORD is required to reset the administrator password")
+	}
+	auth := security.NewWebAuth(app.store, app.config.WebAuth.SessionTTL)
+	if err := auth.ResetPassword(ctx, password); err != nil {
+		return err
+	}
+	fmt.Println("administrator password reset; all web sessions revoked")
+	return nil
 }
 
 func hostCommand(ctx context.Context, app *application, args []string) error {
@@ -287,45 +324,6 @@ func auditCommand(ctx context.Context, app *application, args []string) error {
 	}
 }
 
-func artifactCommand(ctx context.Context, app *application, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("artifact command requires add, list, upload, or download")
-	}
-	switch args[0] {
-	case "list":
-		items, err := app.service.ListArtifacts()
-		return printJSON(items, err)
-	case "add":
-		if len(args) != 3 {
-			return fmt.Errorf("usage: artifact add NAME LOCAL_PATH")
-		}
-		data, err := os.ReadFile(args[2])
-		if err != nil {
-			return err
-		}
-		item, err := app.service.SaveArtifact(args[1], data)
-		return printJSON(item, err)
-	case "upload", "download":
-		fs := flag.NewFlagSet("artifact "+args[0], flag.ContinueOnError)
-		hostID := fs.String("host", "", "registered host ID")
-		name := fs.String("name", "", "local artifact name")
-		remote := fs.String("remote", "", "absolute remote path")
-		reason := fs.String("reason", "artifact transfer", "transfer reason")
-		rollback := fs.String("rollback", "remove uploaded artifact", "upload rollback")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if args[0] == "upload" {
-			result, err := app.service.UploadArtifact(ctx, *hostID, *name, *remote, *reason, *rollback, "local-cli")
-			return printJSON(result, err)
-		}
-		result, err := app.service.DownloadArtifact(ctx, *hostID, *remote, *name, *reason, "local-cli")
-		return printJSON(result, err)
-	default:
-		return fmt.Errorf("unknown artifact command %q", args[0])
-	}
-}
-
 func chatCommand(ctx context.Context, app *application) error {
 	if !app.agent.Available() {
 		return agent.ErrUnavailable
@@ -379,7 +377,7 @@ Usage:
   ops-agent [--config FILE] exec --host ID --program PROGRAM --arg ARG
   ops-agent [--config FILE] approval list|approve|reject
   ops-agent [--config FILE] audit search|show
-  ops-agent [--config FILE] artifact add|list|upload|download
+	  OPS_AGENT_ADMIN_PASSWORD=... ops-agent [--config FILE] admin reset-password
   ops-agent version`)
 }
 
