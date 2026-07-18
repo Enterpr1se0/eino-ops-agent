@@ -66,13 +66,13 @@ type Runtime struct {
 }
 
 type Status struct {
-	Available             bool   `json:"available"`
-	ReviewAgentsAvailable bool   `json:"review_agents_available"`
-	Source                string `json:"source"`
-	ProviderID            string `json:"provider_id,omitempty"`
-	Name                  string `json:"name,omitempty"`
-	Model                 string `json:"model,omitempty"`
-	Error                 string `json:"error,omitempty"`
+	Available                 bool   `json:"available"`
+	ExplanationAgentAvailable bool   `json:"explanation_agent_available"`
+	Source                    string `json:"source"`
+	ProviderID                string `json:"provider_id,omitempty"`
+	Name                      string `json:"name,omitempty"`
+	Model                     string `json:"model,omitempty"`
+	Error                     string `json:"error,omitempty"`
 }
 
 type TestResult struct {
@@ -152,7 +152,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 			r.tools = nil
 			r.toolsAt = ""
 			r.mu.Unlock()
-			r.service.SetCommandReviewer(nil)
+			r.service.SetCommandExplainer(nil)
 			observability.FromContext(ctx).WarnContext(ctx, "model runtime unavailable", "component", "agent", "reason", "no active model provider")
 			return nil
 		}
@@ -180,15 +180,15 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		r.tools = nil
 		r.toolsAt = ""
 		r.mu.Unlock()
-		r.service.SetCommandReviewer(nil)
+		r.service.SetCommandExplainer(nil)
 		observability.FromContext(ctx).ErrorContext(ctx, "model runtime reload failed", "component", "agent", "provider_id", status.ProviderID, "model", cfg.Name, "error", err)
 		return err
 	}
-	reviewCoordinator, reviewErr := buildReviewCoordinator(r.baseCtx, cfg)
-	if reviewErr != nil {
-		observability.FromContext(ctx).WarnContext(ctx, "review subagents unavailable", "component", "agent", "model", cfg.Name, "error", reviewErr)
+	explanationCoordinator, explanationErr := buildExplanationCoordinator(r.baseCtx, cfg)
+	if explanationErr != nil {
+		observability.FromContext(ctx).WarnContext(ctx, "command explanation Agent unavailable", "component", "agent", "model", cfg.Name, "error", explanationErr)
 	} else {
-		status.ReviewAgentsAvailable = true
+		status.ExplanationAgentAvailable = true
 	}
 	status.Available = true
 	r.mu.Lock()
@@ -197,8 +197,8 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	r.tools = toolDescriptors
 	r.toolsAt = time.Now().UTC().Format(time.RFC3339Nano)
 	r.mu.Unlock()
-	r.service.SetCommandReviewer(reviewCoordinator)
-	observability.FromContext(ctx).InfoContext(ctx, "model runtime ready", "component", "agent", "source", status.Source, "provider_id", status.ProviderID, "model", status.Model, "max_iterations", settings.AgentMaxIterations, "review_subagents", status.ReviewAgentsAvailable)
+	r.service.SetCommandExplainer(explanationCoordinator)
+	observability.FromContext(ctx).InfoContext(ctx, "model runtime ready", "component", "agent", "source", status.Source, "provider_id", status.ProviderID, "model", status.Model, "max_iterations", settings.AgentMaxIterations, "explanation_agent", status.ExplanationAgentAvailable)
 	return nil
 }
 

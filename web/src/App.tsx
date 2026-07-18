@@ -148,7 +148,7 @@ function ConfigurationPage({hosts,providers,settings,capabilities,health,refresh
     <div className="configuration-content" role="tabpanel">
       {section==='models'&&<ModelsPage providers={providers} health={health} refresh={refresh}/>} 
       {section==='hosts'&&<HostsPage hosts={hosts} refresh={refresh}/>} 
-	  {section==='system'&&<SystemSettingsPage settings={settings} capabilities={capabilities} reviewAgentsAvailable={!!health?.model?.review_agents_available} refresh={refresh}/>}
+	  {section==='system'&&<SystemSettingsPage settings={settings} capabilities={capabilities} explanationAgentAvailable={!!health?.model?.explanation_agent_available} refresh={refresh}/>}
     </div>
   </div>
 }
@@ -261,7 +261,7 @@ function LLMToolsPage({catalog,refresh}:{catalog:LLMToolCatalog|null;refresh:()=
 			<dl><div><dt>Agent</dt><dd>{catalog?.agent||'ops-pilot'}</dd></div><div><dt>Model</dt><dd>{catalog?.model||'Not loaded'}</dd></div><div><dt>Functions</dt><dd>{catalog?.count??0}</dd></div><div><dt>Execution</dt><dd>{catalog?.execution_mode||'sequential'}</dd></div></dl>
 			<button className="tool-catalog-refresh" onClick={refreshCatalog} disabled={refreshing}><RefreshCw className={refreshing?'spin':''} size={14}/>{refreshing?'Refreshing…':'Refresh snapshot'}</button>
 		</section>
-		<section className="tool-catalog-note"><BrainCircuit size={16}/><div><b>Main Agent tool boundary</b><span>The two approval-review SubAgents remain tool-free. Only <code>{catalog?.agent||'ops-pilot'}</code> receives the functions shown below.</span></div><small>{catalog?.loaded_at?`Loaded ${new Date(catalog.loaded_at).toLocaleString()}`:'Waiting for a model runtime'}</small></section>
+		<section className="tool-catalog-note"><BrainCircuit size={16}/><div><b>Main Agent tool boundary</b><span>The approval explanation Agent remains tool-free. Only <code>{catalog?.agent||'ops-pilot'}</code> receives the functions shown below.</span></div><small>{catalog?.loaded_at?`Loaded ${new Date(catalog.loaded_at).toLocaleString()}`:'Waiting for a model runtime'}</small></section>
 		<div className="tool-catalog-metrics"><Metric label="Loaded functions" value={String(catalog?.count??0)} tone="green"/><Metric label="Read-only helpers" value={String(readOnlyCount)}/><Metric label="Always approval-gated" value={String(protectedCount)} tone="amber"/><Metric label="Framework" value={catalog?.framework||'Eino'}/></div>
 		<div className="tool-catalog-toolbar panel"><label><Search size={15}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder="Search function name or purpose…"/></label><select value={category} onChange={event=>setCategory(event.target.value)}><option value="all">All categories · {tools.length}</option>{categories.map(value=><option value={value} key={value}>{toolCategoryLabels[value]||value} · {tools.filter(tool=>tool.category===value).length}</option>)}</select><span>{filtered.length} visible</span></div>
 		{!catalog?<div className="tool-catalog-loading panel"><LoaderCircle className="spin" size={20}/>Loading runtime function snapshot…</div>:!catalog.loaded?<Empty icon={<FunctionSquare/>} title="Agent runtime is not loaded" text="Activate a working model provider; functions appear here after the Eino runner builds successfully."/>:<div className="tool-catalog-browser">
@@ -311,31 +311,28 @@ function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<
 	</div>
 }
 
-function SystemSettingsPage({settings,capabilities,reviewAgentsAvailable,refresh}:{settings:SystemSettings|null;capabilities:ToolCapabilities;reviewAgentsAvailable:boolean;refresh:()=>Promise<void>}) {
+function SystemSettingsPage({settings,capabilities,explanationAgentAvailable,refresh}:{settings:SystemSettings|null;capabilities:ToolCapabilities;explanationAgentAvailable:boolean;refresh:()=>Promise<void>}) {
   const savedValue=settings?.agent_max_iterations??20
-  const savedReviews=settings?.subagent_reviews_enabled??true
-  const savedExplanations=settings?.beginner_explanations_enabled??true
+  const savedExplanation=settings?.approval_explanations_enabled??true
   const [maxIterations,setMaxIterations]=useState(savedValue)
-  const [reviewsEnabled,setReviewsEnabled]=useState(savedReviews)
-  const [explanationsEnabled,setExplanationsEnabled]=useState(savedExplanations)
+  const [explanationEnabled,setExplanationEnabled]=useState(savedExplanation)
   const [dirty,setDirty]=useState(false)
   const [saving,setSaving]=useState(false)
   const [notice,setNotice]=useState('')
-  useEffect(()=>{if(!dirty){setMaxIterations(savedValue);setReviewsEnabled(savedReviews);setExplanationsEnabled(savedExplanations)}},[savedValue,savedReviews,savedExplanations,dirty])
+  useEffect(()=>{if(!dirty){setMaxIterations(savedValue);setExplanationEnabled(savedExplanation)}},[savedValue,savedExplanation,dirty])
   const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(50,value||5)));setDirty(true);setNotice('')}
-  const toggleReviews=(value:boolean)=>{setReviewsEnabled(value);if(!value)setExplanationsEnabled(false);setDirty(true);setNotice('')}
-  const toggleExplanations=(value:boolean)=>{setExplanationsEnabled(value);setDirty(true);setNotice('')}
-  const save=async(event:FormEvent)=>{event.preventDefault();setSaving(true);try{const result=await api.saveSystemSettings({agent_max_iterations:maxIterations,subagent_reviews_enabled:reviewsEnabled,beginner_explanations_enabled:explanationsEnabled});setMaxIterations(result.agent_max_iterations);setReviewsEnabled(result.subagent_reviews_enabled);setExplanationsEnabled(result.beginner_explanations_enabled);setDirty(false);setNotice(`Saved · Agent loop ${result.agent_max_iterations} rounds · Review SubAgents ${result.subagent_reviews_enabled?'enabled':'disabled'}.`);await refresh()}catch(err){setNotice(errorText(err))}finally{setSaving(false)}}
+  const toggleExplanation=(value:boolean)=>{setExplanationEnabled(value);setDirty(true);setNotice('')}
+  const save=async(event:FormEvent)=>{event.preventDefault();setSaving(true);try{const result=await api.saveSystemSettings({agent_max_iterations:maxIterations,approval_explanations_enabled:explanationEnabled});setMaxIterations(result.agent_max_iterations);setExplanationEnabled(result.approval_explanations_enabled);setDirty(false);setNotice(`Saved · Agent loop ${result.agent_max_iterations} rounds · Approval explanation ${result.approval_explanations_enabled?'enabled':'disabled'}.`);await refresh()}catch(err){setNotice(errorText(err))}finally{setSaving(false)}}
   return <div className="system-settings page-stack">
     <div className="page-actions"><div><p>Agent runtime safeguards</p><span>Runtime changes are persisted locally, audited and applied to new Agent runs without a server restart.</span></div></div>
     {notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
     <form className="settings-panel panel" onSubmit={save}><div className="settings-panel-head"><div className="settings-glyph"><SlidersHorizontal size={20}/></div><div><span>AGENT LOOP</span><h3>Maximum model iterations</h3><p>Limits how many model → tool → model decision rounds a single message may consume.</p></div><strong>{maxIterations}</strong></div>
       <div className="iteration-editor"><input aria-label="Maximum model iterations" type="range" min="5" max="50" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>Rounds</span><input type="number" min="5" max="50" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div>
       <div className="iteration-presets"><span>QUICK PRESETS</span>{[10,20,30].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b><small>{value===10?'Short diagnosis':value===20?'Recommended':'Long deployment'}</small></button>)}</div>
-      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>Approval intelligence</b><p>Two isolated, tool-free Eino agents review commands in the background while the human approval gate remains immediately available.</p></div><em className={reviewAgentsAvailable?'ready':'offline'}><CircleDot size={9}/>{reviewAgentsAvailable?'2 runners ready':'model unavailable'}</em></div><label><span><b>Risk reviewer SubAgent</b><small>May tighten a still-pending request. It can never approve, execute, or lower deterministic policy.</small></span><input type="checkbox" checked={reviewsEnabled} onChange={event=>toggleReviews(event.target.checked)}/><i/></label><label className={!reviewsEnabled?'disabled':''}><span><b>Beginner command explanation</b><small>Shows effects, risks, practical tips and rollback guidance in the approval dialog.</small></span><input type="checkbox" checked={explanationsEnabled} disabled={!reviewsEnabled} onChange={event=>toggleExplanations(event.target.checked)}/><i/></label></div>
+      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>Approval explanation</b><p>One isolated, tool-free Eino Agent explains commands in the background. Deterministic Policy remains the only risk classifier.</p></div><em className={explanationAgentAvailable?'ready':'offline'}><CircleDot size={9}/>{explanationAgentAvailable?'1 runner ready':'model unavailable'}</em></div><label><span><b>Command explanation Agent</b><small>Explains effects, risks, practical tips and rollback guidance without changing approval risk.</small></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label></div>
 	  <div className="workspace-capabilities"><div><FileText size={17}/><span><b>Allowlisted Workspaces</b><small>Startup allowlist only. Browse and upload files directly from the Agent conversation.</small></span><em>{capabilities.workspaces.length}</em></div>{capabilities.workspaces.length?capabilities.workspaces.map(workspace=><section className="workspace-summary-row" key={workspace.id}><div><code>{workspace.id}</code><span className={workspace.access}>{workspace.access.replace('_',' ')}</span></div><code title={workspace.root}>{workspace.root}</code><small>{workspace.validators?.length?`validators · ${workspace.validators.join(', ')}`:'no validators'}</small></section>):<p>No local Workspace is exposed. The Agent remains SSH-only.</p>}</div>
       <div className="settings-advice"><ShieldCheck size={17}/><div><b>The safety limit remains enforced</b><p>Higher values support installations and multi-step recovery, but can increase token usage and tool calls. Values are restricted to 5–50.</p></div></div>
-      <div className="settings-footer"><span>{settings?.updated_at?`Last updated ${new Date(settings.updated_at).toLocaleString()}`:'Using system default'}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setReviewsEnabled(savedReviews);setExplanationsEnabled(savedExplanations);setDirty(false);setNotice('')}}>Discard</button><button className="primary" disabled={!dirty||saving}>{saving?'Applying…':'Save & apply'}</button></div>
+      <div className="settings-footer"><span>{settings?.updated_at?`Last updated ${new Date(settings.updated_at).toLocaleString()}`:'Using system default'}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setExplanationEnabled(savedExplanation);setDirty(false);setNotice('')}}>Discard</button><button className="primary" disabled={!dirty||saving}>{saving?'Applying…':'Save & apply'}</button></div>
     </form>
 	<AdminPasswordPanel/>
   </div>
@@ -368,18 +365,18 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
   const stickToLatest=useRef(true)
   const hostNames = useMemo(() => hosts.map((host) => host.name).join(', '), [hosts])
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
-	const pendingReviewID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
+	const pendingExplanationID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
   const sessionBusy=running||detachedRunning
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
 	useEffect(()=>{if(selectedWorkspace&&workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
 	useEffect(()=>{onStreamingChange(running)},[running,onStreamingChange])
 	useEffect(()=>()=>onStreamingChange(false),[onStreamingChange])
 	useEffect(()=>{
-		if(!pendingReviewID)return
+		if(!pendingExplanationID)return
 		void refreshApprovals()
 		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshApprovals()},1500)
 		return()=>window.clearInterval(timer)
-	},[pendingReviewID,refreshApprovals])
+	},[pendingExplanationID,refreshApprovals])
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -677,20 +674,16 @@ function StructuredObject({label,value}:{label:string;value:JsonRecord}){
   return <section className="tool-object-section"><h4>{label.replaceAll('_',' ')}</h4><dl className="tool-generic-grid">{Object.entries(value).map(([key,item])=><div key={key}><dt>{key.replaceAll('_',' ')}</dt><dd>{displayValue(item)}</dd></div>)}</dl></section>
 }
 
-const recommendationLabels={allow:'建议按现有策略处理',human_required:'需要人工判断',deny:'建议拒绝'} as const
-
 function ReviewList({title,items,tone}:{title:string;items?:string[];tone?:string}){
   if(!items?.length)return null
   return <div className={`review-list ${tone||''}`}><b>{title}</b><ul>{items.map((item,index)=><li key={`${title}_${index}`}>{item}</li>)}</ul></div>
 }
 
-function CommandReviewPanel({review}:{review?:CommandReview}){
+function CommandExplanationPanel({review}:{review?:CommandReview}){
   if(!review)return null
-	if(review.status==='pending')return <div className="command-review-panel pending" role="status" aria-live="polite"><div className="command-review-pending"><span className="review-agent-icon"><LoaderCircle className="spin" size={17}/></span><span><b>双 SubAgent 正在后台审查</b><small>审批已经可以操作；解释和风险建议完成后会自动更新。</small></span><em>NON-BLOCKING</em></div></div>
-  const risk=review.risk_review
+	if(review.status==='pending')return <div className="command-review-panel pending" role="status" aria-live="polite"><div className="command-review-pending"><span className="review-agent-icon"><LoaderCircle className="spin" size={17}/></span><span><b>命令解释 Agent 正在后台工作</b><small>审批已经可以操作；说明完成后会自动更新。</small></span><em>NON-BLOCKING</em></div></div>
   const explanation=review.explanation
-  const recommendation=risk?.recommendation?recommendationLabels[risk.recommendation]:null
-  return <details className={`command-review-panel ${review.status}`}><summary><span className="review-agent-icon"><BrainCircuit size={17}/></span><span><b>双 SubAgent 审查</b><small>{review.status==='completed'?'解释与风险评审已完成':review.status==='degraded'?'部分评审不可用，策略仍然有效':'评审不可用，继续由确定性策略与人工审批处理'}</small></span><em>{review.deterministic_risk.replace('_',' ')} → {review.effective_risk.replace('_',' ')}</em><ChevronRight size={14}/></summary><div className="command-review-body"><div className="review-advisory"><ShieldCheck size={14}/><span>AI 仅提供辅助建议，不能执行命令或批准请求；确定性 Policy 与当前用户是最终权限边界。</span></div>{explanation&&<section className="review-explanation"><div className="review-section-title"><span>01</span><div><b>小白解释 Agent</b><small>{explanation.summary}</small></div></div><p>{explanation.mechanism}</p><div className="review-list-grid"><ReviewList title="会产生什么影响" items={explanation.effects}/><ReviewList title="需要注意的风险" items={explanation.risks} tone="warn"/><ReviewList title="操作提示" items={explanation.beginner_tips}/></div>{explanation.rollback_guide&&<div className="review-rollback"><b>回滚建议</b><p>{explanation.rollback_guide}</p></div>}</section>}{risk&&<section className="review-risk"><div className="review-section-title"><span>02</span><div><b>风险评审 Agent</b><small>{recommendation} · 置信度 {Math.round(risk.confidence*100)}%</small></div><em className={`risk ${risk.risk}`}>{risk.risk.replace('_',' ')}</em></div><div className="review-list-grid"><ReviewList title="判断依据" items={risk.reasons}/><ReviewList title="缺失证据" items={risk.missing_evidence} tone="warn"/><ReviewList title="必要控制措施" items={risk.required_controls}/></div></section>}{review.errors&&review.errors.length>0&&<div className="review-errors"><b>降级信息</b>{review.errors.map((item,index)=><code key={index}>{item}</code>)}</div>}<div className="review-meta">Model {review.model||'unavailable'} · {new Date(review.reviewed_at).toLocaleString()}</div></div></details>
+  return <details className={`command-review-panel ${review.status}`}><summary><span className="review-agent-icon"><BrainCircuit size={17}/></span><span><b>命令解释 Agent</b><small>{review.status==='completed'?'命令作用、风险与回滚说明已生成':review.status==='degraded'?'部分解释不可用，确定性策略不受影响':'解释暂不可用，继续由确定性策略与人工审批处理'}</small></span><em>POLICY · {review.deterministic_risk.replace('_',' ')}</em><ChevronRight size={14}/></summary><div className="command-review-body"><div className="review-advisory"><ShieldCheck size={14}/><span>AI 只解释命令，不能修改风险等级、执行命令或批准请求；风险完全由确定性 Policy 判定。</span></div>{explanation&&<section className="review-explanation"><div className="review-section-title"><span>AI</span><div><b>通俗命令说明</b><small>{explanation.summary}</small></div></div><p>{explanation.mechanism}</p><div className="review-list-grid"><ReviewList title="会产生什么影响" items={explanation.effects}/><ReviewList title="需要注意的风险" items={explanation.risks} tone="warn"/><ReviewList title="操作提示" items={explanation.beginner_tips}/></div>{explanation.rollback_guide&&<div className="review-rollback"><b>回滚建议</b><p>{explanation.rollback_guide}</p></div>}</section>}{review.errors&&review.errors.length>0&&<div className="review-errors"><b>降级信息</b>{review.errors.map((item,index)=><code key={index}>{item}</code>)}</div>}<div className="review-meta">Model {review.model||'unavailable'} · {new Date(review.reviewed_at).toLocaleString()}</div></div></details>
 }
 
 function ApprovalDialog({approval,pendingCount,hosts,running,refresh,onNotice}:{approval:Approval;pendingCount:number;hosts:Host[];running:boolean;refresh:()=>Promise<void>;onNotice:(message:string)=>void}) {
@@ -709,7 +702,7 @@ function ApprovalDialog({approval,pendingCount,hosts,running,refresh,onNotice}:{
 	const targetHost=hosts.find(host=>host.id===approval.host_id)?.name||approval.host_id
 	const hostName=workspaceTransfer?targetHost:workspaceID?`Workspace / ${workspaceID}`:targetHost
 	const expectedSHA=textValue(request.expected_sha256),validator=textValue(request.validator)
-	const reviewPending=approval.ai_review?.status==='pending'
+	const explanationPending=approval.ai_review?.status==='pending'
   const decide=async(scope:'once'|'session')=>{
     setBusy(scope);setError('')
     try{const result=await api.approve(approval.id,challenge,note.trim()||'Reviewed and approved in the current Agent session.',scope);onNotice(`审批已通过 · ${result.status} · ${result.run_id}`);await refresh()}
@@ -720,18 +713,17 @@ function ApprovalDialog({approval,pendingCount,hosts,running,refresh,onNotice}:{
     setBusy('reject');setError('')
     try{await api.reject(approval.id,instruction);onNotice('审批已拒绝 · OpsPilot 正在按你的替代方案继续。');await refresh()}catch(err){setError(errorText(err))}finally{setBusy('')}
   }
-  const retryReview=async()=>{
-    setBusy('review');setError('')
+  const retryExplanation=async()=>{
+    setBusy('explanation');setError('')
     try{
-      const updated=await api.retryApprovalReview(approval.id)
+      const updated=await api.retryApprovalExplanation(approval.id)
       const status=updated.ai_review?.status
-      onNotice(status==='completed'?'SubAgent 审查已重新完成。':'SubAgent 已重试，但模型仍处于降级状态。')
-      setChallenge('')
+      onNotice(status==='completed'?'命令解释已重新生成。':'解释 Agent 已重试，但模型仍处于降级状态。')
       await refresh()
     }catch(err){setError(errorText(err))}finally{setBusy('')}
   }
   const disabled=!!busy
-	return <div className="approval-modal-backdrop"><section className={`approval-dialog ${approval.risk}`} role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title"><div className="approval-dialog-head"><div className="approval-dialog-icon"><ShieldAlert size={20}/></div><div><span>HUMAN APPROVAL · {pendingCount>1?`1 OF ${pendingCount}`:'CURRENT SESSION'}</span><h2 id="approval-dialog-title">OpsPilot 请求执行受控操作</h2></div><em className={`risk ${approval.risk}`}>{approval.risk.replace('_',' ')}</em></div><div className="approval-operation"><span className="approval-command-label">{filePath?'完整受控文件事务':`LLM 请求运行的完整${script?'脚本':'命令'}`}</span>{filePath&&<div className="approval-file-target"><FileText size={15}/><div><b>{workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:filePath}</b><span>{expectedSHA?`Expected SHA256 · ${expectedSHA}`:'未绑定已有版本'}{validator?` · Validator ${validator}`:''}</span></div></div>}<pre className="approval-command-preview">{script||`$ ${operation}`}</pre><dl><div><dt>{workspaceTransfer?'Host':workspaceID?'Workspace':'Host'}</dt><dd>{hostName}</dd></div><div><dt>Expires</dt><dd><Clock3 size={12}/>{new Date(approval.expires_at).toLocaleTimeString()}</dd></div><div><dt>Digest</dt><dd>{approval.request_digest.slice(0,12)}</dd></div></dl>{typeof request.reason==='string'&&<p>{request.reason}</p>}</div><CommandReviewPanel review={approval.ai_review}/><div className="review-retry-row"><span>{reviewPending?'后台审查不会阻塞当前审批。':'只重新运行只读审查，不会执行或批准命令。'}</span><button disabled={disabled||reviewPending} onClick={retryReview}><RefreshCw className={busy==='review'||reviewPending?'spin':''} size={13}/>{reviewPending?'SubAgent 审查中…':busy==='review'?'SubAgent 正在重试…':'重试 SubAgent 审查'}</button></div>{approval.challenge&&<label className="approval-challenge-input"><span>Break-glass challenge · 输入 <code>{approval.challenge}</code></span><input value={challenge} onChange={event=>setChallenge(event.target.value)} placeholder="输入上方 challenge" autoComplete="off" autoFocus/></label>}<label className="approval-guidance"><span>审批说明 / 拒绝后告诉 LLM 应该改做什么</span><textarea value={note} maxLength={2000} onChange={event=>setNote(event.target.value)} placeholder="例如：不要重启服务，先只读取最近 100 行日志并分析原因。" autoFocus={!approval.challenge}/></label>{error&&<div className="approval-dialog-error"><ShieldAlert size={14}/>{error}</div>}<details className="approval-request-detail"><summary>查看完整请求</summary><pre>{JSON.stringify(request,null,2)}</pre></details><div className="approval-choice-grid"><button className="allow-once" disabled={disabled} onClick={()=>decide('once')}><Check size={16}/><span><b>{busy==='once'?'正在执行…':'仅允许本次'}</b><small>只批准当前请求摘要</small></span></button><button className="allow-session" disabled={disabled||approval.risk==='critical'} onClick={()=>decide('session')} title={approval.risk==='critical'?'Critical 操作不能会话级放行':''}><ShieldCheck size={16}/><span><b>{busy==='session'?'正在授权…':'本会话允许相同操作'}</b><small>{approval.risk==='critical'?'Critical 不可用':'目标、内容和参数必须完全一致'}</small></span></button><button className="reject-guidance" disabled={disabled||!note.trim()} onClick={reject}><X size={16}/><span><b>{busy==='reject'?'正在反馈…':'拒绝并告诉 LLM'}</b><small>将输入框内容作为新指令</small></span></button></div><p className="approval-wait">{running?'当前 Agent 已暂停在这个 Tool 调用，审批后会从原位置继续。':'原 Agent 连接已结束；本次决定仍会被执行并写入审计。'}</p></section></div>
+	return <div className="approval-modal-backdrop"><section className={`approval-dialog ${approval.risk}`} role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title"><div className="approval-dialog-head"><div className="approval-dialog-icon"><ShieldAlert size={20}/></div><div><span>HUMAN APPROVAL · {pendingCount>1?`1 OF ${pendingCount}`:'CURRENT SESSION'}</span><h2 id="approval-dialog-title">OpsPilot 请求执行受控操作</h2></div><em className={`risk ${approval.risk}`}>{approval.risk.replace('_',' ')}</em></div><div className="approval-operation"><span className="approval-command-label">{filePath?'完整受控文件事务':`LLM 请求运行的完整${script?'脚本':'命令'}`}</span>{filePath&&<div className="approval-file-target"><FileText size={15}/><div><b>{workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:filePath}</b><span>{expectedSHA?`Expected SHA256 · ${expectedSHA}`:'未绑定已有版本'}{validator?` · Validator ${validator}`:''}</span></div></div>}<pre className="approval-command-preview">{script||`$ ${operation}`}</pre><dl><div><dt>{workspaceTransfer?'Host':workspaceID?'Workspace':'Host'}</dt><dd>{hostName}</dd></div><div><dt>Expires</dt><dd><Clock3 size={12}/>{new Date(approval.expires_at).toLocaleTimeString()}</dd></div><div><dt>Digest</dt><dd>{approval.request_digest.slice(0,12)}</dd></div></dl>{typeof request.reason==='string'&&<p>{request.reason}</p>}</div><CommandExplanationPanel review={approval.ai_review}/><div className="review-retry-row"><span>{explanationPending?'后台解释不会阻塞当前审批。':'只重新生成命令说明，不会修改风险或执行命令。'}</span><button disabled={disabled||explanationPending} onClick={retryExplanation}><RefreshCw className={busy==='explanation'||explanationPending?'spin':''} size={13}/>{explanationPending?'解释 Agent 工作中…':busy==='explanation'?'正在重新解释…':'重新生成命令解释'}</button></div>{approval.challenge&&<label className="approval-challenge-input"><span>Break-glass challenge · 输入 <code>{approval.challenge}</code></span><input value={challenge} onChange={event=>setChallenge(event.target.value)} placeholder="输入上方 challenge" autoComplete="off" autoFocus/></label>}<label className="approval-guidance"><span>审批说明 / 拒绝后告诉 LLM 应该改做什么</span><textarea value={note} maxLength={2000} onChange={event=>setNote(event.target.value)} placeholder="例如：不要重启服务，先只读取最近 100 行日志并分析原因。" autoFocus={!approval.challenge}/></label>{error&&<div className="approval-dialog-error"><ShieldAlert size={14}/>{error}</div>}<details className="approval-request-detail"><summary>查看完整请求</summary><pre>{JSON.stringify(request,null,2)}</pre></details><div className="approval-choice-grid"><button className="allow-once" disabled={disabled} onClick={()=>decide('once')}><Check size={16}/><span><b>{busy==='once'?'正在执行…':'仅允许本次'}</b><small>只批准当前请求摘要</small></span></button><button className="allow-session" disabled={disabled||approval.risk==='critical'} onClick={()=>decide('session')} title={approval.risk==='critical'?'Critical 操作不能会话级放行':''}><ShieldCheck size={16}/><span><b>{busy==='session'?'正在授权…':'本会话允许相同操作'}</b><small>{approval.risk==='critical'?'Critical 不可用':'目标、内容和参数必须完全一致'}</small></span></button><button className="reject-guidance" disabled={disabled||!note.trim()} onClick={reject}><X size={16}/><span><b>{busy==='reject'?'正在反馈…':'拒绝并告诉 LLM'}</b><small>将输入框内容作为新指令</small></span></button></div><p className="approval-wait">{running?'当前 Agent 已暂停在这个 Tool 调用，审批后会从原位置继续。':'原 Agent 连接已结束；本次决定仍会被执行并写入审计。'}</p></section></div>
 }
 
 const emptyHostForm: HostInput = {name:'',address:'',port:22,user:'',auth_type:'agent',config_alias:'',identity_file:'',known_hosts_file:'',proxy_jump:'',password:'',sudo_mode:'none',sudo_password:''}

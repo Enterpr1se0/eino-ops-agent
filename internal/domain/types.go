@@ -111,15 +111,13 @@ const DefaultAgentMaxIterations = 20
 
 type SystemSettings struct {
 	AgentMaxIterations          int       `json:"agent_max_iterations"`
-	SubagentReviewsEnabled      bool      `json:"subagent_reviews_enabled"`
-	BeginnerExplanationsEnabled bool      `json:"beginner_explanations_enabled"`
+	ApprovalExplanationsEnabled bool      `json:"approval_explanations_enabled"`
 	UpdatedAt                   time.Time `json:"updated_at"`
 }
 
 type SystemSettingsInput struct {
 	AgentMaxIterations          int   `json:"agent_max_iterations"`
-	SubagentReviewsEnabled      *bool `json:"subagent_reviews_enabled,omitempty"`
-	BeginnerExplanationsEnabled *bool `json:"beginner_explanations_enabled,omitempty"`
+	ApprovalExplanationsEnabled *bool `json:"approval_explanations_enabled,omitempty"`
 }
 
 type MCPTransport string
@@ -322,7 +320,6 @@ type CommandReviewInput struct {
 	Host          HostCapability `json:"host"`
 	PlanStep      string         `json:"plan_step,omitempty"`
 	RequestDigest string         `json:"request_digest"`
-	BeginnerMode  bool           `json:"beginner_mode"`
 }
 
 type CommandExplanation struct {
@@ -334,22 +331,11 @@ type CommandExplanation struct {
 	RollbackGuide string   `json:"rollback_guide"`
 }
 
-type AIRiskReview struct {
-	Risk             RiskLevel `json:"risk"`
-	Recommendation   string    `json:"recommendation"`
-	Confidence       float64   `json:"confidence"`
-	Reasons          []string  `json:"reasons"`
-	MissingEvidence  []string  `json:"missing_evidence"`
-	RequiredControls []string  `json:"required_controls"`
-}
-
 type CommandReview struct {
 	Status            string              `json:"status"`
 	Model             string              `json:"model,omitempty"`
 	DeterministicRisk RiskLevel           `json:"deterministic_risk"`
-	EffectiveRisk     RiskLevel           `json:"effective_risk"`
 	Explanation       *CommandExplanation `json:"explanation,omitempty"`
-	RiskReview        *AIRiskReview       `json:"risk_review,omitempty"`
 	Errors            []string            `json:"errors,omitempty"`
 	ReviewedAt        time.Time           `json:"reviewed_at"`
 }

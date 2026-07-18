@@ -69,7 +69,7 @@ export const api = {
   trustKey: (id: string, fingerprint: string) => request(`/api/v1/hosts/${id}/trust-key`, { method: 'POST', body: JSON.stringify({ fingerprint }) }),
   probe: (id: string) => request<Record<string, string>>(`/api/v1/hosts/${id}/probe`, { method: 'POST', body: '{}' }),
   approvals: () => requestList<Approval>('/api/v1/approvals?status=pending&limit=100'),
-  retryApprovalReview: (id: string) => request<Approval>(`/api/v1/approvals/${id}/review/retry`, { method: 'POST', body: '{}' }),
+  retryApprovalExplanation: (id: string) => request<Approval>(`/api/v1/approvals/${id}/explanation/retry`, { method: 'POST', body: '{}' }),
   approve: (id: string, challenge: string, reason: string, scope: 'once'|'session' = 'once') => request<ApprovalExecutionResult>(`/api/v1/approvals/${id}/approve`, { method: 'POST', body: JSON.stringify({ challenge, reason, scope }) }),
   reject: (id: string, reason: string) => request(`/api/v1/approvals/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   runs: (query = '') => requestList<Run>(`/api/v1/runs?limit=100&q=${encodeURIComponent(query)}`),

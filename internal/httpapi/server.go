@@ -102,7 +102,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", s.cancelTask)
 	s.mux.HandleFunc("GET /api/v1/approvals", s.listApprovals)
-	s.mux.HandleFunc("POST /api/v1/approvals/{id}/review/retry", s.retryApprovalReview)
+	s.mux.HandleFunc("POST /api/v1/approvals/{id}/explanation/retry", s.retryApprovalExplanation)
 	s.mux.HandleFunc("POST /api/v1/approvals/{id}/approve", s.approve)
 	s.mux.HandleFunc("POST /api/v1/approvals/{id}/reject", s.reject)
 	s.mux.HandleFunc("GET /api/v1/runs", s.searchRuns)
@@ -779,8 +779,8 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) {
 	respond(w, result, err)
 }
 
-func (s *Server) retryApprovalReview(w http.ResponseWriter, r *http.Request) {
-	result, err := s.service.RetryApprovalReview(r.Context(), r.PathValue("id"), actor(r))
+func (s *Server) retryApprovalExplanation(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.RetryApprovalExplanation(r.Context(), r.PathValue("id"), actor(r))
 	respond(w, result, err)
 }
 

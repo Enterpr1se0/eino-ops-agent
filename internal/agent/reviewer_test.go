@@ -6,40 +6,37 @@ import (
 	"eino-ops-agent/internal/domain"
 )
 
-func TestDecodeReviewerJSONAndRejectUnexpectedFields(t *testing.T) {
-	var review domain.AIRiskReview
-	response := "```json\n{\"risk\":\"critical\",\"recommendation\":\"human_required\",\"confidence\":0.8,\"reasons\":[\"service interruption\"],\"missing_evidence\":[],\"required_controls\":[\"verify rollback\"]}\n```"
-	if err := decodeJSONObject(response, &review); err != nil {
+func TestDecodeExplanationJSONAndRejectUnexpectedFields(t *testing.T) {
+	var explanation domain.CommandExplanation
+	response := "```json\n{\"summary\":\"重启服务\",\"mechanism\":\"systemd restarts the unit\",\"effects\":[\"brief interruption\"],\"risks\":[\"requests may fail\"],\"beginner_tips\":[\"check status first\"],\"rollback_guide\":\"restart the previous release\"}\n```"
+	if err := decodeJSONObject(response, &explanation); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateRiskReview(&review); err != nil {
-		t.Fatal(err)
+	if explanation.Summary != "重启服务" || len(explanation.Risks) != 1 {
+		t.Fatalf("unexpected structured explanation: %#v", explanation)
 	}
-	if review.Risk != domain.RiskCritical || review.Recommendation != "human_required" {
-		t.Fatalf("unexpected structured review: %#v", review)
-	}
-	if err := decodeJSONObject(`{"risk":"change","unexpected":true}`, &review); err == nil {
+	if err := decodeJSONObject(`{"summary":"test","unexpected":true}`, &explanation); err == nil {
 		t.Fatal("expected an unknown structured field to be rejected")
 	}
 }
 
 func TestReviewInputMasksEnvironmentValues(t *testing.T) {
 	input := domain.CommandReviewInput{Request: domain.ExecRequest{Env: map[string]string{"TOKEN": "secret", "MODE": "prod"}}}
-	masked := maskReviewInput(input)
+	masked := maskExplanationInput(input)
 	if masked.Request.Env["TOKEN"] != "[configured]" || masked.Request.Env["MODE"] != "[configured]" {
-		t.Fatalf("environment values were exposed to the review agents: %#v", masked.Request.Env)
+		t.Fatalf("environment values were exposed to the explanation Agent: %#v", masked.Request.Env)
 	}
 	if input.Request.Env["TOKEN"] != "secret" {
 		t.Fatal("masking mutated the execution request")
 	}
 }
 
-func TestReviewRiskOrdering(t *testing.T) {
-	if reviewRiskRank(domain.RiskReadOnly) >= reviewRiskRank(domain.RiskChange) || reviewRiskRank(domain.RiskChange) >= reviewRiskRank(domain.RiskCritical) {
-		t.Fatal("review risk ordering is invalid")
+func TestExplanationBoundsListsAndText(t *testing.T) {
+	values := make([]string, 10)
+	for index := range values {
+		values[index] = " item "
 	}
-	value := domain.AIRiskReview{Risk: domain.RiskForbidden, Recommendation: "deny", Confidence: 1}
-	if err := validateRiskReview(&value); err == nil {
-		t.Fatal("review agent must not emit a forbidden deterministic policy decision")
+	if bounded := boundedStrings(values); len(bounded) != 8 || bounded[0] != "item" {
+		t.Fatalf("explanation list was not bounded: %#v", bounded)
 	}
 }

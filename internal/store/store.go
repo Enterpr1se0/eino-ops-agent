@@ -355,8 +355,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_model_providers_active ON model_providers(
 CREATE TABLE IF NOT EXISTS system_settings (
   id INTEGER PRIMARY KEY CHECK(id=1),
   agent_max_iterations INTEGER NOT NULL,
-  subagent_reviews_enabled INTEGER NOT NULL DEFAULT 1,
-  beginner_explanations_enabled INTEGER NOT NULL DEFAULT 1,
+  approval_explanations_enabled INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS mcp_servers (
@@ -393,10 +392,24 @@ CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled,name);
 		`ALTER TABLE chat_messages ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE chat_messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'`,
 		`ALTER TABLE runs ADD COLUMN ai_review_json TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE system_settings ADD COLUMN subagent_reviews_enabled INTEGER NOT NULL DEFAULT 1`,
-		`ALTER TABLE system_settings ADD COLUMN beginner_explanations_enabled INTEGER NOT NULL DEFAULT 1`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
+	// Migrate the former two-Agent toggles once. Existing installations keep an
+	// explicit disable from either legacy setting; fresh databases already have
+	// the new column and skip this compatibility copy.
+	addedExplanationSetting := false
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE system_settings ADD COLUMN approval_explanations_enabled INTEGER NOT NULL DEFAULT 1`); err == nil {
+		addedExplanationSetting = true
+	} else if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	if addedExplanationSetting {
+		_, err := s.db.ExecContext(ctx, `UPDATE system_settings SET approval_explanations_enabled=
+CASE WHEN subagent_reviews_enabled<>0 AND beginner_explanations_enabled<>0 THEN 1 ELSE 0 END`)
+		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such column") {
 			return err
 		}
 	}
@@ -628,29 +641,28 @@ func scanMCPServer(row scanner) (domain.MCPServer, error) {
 
 func (s *Store) GetSystemSettings(ctx context.Context) (domain.SystemSettings, error) {
 	var settings domain.SystemSettings
-	var reviewsEnabled, explanationsEnabled int
+	var explanationsEnabled int
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,subagent_reviews_enabled,beginner_explanations_enabled,updated_at FROM system_settings WHERE id=1`).Scan(
-		&settings.AgentMaxIterations, &reviewsEnabled, &explanationsEnabled, &updated,
+	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,approval_explanations_enabled,updated_at FROM system_settings WHERE id=1`).Scan(
+		&settings.AgentMaxIterations, &explanationsEnabled, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.SystemSettings{AgentMaxIterations: domain.DefaultAgentMaxIterations, SubagentReviewsEnabled: true, BeginnerExplanationsEnabled: true}, nil
+		return domain.SystemSettings{AgentMaxIterations: domain.DefaultAgentMaxIterations, ApprovalExplanationsEnabled: true}, nil
 	}
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
 	settings.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-	settings.SubagentReviewsEnabled = reviewsEnabled != 0
-	settings.BeginnerExplanationsEnabled = explanationsEnabled != 0
+	settings.ApprovalExplanationsEnabled = explanationsEnabled != 0
 	return settings, nil
 }
 
 func (s *Store) SaveSystemSettings(ctx context.Context, settings domain.SystemSettings) (domain.SystemSettings, error) {
 	settings.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,subagent_reviews_enabled,beginner_explanations_enabled,updated_at) VALUES(1,?,?,?,?)
-ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,subagent_reviews_enabled=excluded.subagent_reviews_enabled,
-beginner_explanations_enabled=excluded.beginner_explanations_enabled,updated_at=excluded.updated_at`,
-		settings.AgentMaxIterations, boolInt(settings.SubagentReviewsEnabled), boolInt(settings.BeginnerExplanationsEnabled), formatTime(settings.UpdatedAt))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,approval_explanations_enabled,updated_at) VALUES(1,?,?,?)
+ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,
+approval_explanations_enabled=excluded.approval_explanations_enabled,updated_at=excluded.updated_at`,
+		settings.AgentMaxIterations, boolInt(settings.ApprovalExplanationsEnabled), formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
@@ -873,14 +885,11 @@ WHERE id=? AND status='pending' AND risk=? AND challenge=?`, reason, formatTime(
 	return nil
 }
 
-func (s *Store) UpdatePendingApprovalReview(ctx context.Context, approvalID, runID string, risk domain.RiskLevel, challenge, reviewJSON string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE approvals SET risk=?,challenge=? WHERE id=? AND run_id=? AND status='pending'`,
-		risk, challenge, approvalID, runID)
+func (s *Store) UpdatePendingApprovalExplanation(ctx context.Context, approvalID, runID, reviewJSON string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE runs SET ai_review_json=?
+WHERE id=? AND status='approval_required' AND EXISTS (
+  SELECT 1 FROM approvals WHERE approvals.id=? AND approvals.run_id=runs.id AND approvals.status='pending'
+)`, reviewJSON, runID, approvalID)
 	if err != nil {
 		return err
 	}
@@ -888,16 +897,7 @@ func (s *Store) UpdatePendingApprovalReview(ctx context.Context, approvalID, run
 	if count == 0 {
 		return fmt.Errorf("approval is no longer pending")
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE runs SET risk=?,ai_review_json=? WHERE id=? AND status='approval_required'`,
-		risk, reviewJSON, runID)
-	if err != nil {
-		return err
-	}
-	count, _ = result.RowsAffected()
-	if count == 0 {
-		return fmt.Errorf("approval run is no longer awaiting a decision")
-	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) UpdateRunAIReview(ctx context.Context, runID, reviewJSON string) error {

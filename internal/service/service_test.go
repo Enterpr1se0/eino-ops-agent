@@ -25,34 +25,34 @@ type fakeTransport struct {
 	hosts []domain.Host
 }
 
-type fakeCommandReviewer struct {
+type fakeCommandExplainer struct {
 	mu     sync.Mutex
 	review domain.CommandReview
 	err    error
 	inputs []domain.CommandReviewInput
 }
 
-func (f *fakeCommandReviewer) Review(_ context.Context, input domain.CommandReviewInput) (domain.CommandReview, error) {
+func (f *fakeCommandExplainer) Review(_ context.Context, input domain.CommandReviewInput) (domain.CommandReview, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.inputs = append(f.inputs, input)
 	return f.review, f.err
 }
 
-func (f *fakeCommandReviewer) Inputs() []domain.CommandReviewInput {
+func (f *fakeCommandExplainer) Inputs() []domain.CommandReviewInput {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]domain.CommandReviewInput(nil), f.inputs...)
 }
 
-type blockingCommandReviewer struct {
+type blockingCommandExplainer struct {
 	started chan struct{}
 	release chan struct{}
 	once    sync.Once
 	review  domain.CommandReview
 }
 
-func (r *blockingCommandReviewer) Review(ctx context.Context, _ domain.CommandReviewInput) (domain.CommandReview, error) {
+func (r *blockingCommandExplainer) Review(ctx context.Context, _ domain.CommandReviewInput) (domain.CommandReview, error) {
 	r.once.Do(func() { close(r.started) })
 	select {
 	case <-r.release:
@@ -198,7 +198,7 @@ func newTestService(t *testing.T) (*Service, *fakeTransport, domain.Host) {
 	transport := &fakeTransport{}
 	limits := config.Default().Limits
 	svc := New(st, engine, transport, encryptor, security.NewRedactor(), limits)
-	t.Cleanup(func() { svc.reviewWG.Wait() })
+	t.Cleanup(func() { svc.explainWG.Wait() })
 	host, err := svc.AddHost(ctx, domain.Host{Name: "fixture", Address: "127.0.0.1", Port: 22, User: "test"}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -232,40 +232,39 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || !settings.SubagentReviewsEnabled || !settings.BeginnerExplanationsEnabled {
+	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || !settings.ApprovalExplanationsEnabled {
 		t.Fatalf("unexpected default max iterations: %#v", settings)
 	}
 	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 4}, "test"); err == nil {
 		t.Fatal("expected lower-bound validation error")
 	}
-	reviewsEnabled := false
 	explanationsEnabled := false
 	saved, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
-		AgentMaxIterations: 30, SubagentReviewsEnabled: &reviewsEnabled, BeginnerExplanationsEnabled: &explanationsEnabled,
+		AgentMaxIterations: 30, ApprovalExplanationsEnabled: &explanationsEnabled,
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.AgentMaxIterations != 30 || saved.SubagentReviewsEnabled || saved.BeginnerExplanationsEnabled || saved.UpdatedAt.IsZero() {
+	if saved.AgentMaxIterations != 30 || saved.ApprovalExplanationsEnabled || saved.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected saved settings: %#v", saved)
 	}
 	reloaded, err := svc.SystemSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.AgentMaxIterations != 30 || reloaded.SubagentReviewsEnabled || reloaded.BeginnerExplanationsEnabled {
+	if reloaded.AgentMaxIterations != 30 || reloaded.ApprovalExplanationsEnabled {
 		t.Fatalf("system settings were not persisted: %#v", reloaded)
 	}
 }
 
-func TestCommandReviewerPersistsAdviceWithoutLoweringPolicyRisk(t *testing.T) {
+func TestCommandExplainerPersistsAdviceWithoutChangingPolicyRisk(t *testing.T) {
 	svc, _, host := newTestService(t)
-	reviewer := &fakeCommandReviewer{review: domain.CommandReview{
-		Status: "completed", DeterministicRisk: domain.RiskReadOnly, EffectiveRisk: domain.RiskReadOnly,
+	explainer := &fakeCommandExplainer{review: domain.CommandReview{
+		Status: "completed", DeterministicRisk: domain.RiskReadOnly,
 		Explanation: &domain.CommandExplanation{Summary: "重启服务", Mechanism: "由 systemd 停止并重新启动单元"},
-		RiskReview:  &domain.AIRiskReview{Risk: domain.RiskReadOnly, Recommendation: "allow", Confidence: 0.9}, ReviewedAt: time.Now().UTC(),
+		ReviewedAt:  time.Now().UTC(),
 	}}
-	svc.SetCommandReviewer(reviewer)
+	svc.SetCommandExplainer(explainer)
 	result, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
 		Reason: "recover demo", Rollback: "restart the previous release",
@@ -274,7 +273,7 @@ func TestCommandReviewerPersistsAdviceWithoutLoweringPolicyRisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.Status != "approval_required" || result.Risk != domain.RiskChange || result.Challenge != "" {
-		t.Fatalf("reviewer lowered or changed deterministic approval: %#v", result)
+		t.Fatalf("explainer changed deterministic approval: %#v", result)
 	}
 	waitForApproval(t, svc, result.ApprovalID, func(approval domain.Approval) bool {
 		return approval.AIReview != nil && approval.AIReview.Status != "pending"
@@ -283,54 +282,28 @@ func TestCommandReviewerPersistsAdviceWithoutLoweringPolicyRisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(approvals) != 1 || approvals[0].AIReview == nil || approvals[0].AIReview.EffectiveRisk != domain.RiskChange {
-		t.Fatalf("structured review was not normalized and persisted: %#v", approvals)
+	if len(approvals) != 1 || approvals[0].AIReview == nil || approvals[0].AIReview.DeterministicRisk != domain.RiskChange || approvals[0].AIReview.Explanation == nil {
+		t.Fatalf("structured explanation was not normalized and persisted: %#v", approvals)
 	}
-	inputs := reviewer.Inputs()
-	if len(inputs) != 1 || !inputs[0].BeginnerMode || inputs[0].RequestDigest == "" {
-		t.Fatalf("review coordinator did not receive bounded context: %#v", inputs)
-	}
-}
-
-func TestCommandReviewerCanOnlyEscalateToBreakGlass(t *testing.T) {
-	svc, _, host := newTestService(t)
-	svc.SetCommandReviewer(&fakeCommandReviewer{review: domain.CommandReview{
-		Status: "completed", EffectiveRisk: domain.RiskCritical,
-		RiskReview: &domain.AIRiskReview{Risk: domain.RiskCritical, Recommendation: "human_required", Confidence: 0.75}, ReviewedAt: time.Now().UTC(),
-	}})
-	result, err := svc.Submit(context.Background(), domain.ExecRequest{
-		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
-		Reason: "recover demo", Rollback: "restart the previous release",
-	}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != "approval_required" || result.Risk != domain.RiskChange || result.Challenge != "" {
-		t.Fatalf("approval creation waited for or trusted advisory AI: %#v", result)
-	}
-	updated := waitForApproval(t, svc, result.ApprovalID, func(approval domain.Approval) bool {
-		return approval.Risk == domain.RiskCritical && approval.Challenge != "" && approval.AIReview != nil
-	})
-	if updated.AIReview.EffectiveRisk != domain.RiskCritical {
-		t.Fatalf("background AI risk did not tighten the pending approval: %#v", updated)
+	inputs := explainer.Inputs()
+	if len(inputs) != 1 || inputs[0].RequestDigest == "" {
+		t.Fatalf("explanation Agent did not receive bounded context: %#v", inputs)
 	}
 }
 
-func TestApprovalIsCreatedWithoutWaitingForSubagentReview(t *testing.T) {
+func TestApprovalIsCreatedWithoutWaitingForCommandExplanation(t *testing.T) {
 	svc, _, host := newTestService(t)
-	reviewer := &blockingCommandReviewer{
+	explainer := &blockingCommandExplainer{
 		started: make(chan struct{}), release: make(chan struct{}),
 		review: domain.CommandReview{
-			Status: "completed", EffectiveRisk: domain.RiskChange,
-			RiskReview: &domain.AIRiskReview{Risk: domain.RiskChange, Recommendation: "human_required", Confidence: 0.8},
-			ReviewedAt: time.Now().UTC(),
+			Status: "completed", Explanation: &domain.CommandExplanation{Summary: "重启服务", Mechanism: "systemd 重启单元"}, ReviewedAt: time.Now().UTC(),
 		},
 	}
-	svc.SetCommandReviewer(reviewer)
+	svc.SetCommandExplainer(explainer)
 	released := false
 	defer func() {
 		if !released {
-			close(reviewer.release)
+			close(explainer.release)
 		}
 	}()
 
@@ -351,15 +324,15 @@ func TestApprovalIsCreatedWithoutWaitingForSubagentReview(t *testing.T) {
 	select {
 	case submitted = <-done:
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("approval creation blocked on the SubAgent review")
+		t.Fatal("approval creation blocked on command explanation")
 	}
 	if submitted.err != nil || submitted.result.Status != "approval_required" {
 		t.Fatalf("unexpected immediate approval result: %#v err=%v", submitted.result, submitted.err)
 	}
 	select {
-	case <-reviewer.started:
+	case <-explainer.started:
 	case <-time.After(time.Second):
-		t.Fatal("background SubAgent review did not start")
+		t.Fatal("background explanation did not start")
 	}
 	pending := waitForApproval(t, svc, submitted.result.ApprovalID, func(approval domain.Approval) bool {
 		return approval.AIReview != nil && approval.AIReview.Status == "pending"
@@ -368,7 +341,7 @@ func TestApprovalIsCreatedWithoutWaitingForSubagentReview(t *testing.T) {
 		t.Fatalf("pending advisory review changed deterministic approval: %#v", pending)
 	}
 
-	close(reviewer.release)
+	close(explainer.release)
 	released = true
 	completed := waitForApproval(t, svc, submitted.result.ApprovalID, func(approval domain.Approval) bool {
 		return approval.AIReview != nil && approval.AIReview.Status == "completed"
@@ -378,17 +351,15 @@ func TestApprovalIsCreatedWithoutWaitingForSubagentReview(t *testing.T) {
 	}
 }
 
-func TestLateSubagentReviewCannotOverrideAnApprovalDecision(t *testing.T) {
+func TestLateCommandExplanationCannotOverrideAnApprovalDecision(t *testing.T) {
 	svc, transport, host := newTestService(t)
-	reviewer := &blockingCommandReviewer{
+	explainer := &blockingCommandExplainer{
 		started: make(chan struct{}), release: make(chan struct{}),
 		review: domain.CommandReview{
-			Status: "completed", EffectiveRisk: domain.RiskCritical,
-			RiskReview: &domain.AIRiskReview{Risk: domain.RiskCritical, Recommendation: "human_required", Confidence: 0.9},
-			ReviewedAt: time.Now().UTC(),
+			Status: "completed", Explanation: &domain.CommandExplanation{Summary: "重启服务", Mechanism: "systemd 重启单元"}, ReviewedAt: time.Now().UTC(),
 		},
 	}
-	svc.SetCommandReviewer(reviewer)
+	svc.SetCommandExplainer(explainer)
 	pending, err := svc.Submit(context.Background(), domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
 		Reason: "recover demo", Rollback: "restart the previous release",
@@ -397,24 +368,24 @@ func TestLateSubagentReviewCannotOverrideAnApprovalDecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-reviewer.started:
+	case <-explainer.started:
 	case <-time.After(time.Second):
-		close(reviewer.release)
-		t.Fatal("background SubAgent review did not start")
+		close(explainer.release)
+		t.Fatal("background explanation did not start")
 	}
 	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "", "deterministic policy reviewed", "operator"); err != nil {
-		close(reviewer.release)
+		close(explainer.release)
 		t.Fatal(err)
 	}
-	close(reviewer.release)
-	svc.reviewWG.Wait()
+	close(explainer.release)
+	svc.explainWG.Wait()
 
 	approval, err := svc.store.GetApproval(context.Background(), pending.ApprovalID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if approval.Status != "approved" || approval.Risk != domain.RiskChange || approval.Challenge != "" {
-		t.Fatalf("late SubAgent review overwrote the approval decision: %#v", approval)
+		t.Fatalf("late explanation overwrote the approval decision: %#v", approval)
 	}
 	run, err := svc.store.GetRun(context.Background(), pending.RunID)
 	if err != nil {
@@ -428,7 +399,7 @@ func TestLateSubagentReviewCannotOverrideAnApprovalDecision(t *testing.T) {
 	}
 }
 
-func TestRetryApprovalReviewEscalatesPendingApprovalWithoutExecuting(t *testing.T) {
+func TestRetryApprovalExplanationKeepsPolicyRiskAndDoesNotExecute(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	ctx := context.Background()
 	pending, err := svc.Submit(ctx, domain.ExecRequest{
@@ -441,34 +412,29 @@ func TestRetryApprovalReviewEscalatesPendingApprovalWithoutExecuting(t *testing.
 	if pending.Risk != domain.RiskChange || pending.Challenge != "" {
 		t.Fatalf("unexpected initial approval: %#v", pending)
 	}
-	reviewer := &fakeCommandReviewer{review: domain.CommandReview{
-		Status: "completed", EffectiveRisk: domain.RiskCritical,
-		RiskReview: &domain.AIRiskReview{
-			Risk: domain.RiskCritical, Recommendation: "human_required", Confidence: 0.9,
-			Reasons: []string{"service restart may interrupt traffic"},
-		},
-		ReviewedAt: time.Now().UTC(),
+	explainer := &fakeCommandExplainer{review: domain.CommandReview{
+		Status: "completed", Explanation: &domain.CommandExplanation{
+			Summary: "重启服务", Mechanism: "systemd 会停止并重新启动服务",
+			Risks: []string{"可能短暂中断请求"},
+		}, ReviewedAt: time.Now().UTC(),
 	}}
-	svc.SetCommandReviewer(reviewer)
+	svc.SetCommandExplainer(explainer)
 
-	updated, err := svc.RetryApprovalReview(ctx, pending.ApprovalID, "operator")
+	updated, err := svc.RetryApprovalExplanation(ctx, pending.ApprovalID, "operator")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status != "pending" || updated.Risk != domain.RiskCritical || updated.Challenge == "" || updated.AIReview == nil {
-		t.Fatalf("retry did not safely escalate the pending approval: %#v", updated)
+	if updated.Status != "pending" || updated.Risk != domain.RiskChange || updated.Challenge != "" || updated.AIReview == nil || updated.AIReview.Explanation == nil {
+		t.Fatalf("explanation retry changed the policy-owned approval: %#v", updated)
 	}
 	if len(transport.calls) != 0 {
-		t.Fatalf("review retry executed the operation: %#v", transport.calls)
+		t.Fatalf("explanation retry executed the operation: %#v", transport.calls)
 	}
-	inputs := reviewer.Inputs()
+	inputs := explainer.Inputs()
 	if len(inputs) != 1 || inputs[0].RequestDigest != updated.RequestDigest {
-		t.Fatalf("review retry did not receive the exact pending request: %#v", inputs)
+		t.Fatalf("explanation retry did not receive the exact pending request: %#v", inputs)
 	}
-	if err := svc.store.ApprovePending(ctx, updated.ID, "stale approval", domain.RiskChange, ""); err == nil {
-		t.Fatal("a stale pre-escalation approval decision was accepted")
-	}
-	if _, err := svc.Approve(ctx, updated.ID, updated.Challenge, "reviewed escalated risk", "operator"); err != nil {
+	if _, err := svc.Approve(ctx, updated.ID, "", "reviewed deterministic policy", "operator"); err != nil {
 		t.Fatal(err)
 	}
 	if len(transport.calls) != 1 {
@@ -476,7 +442,7 @@ func TestRetryApprovalReviewEscalatesPendingApprovalWithoutExecuting(t *testing.
 	}
 }
 
-func TestRetryApprovalReviewPersistsDegradedResultAndKeepsPending(t *testing.T) {
+func TestRetryApprovalExplanationPersistsDegradedResultAndKeepsPending(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	ctx := context.Background()
 	pending, err := svc.Submit(ctx, domain.ExecRequest{
@@ -486,8 +452,8 @@ func TestRetryApprovalReviewPersistsDegradedResultAndKeepsPending(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc.SetCommandReviewer(&fakeCommandReviewer{err: errors.New("model timed out")})
-	updated, err := svc.RetryApprovalReview(ctx, pending.ApprovalID, "operator")
+	svc.SetCommandExplainer(&fakeCommandExplainer{err: errors.New("model timed out")})
+	updated, err := svc.RetryApprovalExplanation(ctx, pending.ApprovalID, "operator")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +464,7 @@ func TestRetryApprovalReviewPersistsDegradedResultAndKeepsPending(t *testing.T) 
 		t.Fatalf("degraded retry error was not preserved: %#v", updated.AIReview)
 	}
 	if len(transport.calls) != 0 {
-		t.Fatalf("degraded review retry executed the operation: %#v", transport.calls)
+		t.Fatalf("degraded explanation retry executed the operation: %#v", transport.calls)
 	}
 	listed, err := svc.ListApprovals(ctx, "pending", 10)
 	if err != nil || len(listed) != 1 || listed[0].AIReview == nil || listed[0].AIReview.Status != "unavailable" {

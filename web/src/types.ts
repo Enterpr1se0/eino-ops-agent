@@ -88,22 +88,11 @@ export interface CommandExplanation {
   rollback_guide: string
 }
 
-export interface AIRiskReview {
-  risk: Risk
-  recommendation: 'allow' | 'human_required' | 'deny'
-  confidence: number
-  reasons: string[]
-  missing_evidence: string[]
-  required_controls: string[]
-}
-
 export interface CommandReview {
   status: 'pending' | 'completed' | 'degraded' | 'unavailable'
   model?: string
   deterministic_risk: Risk
-  effective_risk: Risk
   explanation?: CommandExplanation
-  risk_review?: AIRiskReview
   errors?: string[]
   reviewed_at: string
 }
@@ -216,7 +205,7 @@ export interface ModelCatalog {
 
 export interface ModelStatus {
   available: boolean
-  review_agents_available: boolean
+  explanation_agent_available: boolean
   source: 'database' | 'environment' | 'none'
   provider_id?: string
   name?: string
@@ -241,15 +230,13 @@ export interface Health {
 
 export interface SystemSettings {
   agent_max_iterations: number
-  subagent_reviews_enabled: boolean
-  beginner_explanations_enabled: boolean
+  approval_explanations_enabled: boolean
   updated_at: string
 }
 
 export interface SystemSettingsInput {
   agent_max_iterations: number
-  subagent_reviews_enabled?: boolean
-  beginner_explanations_enabled?: boolean
+  approval_explanations_enabled?: boolean
 }
 
 export interface AuthSession {
