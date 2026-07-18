@@ -31,6 +31,8 @@ Return exactly one JSON object with keys: risk, recommendation, confidence, reas
 risk must be read_only, change, or critical. recommendation must be allow, human_required, or deny.
 confidence is 0 to 1. The remaining fields are JSON string arrays. Prefer human_required when uncertain.`
 
+const subagentRequestTimeout = 8 * time.Second
+
 type ReviewCoordinator struct {
 	explainer *adk.Runner
 	reviewer  *adk.Runner
@@ -52,7 +54,7 @@ func buildReviewCoordinator(ctx context.Context, cfg config.Model) (*ReviewCoord
 
 func buildReadOnlySubagent(ctx context.Context, cfg config.Model, name, description, instruction string) (*adk.Runner, error) {
 	chatModel, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, Timeout: 30 * time.Second,
+		APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, Timeout: subagentRequestTimeout,
 	})
 	if err != nil {
 		return nil, err

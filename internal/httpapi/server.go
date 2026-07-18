@@ -842,35 +842,95 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, fmt.Errorf("message is required"), http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	streamAgentEvents(w, r, 10*time.Second, func(emit func(agent.Event)) {
+		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
+		defer cancel()
+		_, err := s.agent.Query(queryCtx, input.SessionID, input.Message, emit)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			emit(agent.Event{Type: "error", Error: err.Error(), SessionID: input.SessionID})
+		}
+	})
+}
+
+// streamAgentEvents keeps the ResponseWriter owned by the HTTP goroutine while
+// the Agent continues independently. This makes heartbeats and disconnects safe:
+// a browser or proxy disappearing stops only the SSE writer, not the Agent loop.
+func streamAgentEvents(w http.ResponseWriter, r *http.Request, heartbeatInterval time.Duration, run func(func(agent.Event))) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("X-Accel-Buffering", "no")
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	w.Header().Set("Connection", "keep-alive")
+	if _, ok := w.(http.Flusher); !ok {
 		writeError(w, fmt.Errorf("streaming is unavailable"))
 		return
 	}
-	var emitMu sync.Mutex
-	clientOpen := true
-	emit := func(event agent.Event) {
-		emitMu.Lock()
-		defer emitMu.Unlock()
-		if !clientOpen {
-			return
+
+	controller := http.NewResponseController(w)
+	write := func(payload string) error {
+		if _, err := fmt.Fprint(w, payload); err != nil {
+			return err
 		}
-		data, _ := json.Marshal(event)
-		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data); err != nil {
-			clientOpen = false
-			observability.FromContext(r.Context()).DebugContext(r.Context(), "chat client disconnected; agent continues in background", "component", "agent", "session_id", event.SessionID, "error", err)
-			return
-		}
-		flusher.Flush()
+		return controller.Flush()
 	}
-	queryCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
-	defer cancel()
-	_, err := s.agent.Query(queryCtx, input.SessionID, input.Message, emit)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		emit(agent.Event{Type: "error", Error: err.Error(), SessionID: input.SessionID})
+	if err := write(": connected\n\n"); err != nil {
+		return
+	}
+
+	events := make(chan agent.Event, 64)
+	clientClosed := make(chan struct{})
+	publish := func(event agent.Event) {
+		select {
+		case <-clientClosed:
+			return
+		default:
+		}
+		select {
+		case events <- event:
+		case <-clientClosed:
+		}
+	}
+	go func() {
+		defer close(events)
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				observability.FromContext(r.Context()).ErrorContext(r.Context(), "agent stream panic", "component", "agent", "error", recovered)
+				publish(agent.Event{Type: "error", Error: "internal agent stream error"})
+			}
+		}()
+		run(publish)
+	}()
+
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
+	defer close(clientClosed)
+	lastSessionID := ""
+	logger := observability.FromContext(r.Context())
+	for {
+		select {
+		case <-r.Context().Done():
+			logger.DebugContext(r.Context(), "chat client disconnected; agent continues in background", "component", "agent", "session_id", lastSessionID, "error", r.Context().Err())
+			return
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			if event.SessionID != "" {
+				lastSessionID = event.SessionID
+			}
+			data, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+			if err := write(fmt.Sprintf("event: %s\ndata: %s\n\n", event.Type, data)); err != nil {
+				logger.DebugContext(r.Context(), "chat client disconnected; agent continues in background", "component", "agent", "session_id", lastSessionID, "error", err)
+				return
+			}
+		case <-heartbeat.C:
+			if err := write(": heartbeat\n\n"); err != nil {
+				logger.DebugContext(r.Context(), "chat heartbeat failed; agent continues in background", "component", "agent", "session_id", lastSessionID, "error", err)
+				return
+			}
+		}
 	}
 }
 

@@ -900,6 +900,18 @@ func (s *Store) UpdatePendingApprovalReview(ctx context.Context, approvalID, run
 	return tx.Commit()
 }
 
+func (s *Store) UpdateRunAIReview(ctx context.Context, runID, reviewJSON string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE runs SET ai_review_json=? WHERE id=?`, reviewJSON, runID)
+	if err != nil {
+		return err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) DecideApprovalWithSessionGrant(ctx context.Context, id, reason, sessionID, fingerprint string, expiresAt time.Time, expectedRisk domain.RiskLevel, expectedChallenge string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

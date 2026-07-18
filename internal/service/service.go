@@ -43,6 +43,7 @@ type Service struct {
 	tasks      map[string]*taskState
 	reviewerMu sync.RWMutex
 	reviewer   CommandReviewer
+	reviewWG   sync.WaitGroup
 	mcpMu      sync.RWMutex
 	mcpRuntime map[string]*mcpRuntimeState
 }
@@ -54,6 +55,8 @@ type CommandReviewer interface {
 type FreshCommandReviewer interface {
 	ReviewFresh(context.Context, domain.CommandReviewInput) (domain.CommandReview, error)
 }
+
+const approvalReviewTimeout = 8 * time.Second
 
 type taskState struct {
 	task   domain.Task
@@ -602,12 +605,14 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	requestRedacted := s.redactor.Redact(requestJSON)
 	now := time.Now().UTC()
 	var commandReview *domain.CommandReview
+	var reviewInput *domain.CommandReviewInput
+	var reviewer CommandReviewer
 	settings, settingsErr := s.store.GetSystemSettings(ctx)
 	if settingsErr != nil {
 		return domain.ExecResult{}, settingsErr
 	}
 	if settings.SubagentReviewsEnabled && (decision.Action == domain.ActionApprove || decision.Action == domain.ActionBreakGlass) {
-		if reviewer := s.commandReviewer(); reviewer != nil {
+		if reviewer = s.commandReviewer(); reviewer != nil {
 			planStep := ""
 			if sessionID != "" {
 				if plan, planErr := s.store.GetAgentPlan(ctx, sessionID); planErr == nil {
@@ -619,40 +624,13 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 					}
 				}
 			}
-			reviewCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
-			review, reviewErr := reviewer.Review(reviewCtx, domain.CommandReviewInput{
+			input := domain.CommandReviewInput{
 				Request: req, Policy: decision, Host: domain.HostCapability{ID: host.ID, Name: host.Name, AuthType: host.AuthType, SudoMode: host.SudoMode},
 				PlanStep: planStep, RequestDigest: digest, BeginnerMode: settings.BeginnerExplanationsEnabled,
-			})
-			cancel()
-			if reviewErr != nil {
-				reviewError := s.redactor.Redact(reviewErr.Error())
-				if len(reviewError) > 800 {
-					reviewError = reviewError[:800]
-				}
-				review = domain.CommandReview{Status: "unavailable", DeterministicRisk: decision.Risk, EffectiveRisk: decision.Risk, Errors: []string{reviewError}, ReviewedAt: time.Now().UTC()}
 			}
-			if len(review.Errors) > 5 {
-				review.Errors = review.Errors[:5]
-			}
-			for index := range review.Errors {
-				review.Errors[index] = s.redactor.Redact(review.Errors[index])
-				if len(review.Errors[index]) > 800 {
-					review.Errors[index] = review.Errors[index][:800]
-				}
-			}
-			// The model is advisory. Never accept a forged/stale deterministic risk
-			// or a lower effective risk from any CommandReviewer implementation.
-			review.DeterministicRisk = decision.Risk
-			if riskRank(review.EffectiveRisk) < riskRank(decision.Risk) {
-				review.EffectiveRisk = decision.Risk
-			}
-			commandReview = &review
-			if riskRank(review.EffectiveRisk) > riskRank(decision.Risk) {
-				decision.Risk = review.EffectiveRisk
-				decision.Action = domain.ActionBreakGlass
-				decision.Reason = "AI risk reviewer escalated the operation; human break-glass is required"
-				decision.RuleHits = append(decision.RuleHits, "ai_risk_escalation")
+			reviewInput = &input
+			commandReview = &domain.CommandReview{
+				Status: "pending", DeterministicRisk: decision.Risk, EffectiveRisk: decision.Risk,
 			}
 		}
 	}
@@ -690,9 +668,6 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		if err := s.store.CreateRun(ctx, run); err != nil {
 			return domain.ExecResult{}, err
 		}
-		if commandReview != nil {
-			s.audit(ctx, run.ID, "command_ai_reviewed", "risk-review-agent", map[string]any{"status": commandReview.Status, "deterministic_risk": commandReview.DeterministicRisk, "effective_risk": commandReview.EffectiveRisk, "model": commandReview.Model})
-		}
 		challenge := ""
 		if decision.Action == domain.ActionBreakGlass {
 			challenge = host.Name + "-" + digest[:8]
@@ -707,6 +682,9 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		}
 		s.audit(ctx, run.ID, "approval_requested", actor, map[string]any{"approval_id": approval.ID, "risk": decision.Risk, "hits": decision.RuleHits})
 		logger.With("component", "approval").InfoContext(ctx, "execution awaiting approval", "approval_id", approval.ID, "risk", decision.Risk, "expires_at", approval.ExpiresAt)
+		if reviewInput != nil && reviewer != nil {
+			s.startPendingApprovalReview(ctx, approval, *reviewInput, reviewer)
+		}
 		return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: decision.Risk, ApprovalID: approval.ID, Challenge: challenge, PolicyHits: decision.RuleHits}, nil
 	case domain.ActionAllow:
 		run.Status = "running"
@@ -735,6 +713,117 @@ func riskRank(risk domain.RiskLevel) int {
 	default:
 		return -1
 	}
+}
+
+// startPendingApprovalReview keeps model latency outside the human approval
+// critical path. Deterministic policy creates the approval first; this
+// advisory review may only tighten a still-pending approval.
+func (s *Service) startPendingApprovalReview(parent context.Context, approval domain.Approval, input domain.CommandReviewInput, reviewer CommandReviewer) {
+	baseCtx := context.WithoutCancel(parent)
+	logger := observability.FromContext(baseCtx).With(
+		"component", "approval", "approval_id", approval.ID, "run_id", approval.RunID,
+	)
+	s.reviewWG.Add(1)
+	go func() {
+		defer s.reviewWG.Done()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				logger.ErrorContext(baseCtx, "approval SubAgent review panicked", "panic", fmt.Sprint(recovered))
+			}
+		}()
+
+		started := time.Now()
+		logger.InfoContext(baseCtx, "approval SubAgent review started", "risk", approval.Risk)
+		reviewCtx, cancelReview := context.WithTimeout(baseCtx, approvalReviewTimeout)
+		review, reviewErr := reviewer.Review(reviewCtx, input)
+		cancelReview()
+		review = s.normalizeCommandReview(review, reviewErr, input.Policy.Risk, approval.Risk)
+		reviewJSON, err := json.Marshal(review)
+		if err != nil {
+			logger.ErrorContext(baseCtx, "encode approval SubAgent review failed", "error", err)
+			return
+		}
+
+		newRisk := approval.Risk
+		if riskRank(review.EffectiveRisk) > riskRank(newRisk) {
+			newRisk = review.EffectiveRisk
+		}
+		challenge := approval.Challenge
+		if newRisk == domain.RiskCritical && challenge == "" {
+			challenge = input.Host.Name + "-" + input.RequestDigest[:8]
+		}
+
+		persistCtx, cancelPersist := context.WithTimeout(baseCtx, 3*time.Second)
+		defer cancelPersist()
+		if err := s.store.UpdatePendingApprovalReview(persistCtx, approval.ID, approval.RunID, newRisk, challenge, string(reviewJSON)); err != nil {
+			current, getErr := s.store.GetApproval(persistCtx, approval.ID)
+			if getErr == nil && current.Status != "pending" {
+				if review.Status == "completed" {
+					review.Status = "degraded"
+				}
+				review.Errors = append(review.Errors, "advisory review completed after the operator decision and did not alter execution")
+				if len(review.Errors) > 5 {
+					review.Errors = append(review.Errors[:4], review.Errors[len(review.Errors)-1])
+				}
+				if lateJSON, marshalErr := json.Marshal(review); marshalErr == nil {
+					if updateErr := s.store.UpdateRunAIReview(persistCtx, approval.RunID, string(lateJSON)); updateErr != nil {
+						logger.ErrorContext(baseCtx, "persist late approval SubAgent review failed", "error", updateErr)
+					}
+				}
+				s.audit(persistCtx, approval.RunID, "command_ai_review_completed_after_decision", "risk-review-agent", map[string]any{
+					"approval_id": approval.ID, "status": current.Status, "model": review.Model, "duration_ms": time.Since(started).Milliseconds(),
+				})
+				logger.InfoContext(baseCtx, "approval SubAgent review skipped after decision", "status", current.Status, "duration_ms", time.Since(started).Milliseconds())
+				return
+			}
+			logger.ErrorContext(baseCtx, "persist approval SubAgent review failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
+			return
+		}
+		s.audit(persistCtx, approval.RunID, "command_ai_reviewed", "risk-review-agent", map[string]any{
+			"approval_id": approval.ID, "status": review.Status, "deterministic_risk": input.Policy.Risk,
+			"effective_risk": newRisk, "model": review.Model, "duration_ms": time.Since(started).Milliseconds(),
+		})
+		logger.InfoContext(baseCtx, "approval SubAgent review completed", "status", review.Status, "risk", newRisk, "duration_ms", time.Since(started).Milliseconds())
+		notifyApproval(baseCtx, domain.ExecResult{
+			RunID: approval.RunID, Status: "approval_required", Risk: newRisk,
+			ApprovalID: approval.ID, Challenge: challenge,
+		})
+	}()
+}
+
+func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr error, deterministicRisk, minimumRisk domain.RiskLevel) domain.CommandReview {
+	if reviewErr != nil {
+		review = domain.CommandReview{
+			Status: "unavailable", DeterministicRisk: deterministicRisk, EffectiveRisk: minimumRisk,
+			Errors: []string{reviewErr.Error()}, ReviewedAt: time.Now().UTC(),
+		}
+	}
+	if review.Status != "completed" && review.Status != "degraded" && review.Status != "unavailable" {
+		review.Status = "degraded"
+	}
+	if review.ReviewedAt.IsZero() {
+		review.ReviewedAt = time.Now().UTC()
+	}
+	review.DeterministicRisk = deterministicRisk
+	if riskRank(review.EffectiveRisk) > riskRank(domain.RiskCritical) {
+		review.EffectiveRisk = domain.RiskCritical
+	}
+	if riskRank(review.EffectiveRisk) < riskRank(deterministicRisk) {
+		review.EffectiveRisk = deterministicRisk
+	}
+	if riskRank(review.EffectiveRisk) < riskRank(minimumRisk) {
+		review.EffectiveRisk = minimumRisk
+	}
+	if len(review.Errors) > 5 {
+		review.Errors = review.Errors[:5]
+	}
+	for index := range review.Errors {
+		review.Errors[index] = s.redactor.Redact(review.Errors[index])
+		if len(review.Errors[index]) > 800 {
+			review.Errors[index] = review.Errors[index][:800]
+		}
+	}
+	return review
 }
 
 func (s *Service) Approve(ctx context.Context, approvalID, challenge, reason, actor string) (domain.ExecResult, error) {
@@ -1365,7 +1454,7 @@ func (s *Service) RetryApprovalReview(ctx context.Context, approvalID, actor str
 
 	logger.InfoContext(ctx, "approval SubAgent review retry started", "run_id", run.ID, "risk", approval.Risk)
 	started := time.Now()
-	reviewCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	reviewCtx, cancel := context.WithTimeout(ctx, approvalReviewTimeout)
 	var review domain.CommandReview
 	var reviewErr error
 	if freshReviewer, ok := reviewer.(FreshCommandReviewer); ok {
@@ -1374,37 +1463,7 @@ func (s *Service) RetryApprovalReview(ctx context.Context, approvalID, actor str
 		review, reviewErr = reviewer.Review(reviewCtx, input)
 	}
 	cancel()
-	if reviewErr != nil {
-		review = domain.CommandReview{
-			Status: "unavailable", DeterministicRisk: deterministicRisk, EffectiveRisk: approval.Risk,
-			Errors: []string{reviewErr.Error()}, ReviewedAt: time.Now().UTC(),
-		}
-	}
-	if review.Status != "completed" && review.Status != "degraded" && review.Status != "unavailable" {
-		review.Status = "degraded"
-	}
-	if review.ReviewedAt.IsZero() {
-		review.ReviewedAt = time.Now().UTC()
-	}
-	review.DeterministicRisk = deterministicRisk
-	if riskRank(review.EffectiveRisk) > riskRank(domain.RiskCritical) {
-		review.EffectiveRisk = domain.RiskCritical
-	}
-	if riskRank(review.EffectiveRisk) < riskRank(deterministicRisk) {
-		review.EffectiveRisk = deterministicRisk
-	}
-	if riskRank(review.EffectiveRisk) < riskRank(approval.Risk) {
-		review.EffectiveRisk = approval.Risk
-	}
-	if len(review.Errors) > 5 {
-		review.Errors = review.Errors[:5]
-	}
-	for index := range review.Errors {
-		review.Errors[index] = s.redactor.Redact(review.Errors[index])
-		if len(review.Errors[index]) > 800 {
-			review.Errors[index] = review.Errors[index][:800]
-		}
-	}
+	review = s.normalizeCommandReview(review, reviewErr, deterministicRisk, approval.Risk)
 	reviewJSON, err := json.Marshal(review)
 	if err != nil {
 		return domain.Approval{}, err

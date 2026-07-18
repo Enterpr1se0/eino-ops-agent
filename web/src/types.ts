@@ -98,7 +98,7 @@ export interface AIRiskReview {
 }
 
 export interface CommandReview {
-  status: 'completed' | 'degraded' | 'unavailable'
+  status: 'pending' | 'completed' | 'degraded' | 'unavailable'
   model?: string
   deterministic_risk: Risk
   effective_risk: Risk

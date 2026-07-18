@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -9,10 +9,14 @@ import { api, streamChat } from './api'
 import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, ToolCapabilities, WorkspaceCapability, WorkspaceFilePreview } from './types'
 
 type Page = 'chat' | 'config' | 'extensions' | 'audit' | 'logs'
-type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; active?: boolean; status?: 'pending' | 'completed' | 'failed' }
+type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; active?: boolean; streaming?: boolean; status?: 'pending' | 'completed' | 'failed' }
 
 function historyEntries(messages:ChatMessage[]):ChatEntry[]{
   return messages.map((item,index)=>({id:`history_${index}_${item.created_at}`,kind:item.role,content:item.content,tool:item.tool_name,status:item.status}))
+}
+
+function deactivateReasoning(entry:ChatEntry):ChatEntry{
+	return entry.kind==='reasoning'&&entry.active?{...entry,active:false}:entry
 }
 
 function planFromToolContent(content:string):AgentPlan|null{
@@ -60,6 +64,7 @@ function App() {
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [runs, setRuns] = useState<Run[]>([])
   const [error, setError] = useState('')
+	const [agentStreaming,setAgentStreaming]=useState(false)
 
   const refresh = useCallback(async () => {
     try {
@@ -69,9 +74,18 @@ function App() {
 	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setSettings(nextSettings);setCapabilities(nextCapabilities);setToolCatalog(nextToolCatalog);setSkills(nextSkills);setMCPServers(nextMCPServers); setApprovals(nextApprovals); setRuns(nextRuns); setError('')
 	} catch (err) { const message=errorText(err);if(/authentication required/i.test(message))setAuth('guest');setError(message) }
   }, [])
+	const refreshApprovals=useCallback(async()=>{
+		try{setApprovals(await api.approvals())}
+		catch(err){const message=errorText(err);if(/authentication required/i.test(message))setAuth('guest');setError(message)}
+	},[])
 
 	useEffect(()=>{api.authSession().then(()=>setAuth('authenticated')).catch(()=>setAuth('guest'))},[])
-	useEffect(() => { if(auth!=='authenticated')return;refresh(); const timer = window.setInterval(refresh, 10000); return () => window.clearInterval(timer) }, [auth,refresh])
+	useEffect(() => { if(auth==='authenticated')void refresh() }, [auth,refresh])
+	useEffect(() => {
+		if(auth!=='authenticated'||agentStreaming)return
+		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refresh()},10000)
+		return()=>window.clearInterval(timer)
+	},[auth,agentStreaming,refresh])
 
 	if(auth==='checking')return <div className="auth-screen"><div className="auth-loading"><LoaderCircle className="spin" size={25}/><span>Securing control plane…</span></div></div>
 	if(auth==='guest')return <LoginPage onAuthenticated={()=>setAuth('authenticated')}/>
@@ -101,7 +115,7 @@ function App() {
       </div></header>
       {error && <div className="global-error"><ShieldAlert size={17}/>{error}<button onClick={() => setError('')}><X size={15}/></button></div>}
       <section className="workspace">
-		{page === 'chat' && <ChatPage hosts={hosts} approvals={approvals} runs={runs} capabilities={capabilities} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh}/>}
+		{page === 'chat' && <ChatPage hosts={hosts} approvals={approvals} runs={runs} capabilities={capabilities} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshApprovals={refreshApprovals} onStreamingChange={setAgentStreaming}/>}
 		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} settings={settings} capabilities={capabilities} health={health} refresh={refresh}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refresh={refresh}/>}
         {page === 'audit' && <AuditPage runs={runs}/>} 
@@ -318,7 +332,7 @@ function SystemSettingsPage({settings,capabilities,reviewAgentsAvailable,refresh
     <form className="settings-panel panel" onSubmit={save}><div className="settings-panel-head"><div className="settings-glyph"><SlidersHorizontal size={20}/></div><div><span>AGENT LOOP</span><h3>Maximum model iterations</h3><p>Limits how many model → tool → model decision rounds a single message may consume.</p></div><strong>{maxIterations}</strong></div>
       <div className="iteration-editor"><input aria-label="Maximum model iterations" type="range" min="5" max="50" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>Rounds</span><input type="number" min="5" max="50" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div>
       <div className="iteration-presets"><span>QUICK PRESETS</span>{[10,20,30].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b><small>{value===10?'Short diagnosis':value===20?'Recommended':'Long deployment'}</small></button>)}</div>
-      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>Approval intelligence</b><p>Two isolated, tool-free Eino agents review commands before the existing human approval gate.</p></div><em className={reviewAgentsAvailable?'ready':'offline'}><CircleDot size={9}/>{reviewAgentsAvailable?'2 runners ready':'model unavailable'}</em></div><label><span><b>Risk reviewer SubAgent</b><small>May maintain or raise risk. It can never approve, execute, or lower deterministic policy.</small></span><input type="checkbox" checked={reviewsEnabled} onChange={event=>toggleReviews(event.target.checked)}/><i/></label><label className={!reviewsEnabled?'disabled':''}><span><b>Beginner command explanation</b><small>Shows effects, risks, practical tips and rollback guidance in the approval dialog.</small></span><input type="checkbox" checked={explanationsEnabled} disabled={!reviewsEnabled} onChange={event=>toggleExplanations(event.target.checked)}/><i/></label></div>
+      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>Approval intelligence</b><p>Two isolated, tool-free Eino agents review commands in the background while the human approval gate remains immediately available.</p></div><em className={reviewAgentsAvailable?'ready':'offline'}><CircleDot size={9}/>{reviewAgentsAvailable?'2 runners ready':'model unavailable'}</em></div><label><span><b>Risk reviewer SubAgent</b><small>May tighten a still-pending request. It can never approve, execute, or lower deterministic policy.</small></span><input type="checkbox" checked={reviewsEnabled} onChange={event=>toggleReviews(event.target.checked)}/><i/></label><label className={!reviewsEnabled?'disabled':''}><span><b>Beginner command explanation</b><small>Shows effects, risks, practical tips and rollback guidance in the approval dialog.</small></span><input type="checkbox" checked={explanationsEnabled} disabled={!reviewsEnabled} onChange={event=>toggleExplanations(event.target.checked)}/><i/></label></div>
 	  <div className="workspace-capabilities"><div><FileText size={17}/><span><b>Allowlisted Workspaces</b><small>Startup allowlist only. Browse and upload files directly from the Agent conversation.</small></span><em>{capabilities.workspaces.length}</em></div>{capabilities.workspaces.length?capabilities.workspaces.map(workspace=><section className="workspace-summary-row" key={workspace.id}><div><code>{workspace.id}</code><span className={workspace.access}>{workspace.access.replace('_',' ')}</span></div><code title={workspace.root}>{workspace.root}</code><small>{workspace.validators?.length?`validators · ${workspace.validators.join(', ')}`:'no validators'}</small></section>):<p>No local Workspace is exposed. The Agent remains SSH-only.</p>}</div>
       <div className="settings-advice"><ShieldCheck size={17}/><div><b>The safety limit remains enforced</b><p>Higher values support installations and multi-step recovery, but can increase token usage and tool calls. Values are restricted to 5–50.</p></div></div>
       <div className="settings-footer"><span>{settings?.updated_at?`Last updated ${new Date(settings.updated_at).toLocaleString()}`:'Using system default'}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setReviewsEnabled(savedReviews);setExplanationsEnabled(savedExplanations);setDirty(false);setNotice('')}}>Discard</button><button className="primary" disabled={!dirty||saving}>{saving?'Applying…':'Save & apply'}</button></div>
@@ -337,7 +351,7 @@ function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
 }
 
-function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelName, refresh }: {hosts:Host[];approvals:Approval[];runs:Run[];capabilities:ToolCapabilities;agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>}) {
+function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelName, refresh, refreshApprovals, onStreamingChange }: {hosts:Host[];approvals:Approval[];runs:Run[];capabilities:ToolCapabilities;agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:()=>Promise<void>;onStreamingChange:(streaming:boolean)=>void}) {
   const [entries, setEntries] = useState<ChatEntry[]>([])
   const [message, setMessage] = useState('')
   const [sessionId, setSessionId] = useState('')
@@ -354,9 +368,18 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
   const stickToLatest=useRef(true)
   const hostNames = useMemo(() => hosts.map((host) => host.name).join(', '), [hosts])
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
+	const pendingReviewID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
   const sessionBusy=running||detachedRunning
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
 	useEffect(()=>{if(selectedWorkspace&&workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
+	useEffect(()=>{onStreamingChange(running)},[running,onStreamingChange])
+	useEffect(()=>()=>onStreamingChange(false),[onStreamingChange])
+	useEffect(()=>{
+		if(!pendingReviewID)return
+		void refreshApprovals()
+		const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshApprovals()},1500)
+		return()=>window.clearInterval(timer)
+	},[pendingReviewID,refreshApprovals])
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -427,30 +450,30 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
     const userEntryID=clientId()
     stickToLatest.current=true
     setApprovalNotice('');setReasoningSeen(false);setRunning(true)
-    setEntries((old) => [...old, { id: userEntryID, kind: 'user', content: query, status:'pending' }, { id: 'streaming', kind: 'assistant', content: '' }])
+    setEntries((old) => [...old, { id: userEntryID, kind: 'user', content: query, status:'pending' }, { id: 'streaming', kind: 'assistant', content: '', streaming:true }])
     try {
       await streamChat(sessionId, query, (frame: AgentEvent) => {
         if (frame.session_id) { querySessionID=frame.session_id;setSessionId(frame.session_id); rememberSession(frame.session_id) }
-        if (frame.type === 'approval') { setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item));setApprovalNotice(''); void refresh() }
+        if (frame.type === 'approval') { setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item));setApprovalNotice('');void refreshApprovals() }
         if (frame.type === 'reasoning' && frame.content) {
           setReasoningSeen(true)
           const reasoningID=`reasoning_${frame.segment_id||'current'}`
           setEntries((old) => {
             const existing=old.find((item)=>item.id===reasoningID)
             if(existing)return old.map((item)=>item.id===reasoningID?{...item,content:item.content+frame.content,active:true}:item)
-            return [...old.filter((item)=>item.id!=='streaming').map((item)=>item.kind==='reasoning'?{...item,active:false}:item),{id:reasoningID,kind:'reasoning',content:frame.content!,active:true},{id:'streaming',kind:'assistant',content:''}]
+            return [...old.filter((item)=>item.id!=='streaming').map(deactivateReasoning),{id:reasoningID,kind:'reasoning',content:frame.content!,active:true},{id:'streaming',kind:'assistant',content:'',streaming:true}]
           })
         }
         if (frame.type === 'message' && frame.content) {
-          if (frame.role === 'tool') {setEntries((old) => [...old.filter((item) => item.id !== 'streaming').map((item)=>item.kind==='reasoning'?{...item,active:false}:item), { id: clientId(), kind: 'tool', content: frame.content!, tool: frame.tool_name }, { id: 'streaming', kind: 'assistant', content: '' }]);if(frame.tool_name?.startsWith('ops_plan_')){const nextPlan=planFromToolContent(frame.content);if(nextPlan)setPlan(nextPlan)}if(/approval_id|approval_required/.test(frame.content))void refresh()}
-          else setEntries((old) => old.map((item) => item.id === 'streaming' ? {...item, content: item.content + frame.content} : item.kind==='reasoning'?{...item,active:false}:item))
+          if (frame.role === 'tool') {setEntries((old) => [...old.filter((item) => item.id !== 'streaming').map(deactivateReasoning), { id: clientId(), kind: 'tool', content: frame.content!, tool: frame.tool_name }, { id: 'streaming', kind: 'assistant', content: '', streaming:true }]);if(frame.tool_name?.startsWith('ops_plan_')){const nextPlan=planFromToolContent(frame.content);if(nextPlan)setPlan(nextPlan)}if(/approval_id|approval_required/.test(frame.content))void refresh()}
+          else setEntries((old) => old.map((item) => item.id === 'streaming' ? {...item, content: item.content + frame.content} : deactivateReasoning(item)))
         }
-        if (frame.type === 'done') setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item))
-        if (frame.type === 'error') setEntries((old) => [...old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item), { id: clientId(), kind: 'error', content: frame.error || 'Agent error' }])
+        if (frame.type === 'done') setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item.id==='streaming'?{...item,streaming:false}:item))
+        if (frame.type === 'error') setEntries((old) => [...old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item.id==='streaming'?{...item,streaming:false}:item), { id: clientId(), kind: 'error', content: frame.error || 'Agent error' }])
       })
     } catch (err) { setEntries((old) => [...old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item), { id: clientId(), kind: 'error', content: errorText(err) }]) }
     finally {
-      setEntries((old) => old.filter((item) => item.id !== 'streaming' || item.content !== '').map((item)=>item.kind==='reasoning'?{...item,active:false}:item))
+      setEntries((old) => old.filter((item) => item.id !== 'streaming' || item.content !== '').map((item)=>item.id==='streaming'?{...item,streaming:false}:deactivateReasoning(item)))
       setRunning(false)
       if(querySessionID){try{const state=await api.chatState(querySessionID);setDetachedRunning(!!state.active);setPlan(state.plan||null);if(state.active)setEntries(old=>[...historyEntries(state.messages||[]),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))])}catch{/* polling or the next reload will recover state */}}
       void refreshSessions();void refresh()
@@ -519,12 +542,12 @@ function SessionPlan({plan}:{plan:AgentPlan}){
   return <details className={`session-plan ${plan.status}`} open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}><summary><span className="plan-icon"><ListChecks size={16}/></span><span className="plan-summary-copy"><b>{plan.goal}</b><small>{current?`${current.status==='blocked'?'阻塞在':'当前'} ${current.number}/${plan.steps.length} · ${current.title}`:`${completed}/${plan.steps.length} steps completed`}</small></span><span className="plan-progress"><i><em style={{width:`${progress}%`}}/></i><b>{progress}%</b></span><span className={`plan-state ${plan.status}`}>{plan.status}</span><ChevronRight size={14}/></summary><ol>{plan.steps.map(step=><li className={step.status} key={step.number}><span className="plan-step-marker">{step.status==='completed'?<Check size={12}/>:step.status==='in_progress'?<LoaderCircle size={12}/>:step.status==='blocked'?<ShieldAlert size={12}/>:step.number}</span><div><b>{step.title}</b>{step.evidence&&<p>{step.evidence}</p>}</div><em>{step.status.replace('_',' ')}</em></li>)}</ol></details>
 }
 
-function ChatBubble({ entry, runs, hosts }: {entry: ChatEntry;runs:Run[];hosts:Host[]}) {
+const ChatBubble=memo(function ChatBubble({ entry, runs, hosts }: {entry: ChatEntry;runs:Run[];hosts:Host[]}) {
   if (entry.kind === 'tool') return <ToolEventCard entry={entry} runs={runs} hosts={hosts}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
   if (entry.kind === 'assistant' && !entry.content) return null
-  return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? 'YOU' : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>Operator{entry.status==='failed'&&<em>未进入后续上下文</em>}{entry.status==='pending'&&<em>处理中</em>}</> : entry.kind === 'error' ? 'Error' : 'OpsPilot'}</span><div className={`bubble-copy ${entry.kind==='assistant'?'markdown-body':''}`}>{entry.kind==='assistant'?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">[Blocked image: {alt||'no description'}]</span>}}>{entry.content||'…'}</Markdown>:entry.content||'…'}</div></div></div>
-}
+  return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? 'YOU' : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>Operator{entry.status==='failed'&&<em>未进入后续上下文</em>}{entry.status==='pending'&&<em>处理中</em>}</> : entry.kind === 'error' ? 'Error' : 'OpsPilot'}</span><div className={`bubble-copy ${entry.kind==='assistant'&&!entry.streaming?'markdown-body':''}`}>{entry.kind==='assistant'&&!entry.streaming?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">[Blocked image: {alt||'no description'}]</span>}}>{entry.content||'…'}</Markdown>:entry.content||'…'}</div></div></div>
+})
 
 function latestReasoningLine(content:string){
   const lines=content.split(/\r?\n/).map((line)=>line.trim()).filter(Boolean)
@@ -663,6 +686,7 @@ function ReviewList({title,items,tone}:{title:string;items?:string[];tone?:strin
 
 function CommandReviewPanel({review}:{review?:CommandReview}){
   if(!review)return null
+	if(review.status==='pending')return <div className="command-review-panel pending" role="status" aria-live="polite"><div className="command-review-pending"><span className="review-agent-icon"><LoaderCircle className="spin" size={17}/></span><span><b>双 SubAgent 正在后台审查</b><small>审批已经可以操作；解释和风险建议完成后会自动更新。</small></span><em>NON-BLOCKING</em></div></div>
   const risk=review.risk_review
   const explanation=review.explanation
   const recommendation=risk?.recommendation?recommendationLabels[risk.recommendation]:null
@@ -685,6 +709,7 @@ function ApprovalDialog({approval,pendingCount,hosts,running,refresh,onNotice}:{
 	const targetHost=hosts.find(host=>host.id===approval.host_id)?.name||approval.host_id
 	const hostName=workspaceTransfer?targetHost:workspaceID?`Workspace / ${workspaceID}`:targetHost
 	const expectedSHA=textValue(request.expected_sha256),validator=textValue(request.validator)
+	const reviewPending=approval.ai_review?.status==='pending'
   const decide=async(scope:'once'|'session')=>{
     setBusy(scope);setError('')
     try{const result=await api.approve(approval.id,challenge,note.trim()||'Reviewed and approved in the current Agent session.',scope);onNotice(`审批已通过 · ${result.status} · ${result.run_id}`);await refresh()}
@@ -706,7 +731,7 @@ function ApprovalDialog({approval,pendingCount,hosts,running,refresh,onNotice}:{
     }catch(err){setError(errorText(err))}finally{setBusy('')}
   }
   const disabled=!!busy
-	return <div className="approval-modal-backdrop"><section className={`approval-dialog ${approval.risk}`} role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title"><div className="approval-dialog-head"><div className="approval-dialog-icon"><ShieldAlert size={20}/></div><div><span>HUMAN APPROVAL · {pendingCount>1?`1 OF ${pendingCount}`:'CURRENT SESSION'}</span><h2 id="approval-dialog-title">OpsPilot 请求执行受控操作</h2></div><em className={`risk ${approval.risk}`}>{approval.risk.replace('_',' ')}</em></div><div className="approval-operation"><span className="approval-command-label">{filePath?'完整受控文件事务':`LLM 请求运行的完整${script?'脚本':'命令'}`}</span>{filePath&&<div className="approval-file-target"><FileText size={15}/><div><b>{workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:filePath}</b><span>{expectedSHA?`Expected SHA256 · ${expectedSHA}`:'未绑定已有版本'}{validator?` · Validator ${validator}`:''}</span></div></div>}<pre className="approval-command-preview">{script||`$ ${operation}`}</pre><dl><div><dt>{workspaceTransfer?'Host':workspaceID?'Workspace':'Host'}</dt><dd>{hostName}</dd></div><div><dt>Expires</dt><dd><Clock3 size={12}/>{new Date(approval.expires_at).toLocaleTimeString()}</dd></div><div><dt>Digest</dt><dd>{approval.request_digest.slice(0,12)}</dd></div></dl>{typeof request.reason==='string'&&<p>{request.reason}</p>}</div><CommandReviewPanel review={approval.ai_review}/><div className="review-retry-row"><span>只重新运行只读审查，不会执行或批准命令。</span><button disabled={disabled} onClick={retryReview}><RefreshCw className={busy==='review'?'spin':''} size={13}/>{busy==='review'?'SubAgent 正在重试…':'重试 SubAgent 审查'}</button></div>{approval.challenge&&<label className="approval-challenge-input"><span>Break-glass challenge · 输入 <code>{approval.challenge}</code></span><input value={challenge} onChange={event=>setChallenge(event.target.value)} placeholder="输入上方 challenge" autoComplete="off" autoFocus/></label>}<label className="approval-guidance"><span>审批说明 / 拒绝后告诉 LLM 应该改做什么</span><textarea value={note} maxLength={2000} onChange={event=>setNote(event.target.value)} placeholder="例如：不要重启服务，先只读取最近 100 行日志并分析原因。" autoFocus={!approval.challenge}/></label>{error&&<div className="approval-dialog-error"><ShieldAlert size={14}/>{error}</div>}<details className="approval-request-detail"><summary>查看完整请求</summary><pre>{JSON.stringify(request,null,2)}</pre></details><div className="approval-choice-grid"><button className="allow-once" disabled={disabled} onClick={()=>decide('once')}><Check size={16}/><span><b>{busy==='once'?'正在执行…':'仅允许本次'}</b><small>只批准当前请求摘要</small></span></button><button className="allow-session" disabled={disabled||approval.risk==='critical'} onClick={()=>decide('session')} title={approval.risk==='critical'?'Critical 操作不能会话级放行':''}><ShieldCheck size={16}/><span><b>{busy==='session'?'正在授权…':'本会话允许相同操作'}</b><small>{approval.risk==='critical'?'Critical 不可用':'目标、内容和参数必须完全一致'}</small></span></button><button className="reject-guidance" disabled={disabled||!note.trim()} onClick={reject}><X size={16}/><span><b>{busy==='reject'?'正在反馈…':'拒绝并告诉 LLM'}</b><small>将输入框内容作为新指令</small></span></button></div><p className="approval-wait">{running?'当前 Agent 已暂停在这个 Tool 调用，审批后会从原位置继续。':'原 Agent 连接已结束；本次决定仍会被执行并写入审计。'}</p></section></div>
+	return <div className="approval-modal-backdrop"><section className={`approval-dialog ${approval.risk}`} role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title"><div className="approval-dialog-head"><div className="approval-dialog-icon"><ShieldAlert size={20}/></div><div><span>HUMAN APPROVAL · {pendingCount>1?`1 OF ${pendingCount}`:'CURRENT SESSION'}</span><h2 id="approval-dialog-title">OpsPilot 请求执行受控操作</h2></div><em className={`risk ${approval.risk}`}>{approval.risk.replace('_',' ')}</em></div><div className="approval-operation"><span className="approval-command-label">{filePath?'完整受控文件事务':`LLM 请求运行的完整${script?'脚本':'命令'}`}</span>{filePath&&<div className="approval-file-target"><FileText size={15}/><div><b>{workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:filePath}</b><span>{expectedSHA?`Expected SHA256 · ${expectedSHA}`:'未绑定已有版本'}{validator?` · Validator ${validator}`:''}</span></div></div>}<pre className="approval-command-preview">{script||`$ ${operation}`}</pre><dl><div><dt>{workspaceTransfer?'Host':workspaceID?'Workspace':'Host'}</dt><dd>{hostName}</dd></div><div><dt>Expires</dt><dd><Clock3 size={12}/>{new Date(approval.expires_at).toLocaleTimeString()}</dd></div><div><dt>Digest</dt><dd>{approval.request_digest.slice(0,12)}</dd></div></dl>{typeof request.reason==='string'&&<p>{request.reason}</p>}</div><CommandReviewPanel review={approval.ai_review}/><div className="review-retry-row"><span>{reviewPending?'后台审查不会阻塞当前审批。':'只重新运行只读审查，不会执行或批准命令。'}</span><button disabled={disabled||reviewPending} onClick={retryReview}><RefreshCw className={busy==='review'||reviewPending?'spin':''} size={13}/>{reviewPending?'SubAgent 审查中…':busy==='review'?'SubAgent 正在重试…':'重试 SubAgent 审查'}</button></div>{approval.challenge&&<label className="approval-challenge-input"><span>Break-glass challenge · 输入 <code>{approval.challenge}</code></span><input value={challenge} onChange={event=>setChallenge(event.target.value)} placeholder="输入上方 challenge" autoComplete="off" autoFocus/></label>}<label className="approval-guidance"><span>审批说明 / 拒绝后告诉 LLM 应该改做什么</span><textarea value={note} maxLength={2000} onChange={event=>setNote(event.target.value)} placeholder="例如：不要重启服务，先只读取最近 100 行日志并分析原因。" autoFocus={!approval.challenge}/></label>{error&&<div className="approval-dialog-error"><ShieldAlert size={14}/>{error}</div>}<details className="approval-request-detail"><summary>查看完整请求</summary><pre>{JSON.stringify(request,null,2)}</pre></details><div className="approval-choice-grid"><button className="allow-once" disabled={disabled} onClick={()=>decide('once')}><Check size={16}/><span><b>{busy==='once'?'正在执行…':'仅允许本次'}</b><small>只批准当前请求摘要</small></span></button><button className="allow-session" disabled={disabled||approval.risk==='critical'} onClick={()=>decide('session')} title={approval.risk==='critical'?'Critical 操作不能会话级放行':''}><ShieldCheck size={16}/><span><b>{busy==='session'?'正在授权…':'本会话允许相同操作'}</b><small>{approval.risk==='critical'?'Critical 不可用':'目标、内容和参数必须完全一致'}</small></span></button><button className="reject-guidance" disabled={disabled||!note.trim()} onClick={reject}><X size={16}/><span><b>{busy==='reject'?'正在反馈…':'拒绝并告诉 LLM'}</b><small>将输入框内容作为新指令</small></span></button></div><p className="approval-wait">{running?'当前 Agent 已暂停在这个 Tool 调用，审批后会从原位置继续。':'原 Agent 连接已结束；本次决定仍会被执行并写入审计。'}</p></section></div>
 }
 
 const emptyHostForm: HostInput = {name:'',address:'',port:22,user:'',auth_type:'agent',config_alias:'',identity_file:'',known_hosts_file:'',proxy_jump:'',password:'',sudo_mode:'none',sudo_password:''}
