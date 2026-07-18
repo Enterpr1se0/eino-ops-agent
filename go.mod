@@ -54,3 +54,6 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+// Temporary patch for multiline SSE data events. Remove after upstream PR #24 is released.
+replace github.com/meguminnnnnnnnn/go-openai => github.com/Enterpr1se0/go-openai v0.1.6-0.20260718140543-51e9a05b2d1f

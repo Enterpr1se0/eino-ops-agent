@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"crypto/sha256"
 	"embed"
 	"fmt"
 	"path/filepath"
@@ -12,9 +13,14 @@ import (
 var content embed.FS
 
 type Skill struct {
-	Name    string `json:"name"`
-	Summary string `json:"summary"`
-	Content string `json:"content,omitempty"`
+	Name          string `json:"name"`
+	Summary       string `json:"summary"`
+	Enabled       bool   `json:"enabled"`
+	Content       string `json:"content,omitempty"`
+	ContentSHA256 string `json:"content_sha256,omitempty"`
+	FileCount     int    `json:"file_count,omitempty"`
+	SizeBytes     int64  `json:"size_bytes,omitempty"`
+	UpdatedAt     string `json:"updated_at,omitempty"`
 }
 
 func List() ([]Skill, error) {
@@ -32,7 +38,7 @@ func List() ([]Skill, error) {
 			return nil, err
 		}
 		text := string(data)
-		result = append(result, Skill{Name: strings.TrimSuffix(entry.Name(), ".md"), Summary: firstParagraph(text)})
+		result = append(result, Skill{Name: strings.TrimSuffix(entry.Name(), ".md"), Summary: firstParagraph(text), Enabled: true})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result, nil
@@ -47,7 +53,8 @@ func Get(name string) (Skill, error) {
 		return Skill{}, fmt.Errorf("skill %q not found", name)
 	}
 	text := string(data)
-	return Skill{Name: name, Summary: firstParagraph(text), Content: text}, nil
+	digest := sha256.Sum256(data)
+	return Skill{Name: name, Summary: firstParagraph(text), Enabled: true, Content: text, ContentSHA256: fmt.Sprintf("%x", digest), FileCount: 1, SizeBytes: int64(len(data))}, nil
 }
 
 func firstParagraph(text string) string {

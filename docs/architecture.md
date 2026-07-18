@@ -13,6 +13,8 @@ LLM、Prompt、Skill、远程输出和 MCP Client 都不属于可信计算基。
 
 Eino Tool、MCP Tool、HTTP 和 CLI 都是这个 Service 的适配器。预期失败被规范化为带 `code/retryable/next_action` 的 Tool 结果；只有上下文取消或内部持久化损坏会成为 ToolNode fatal error。
 
+这里的 MCP Tool 分为两个方向。`ops-agent mcp` 把受控 SSH Service 暴露为 stdio MCP Server，因此完整复用 Policy、审批和审计。管理员配置的外部 MCP Server 则属于独立信任域：它的工具在远端/子进程自身权限下执行，不自动继承 SSH Policy。Web 会明确提示该边界，只有启用状态为 ready 的外部工具才进入主 Agent，评审 SubAgent 仍保持无 Tool。
+
 Web/API 位于单管理员认证边界之后。首次密码由环境变量初始化为 Argon2id 哈希；后续请求使用只保存哈希的服务端 Session、HttpOnly/SameSite Cookie 和 CSRF Token。MCP stdio 与 CLI 仍属于本机进程边界，不复用浏览器 Cookie。
 
 对于确定性 Policy 已判为 Change 或 Critical 的请求，Service 在创建审批前调用 `CommandExplainerAgent` 与 `RiskReviewerAgent`。它们是两个独立的 Eino `ChatModelAgent`/Runner，`MaxIterations=1`、无 Tool，并行返回严格 JSON。解释 Agent 负责面向初学者说明机制、影响、风险和回滚；风险 Agent 负责给出风险、置信度、判断依据、缺失证据与必要控制。Service 会覆盖模型声称的 deterministic risk，拒绝任何降级结果，只接受从 Change 到 Critical 的单向升级。模型建议永远不能变成 allow，也不能绕过 Policy、challenge 或用户审批；评审失败按 degraded/unavailable 持久化并继续走原审批路径。
@@ -21,13 +23,21 @@ Web/API 位于单管理员认证边界之后。首次密码由环境变量初始
 
 - `internal/sshx`：OpenSSH 参数构造、严格 host key、输出上限和连接探测。
 - `internal/policy`：Shell AST、内置风险集和 YAML 扩展规则。
-- `internal/service`：审批状态机、摘要绑定、执行并发、任务和审计事务。
-- `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型配置与 Eino checkpoints。
+- `internal/service`：审批状态机、摘要绑定、执行并发、任务、审计事务，以及外部 MCP Client Session 与动态工具生命周期。
+- `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型/MCP 配置与 Eino checkpoints。
 - `internal/agent`：Eino ChatModelAgent、强类型 Tools、消息历史、事件流与并发安全的 Runner 热切换。
 - `internal/mcpserver`：官方 MCP Go SDK stdio 适配器。
 - `internal/httpapi`：本地 HTTP API、SSE 和 React 静态资源。
 - `internal/observability`：`slog` 多路 Handler、字段脱敏、JSONL 文件轮转与 Web 内存日志缓冲。
-- `internal/skills`：无权限的运维方法论资源。
+- `internal/skills`：可上传、永久删除和启停的无权限运维方法论注册表。
+
+## Dynamic extensions
+
+Skill Registry 位于控制面数据目录，每个 Skill 目录必须包含 `SKILL.md`，启用状态写入独立 `skill.json`。管理员列表包含全部 Skill；`ops_skill_list/get` 只读取启用项。状态修改后主 Eino Agent 和 OpsPilot 自身的 MCP Server 看到一致的动态集合，删除是不可恢复的物理删除。
+
+外部 MCP 配置保存在 `mcp_servers`。command、args、cwd、URL 和秘密键名是可管理元数据，环境变量与 HTTP Header 的完整映射整体使用 AES-256-GCM 加密。启动时 Service 尝试连接所有 enabled 配置；单个服务器失败只记录 `error` 状态和结构化日志，不阻止控制面启动。
+
+stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamable HTTP 使用官方 MCP Go SDK transport。连接成功后分页执行 `tools/list`，把服务器 JSON Schema 转为 Eino ToolInfo，并生成不超过模型限制的稳定名称 `mcp__<server-id-hash>__<sanitized-tool-name>`。动态 wrapper 每次调用都重新检查服务器的 ready Session，因此 Disable/Delete/重连失败会立即阻止旧 Runner 中的残留句柄；随后 Runtime 热重载会从模型函数 Schema 中移除它。调用结果限制为 128 KiB，并记录不含参数或输出的 `mcp_tool_called` 审计事件。
 
 ## Command execution
 

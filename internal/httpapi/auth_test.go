@@ -89,3 +89,25 @@ func TestUnknownAPIRouteReturnsJSONNotSPA(t *testing.T) {
 		t.Fatalf("unknown API returned content type %q", contentType)
 	}
 }
+
+func TestAgentToolsEndpointReportsAnUnloadedRuntimeWithoutPanicking(t *testing.T) {
+	handler := New(nil, nil, nil).Handler()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/agent/tools", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("tool catalog status=%d body=%s", response.Code, response.Body.String())
+	}
+	var catalog struct {
+		Loaded bool  `json:"loaded"`
+		Count  int   `json:"count"`
+		Tools  []any `json:"tools"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &catalog); err != nil {
+		t.Fatal(err)
+	}
+	if catalog.Loaded || catalog.Count != 0 || catalog.Tools == nil {
+		t.Fatalf("unexpected unloaded catalog: %#v", catalog)
+	}
+}

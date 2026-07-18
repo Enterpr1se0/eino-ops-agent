@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatMessage, ChatSession, ChatState, Health, Host, HostInput, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Run, ServerLogResponse, SystemSettings, SystemSettingsInput, ToolCapabilities, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceUploadResult } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatMessage, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Run, ServerLogResponse, SystemSettings, SystemSettingsInput, ToolCapabilities, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceUploadResult } from './types'
 
 let csrfToken = ''
 
@@ -35,6 +35,21 @@ export const api = {
   health: () => request<Health>('/api/v1/health'),
 	systemSettings: () => request<SystemSettings>('/api/v1/settings'),
 	capabilities: () => request<ToolCapabilities>('/api/v1/capabilities'),
+	llmTools: () => request<LLMToolCatalog>('/api/v1/agent/tools'),
+	skills: () => requestList<ManagedSkill>('/api/v1/skills'),
+	skill: (name:string) => request<ManagedSkill>(`/api/v1/skills/${encodeURIComponent(name)}`),
+	uploadSkill: (name:string,file:File) => {const body=new FormData();body.set('name',name);body.set('file',file);return request<ManagedSkill>('/api/v1/skills',{method:'POST',body})},
+	saveSkill: (name:string,content:string) => request<ManagedSkill>(`/api/v1/skills/${encodeURIComponent(name)}`,{method:'PUT',body:JSON.stringify({content})}),
+	deleteSkill: (name:string) => request<void>(`/api/v1/skills/${encodeURIComponent(name)}`,{method:'DELETE'}),
+	setSkillEnabled: (name:string,enabled:boolean) => request<ManagedSkill>(`/api/v1/skills/${encodeURIComponent(name)}/${enabled?'enable':'disable'}`,{method:'POST',body:'{}'}),
+	mcpServers: () => requestList<MCPServer>('/api/v1/mcp-servers'),
+	saveMCPServer: (server:MCPServerInput) => server.id
+		? request<MCPServer>(`/api/v1/mcp-servers/${encodeURIComponent(server.id)}`,{method:'PUT',body:JSON.stringify(server)})
+		: request<MCPServer>('/api/v1/mcp-servers',{method:'POST',body:JSON.stringify(server)}),
+	deleteMCPServer: (id:string) => request<void>(`/api/v1/mcp-servers/${encodeURIComponent(id)}`,{method:'DELETE'}),
+	setMCPServerEnabled: (id:string,enabled:boolean) => request<MCPServer>(`/api/v1/mcp-servers/${encodeURIComponent(id)}/${enabled?'enable':'disable'}`,{method:'POST',body:'{}'}),
+	retryMCPServer: (id:string) => request<MCPServer>(`/api/v1/mcp-servers/${encodeURIComponent(id)}/retry`,{method:'POST',body:'{}'}),
+	testMCPServer: (id:string) => request<MCPTestResult>(`/api/v1/mcp-servers/${encodeURIComponent(id)}/test`,{method:'POST',body:'{}'}),
 	workspaceFiles: (workspaceId:string,path='.') => request<WorkspaceFileList>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`),
 	previewWorkspaceFile: (workspaceId:string,path:string) => request<WorkspaceFilePreview>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/preview?path=${encodeURIComponent(path)}`),
 	uploadWorkspaceFile: (workspaceId:string,file:File,path:string) => {const body=new FormData();body.set('file',file);body.set('path',path);return request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files`,{method:'POST',body})},

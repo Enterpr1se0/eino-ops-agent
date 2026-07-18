@@ -19,6 +19,7 @@ import (
 	"eino-ops-agent/internal/observability"
 	"eino-ops-agent/internal/policy"
 	"eino-ops-agent/internal/security"
+	"eino-ops-agent/internal/skills"
 	"eino-ops-agent/internal/sshx"
 	"eino-ops-agent/internal/store"
 )
@@ -33,6 +34,7 @@ type Service struct {
 	dataDir    string
 	workspaces map[string]config.Workspace
 	validators map[string]config.Validator
+	skills     *skills.Registry
 
 	globalSem  chan struct{}
 	semMu      sync.Mutex
@@ -41,6 +43,8 @@ type Service struct {
 	tasks      map[string]*taskState
 	reviewerMu sync.RWMutex
 	reviewer   CommandReviewer
+	mcpMu      sync.RWMutex
+	mcpRuntime map[string]*mcpRuntimeState
 }
 
 type CommandReviewer interface {
@@ -71,10 +75,11 @@ func New(st *store.Store, engine *policy.Engine, transport sshx.Transport, encry
 	}
 	result := &Service{
 		store: st, policy: engine, transport: transport, encryptor: encryptor, redactor: redactor, limits: limits,
-		globalSem: make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator),
+		globalSem: make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
 	}
 	if len(runtimeConfig) > 0 {
 		result.dataDir = runtimeConfig[0].DataDir
+		result.skills = skills.NewRegistry(filepath.Join(result.dataDir, "skills"))
 		for _, workspace := range runtimeConfig[0].Workspaces {
 			result.workspaces[workspace.ID] = workspace
 		}

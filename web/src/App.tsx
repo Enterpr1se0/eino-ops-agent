@@ -2,17 +2,17 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 're
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  Activity, Bot, BrainCircuit, Check, ChevronRight, CircleDot, Clock3, Cpu, Edit3, FileText, FolderOpen, History, KeyRound, LockKeyhole, LogOut,
-  ListChecks, LoaderCircle, Plus, RefreshCw, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, TerminalSquare, Trash2, UploadCloud, X, Zap,
+  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronRight, CircleDot, Clock3, Cpu, Edit3, FileText, FolderOpen, FunctionSquare, History, KeyRound, LockKeyhole, LogOut,
+  ListChecks, LoaderCircle, Plus, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, TerminalSquare, Trash2, UploadCloud, X, Zap,
 } from 'lucide-react'
 import { api, streamChat } from './api'
-import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, ToolCapabilities, WorkspaceCapability, WorkspaceFilePreview } from './types'
+import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, ToolCapabilities, WorkspaceCapability, WorkspaceFilePreview } from './types'
 
-type Page = 'chat' | 'config' | 'audit' | 'logs'
-type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; active?: boolean }
+type Page = 'chat' | 'config' | 'extensions' | 'audit' | 'logs'
+type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; active?: boolean; status?: 'pending' | 'completed' | 'failed' }
 
 function historyEntries(messages:ChatMessage[]):ChatEntry[]{
-  return messages.map((item,index)=>({id:`history_${index}_${item.created_at}`,kind:item.role,content:item.content,tool:item.tool_name}))
+  return messages.map((item,index)=>({id:`history_${index}_${item.created_at}`,kind:item.role,content:item.content,tool:item.tool_name,status:item.status}))
 }
 
 function planFromToolContent(content:string):AgentPlan|null{
@@ -54,16 +54,19 @@ function App() {
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const [settings, setSettings] = useState<SystemSettings | null>(null)
 	const [capabilities,setCapabilities]=useState<ToolCapabilities>({workspaces:[]})
+	const [toolCatalog,setToolCatalog]=useState<LLMToolCatalog|null>(null)
+	const [skills,setSkills]=useState<ManagedSkill[]>([])
+	const [mcpServers,setMCPServers]=useState<MCPServer[]>([])
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [runs, setRuns] = useState<Run[]>([])
   const [error, setError] = useState('')
 
   const refresh = useCallback(async () => {
     try {
-	  const [nextHealth, nextHosts, nextProviders, nextSettings, nextCapabilities, nextApprovals, nextRuns] = await Promise.all([
-		api.health(), api.hosts(), api.modelProviders(), api.systemSettings(), api.capabilities(), api.approvals(), api.runs(),
+	  const [nextHealth, nextHosts, nextProviders, nextSettings, nextCapabilities, nextToolCatalog, nextSkills, nextMCPServers, nextApprovals, nextRuns] = await Promise.all([
+		api.health(), api.hosts(), api.modelProviders(), api.systemSettings(), api.capabilities(), api.llmTools(), api.skills(), api.mcpServers(), api.approvals(), api.runs(),
       ])
-	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setSettings(nextSettings);setCapabilities(nextCapabilities); setApprovals(nextApprovals); setRuns(nextRuns); setError('')
+	  setHealth(nextHealth); setHosts(nextHosts); setProviders(nextProviders); setSettings(nextSettings);setCapabilities(nextCapabilities);setToolCatalog(nextToolCatalog);setSkills(nextSkills);setMCPServers(nextMCPServers); setApprovals(nextApprovals); setRuns(nextRuns); setError('')
 	} catch (err) { const message=errorText(err);if(/authentication required/i.test(message))setAuth('guest');setError(message) }
   }, [])
 
@@ -73,7 +76,7 @@ function App() {
 	if(auth==='checking')return <div className="auth-screen"><div className="auth-loading"><LoaderCircle className="spin" size={25}/><span>Securing control plane…</span></div></div>
 	if(auth==='guest')return <LoginPage onAuthenticated={()=>setAuth('authenticated')}/>
 
-  const title = { chat: 'Agent Workspace', config: 'Configuration Center', audit: 'Audit Explorer', logs: 'Server Logs' }[page]
+  const title = { chat: 'Agent Workspace', config: 'Configuration Center', extensions: 'Agent Extensions', audit: 'Audit Explorer', logs: 'Server Logs' }[page]
 
   return <div className="app-shell">
     <aside className="sidebar">
@@ -81,6 +84,7 @@ function App() {
       <nav>
         <Nav active={page === 'chat'} icon={<Bot/>} label="Agent" onClick={() => setPage('chat')}/>
         <Nav active={page === 'config'} icon={<Settings2/>} label="Configuration" onClick={() => setPage('config')}/>
+		<Nav active={page === 'extensions'} icon={<Braces/>} label="Extensions" onClick={() => setPage('extensions')}/>
         <Nav active={page === 'audit'} icon={<History/>} label="Audit" onClick={() => setPage('audit')}/>
         <Nav active={page === 'logs'} icon={<FileText/>} label="Logs" onClick={() => setPage('logs')}/>
       </nav>
@@ -99,6 +103,7 @@ function App() {
       <section className="workspace">
 		{page === 'chat' && <ChatPage hosts={hosts} approvals={approvals} runs={runs} capabilities={capabilities} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh}/>}
 		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} settings={settings} capabilities={capabilities} health={health} refresh={refresh}/>}
+		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refresh={refresh}/>}
         {page === 'audit' && <AuditPage runs={runs}/>} 
         {page === 'logs' && <LogsPage/>}
       </section>
@@ -132,6 +137,164 @@ function ConfigurationPage({hosts,providers,settings,capabilities,health,refresh
 	  {section==='system'&&<SystemSettingsPage settings={settings} capabilities={capabilities} reviewAgentsAvailable={!!health?.model?.review_agents_available} refresh={refresh}/>}
     </div>
   </div>
+}
+
+type ExtensionSection = 'overview' | 'skills' | 'mcp' | 'tools'
+
+function ExtensionsPage({skills,mcpServers,toolCatalog,refresh}:{skills:ManagedSkill[];mcpServers:MCPServer[];toolCatalog:LLMToolCatalog|null;refresh:()=>Promise<void>}){
+	const [section,setSection]=useState<ExtensionSection>('overview')
+	const enabledSkills=skills.filter(skill=>skill.enabled).length
+	const readyMCP=mcpServers.filter(server=>server.status==='ready').length
+	const externalTools=toolCatalog?.tools.filter(item=>item.category==='mcp').length??0
+	const tabs:[ExtensionSection,React.ReactNode,string,string][]=[
+		['overview',<Braces size={17}/>, 'Overview', `${enabledSkills+readyMCP} active`],
+		['skills',<BookOpen size={17}/>, 'Skills', `${enabledSkills}/${skills.length} enabled`],
+		['mcp',<Zap size={17}/>, 'MCP servers', `${readyMCP}/${mcpServers.length} ready`],
+		['tools',<FunctionSquare size={17}/>, 'Loaded functions', `${toolCatalog?.count??0} loaded`],
+	]
+	return <div className="extensions-center page-stack">
+		<section className="extensions-hero panel"><div className="extensions-hero-mark"><Braces size={24}/></div><div><span>AGENT EXTENSION CONTROL PLANE</span><h2>Knowledge, integrations and model-facing functions</h2><p>Enable only the capabilities the main Agent should see. Runtime changes rebuild the Eino tool snapshot automatically.</p></div><dl><div><dt>Enabled Skills</dt><dd>{enabledSkills}</dd></div><div><dt>Ready MCP</dt><dd>{readyMCP}</dd></div><div><dt>External tools</dt><dd>{externalTools}</dd></div></dl></section>
+		<div className="extension-tabs configuration-tabs" role="tablist" aria-label="Extension sections">{tabs.map(([id,icon,label,meta])=><button type="button" role="tab" aria-selected={section===id} className={section===id?'active':''} onClick={()=>setSection(id)} key={id}>{icon}<span><b>{label}</b><small>{meta}</small></span><ChevronRight size={15}/></button>)}</div>
+		<div className="configuration-content" role="tabpanel">
+			{section==='overview'&&<div className="extension-overview"><button className="panel" onClick={()=>setSection('skills')}><div><BookOpen size={21}/></div><span><small>OPERATOR KNOWLEDGE</small><h3>Skills</h3><p>Markdown workflows loaded on demand through <code>ops_skill_get</code>.</p></span><strong>{enabledSkills}<small>enabled</small></strong><ChevronRight size={16}/></button><button className="panel" onClick={()=>setSection('mcp')}><div><Zap size={21}/></div><span><small>EXTERNAL INTEGRATIONS</small><h3>MCP Servers</h3><p>Discover external tools over stdio or Streamable HTTP.</p></span><strong>{readyMCP}<small>ready</small></strong><ChevronRight size={16}/></button><button className="panel" onClick={()=>setSection('tools')}><div><FunctionSquare size={21}/></div><span><small>RUNTIME SNAPSHOT</small><h3>Loaded functions</h3><p>Inspect the exact schemas currently passed to the ChatModel.</p></span><strong>{toolCatalog?.count??0}<small>functions</small></strong><ChevronRight size={16}/></button></div>}
+			{section==='skills'&&<SkillsPage skills={skills} refresh={refresh}/>}
+			{section==='mcp'&&<MCPServersPage servers={mcpServers} refresh={refresh}/>}
+			{section==='tools'&&<LLMToolsPage catalog={toolCatalog} refresh={refresh}/>}
+		</div>
+	</div>
+}
+
+type MCPFormState = {
+	id?:string;name:string;transport:MCPTransport;command:string;argsText:string;cwd:string;url:string;envText:string;headersText:string;enabled:boolean;clearEnv:boolean;clearHeaders:boolean
+}
+
+const emptyMCPForm:MCPFormState={name:'',transport:'stdio',command:'',argsText:'',cwd:'',url:'',envText:'',headersText:'',enabled:false,clearEnv:false,clearHeaders:false}
+
+function parseMCPPairs(value:string,kind:'env'|'header'){
+	const result:Record<string,string>={}
+	for(const raw of value.split(/\r?\n/)){
+		const line=raw.trim();if(!line)continue
+		const separator=kind==='env'?line.indexOf('='):line.indexOf(':')
+		if(separator<1)throw new Error(kind==='env'?`Invalid environment line “${line}”; use NAME=value.`:`Invalid header line “${line}”; use Name: value.`)
+		const name=line.slice(0,separator).trim(),content=line.slice(separator+1).trim()
+		if(!name)throw new Error(`Invalid ${kind} name.`)
+		result[name]=content
+	}
+	return result
+}
+
+function MCPServersPage({servers,refresh}:{servers:MCPServer[];refresh:()=>Promise<void>}){
+	const [form,setForm]=useState<MCPFormState|null>(null)
+	const [busy,setBusy]=useState('')
+	const [notice,setNotice]=useState('')
+	const [error,setError]=useState('')
+	const openCreate=()=>{setForm({...emptyMCPForm});setNotice('');setError('')}
+	const openEdit=(server:MCPServer)=>{setForm({id:server.id,name:server.name,transport:server.transport,command:server.command||'',argsText:(server.args||[]).join('\n'),cwd:server.cwd||'',url:server.url||'',envText:'',headersText:'',enabled:server.enabled,clearEnv:false,clearHeaders:false});setNotice('');setError('')}
+	const save=async(event:FormEvent)=>{event.preventDefault();if(!form)return;setBusy('save');setError('');try{
+		const input:MCPServerInput={id:form.id,name:form.name.trim(),transport:form.transport,command:form.transport==='stdio'?form.command.trim():'',args:form.transport==='stdio'?form.argsText.split(/\r?\n/).map(item=>item.trim()).filter(Boolean):[],cwd:form.transport==='stdio'?form.cwd.trim():'',url:form.transport==='streamable_http'?form.url.trim():'',enabled:form.enabled}
+		if(!form.id||form.envText.trim()||form.clearEnv)input.env=form.clearEnv?{}:parseMCPPairs(form.envText,'env')
+		if(!form.id||form.headersText.trim()||form.clearHeaders)input.headers=form.clearHeaders?{}:parseMCPPairs(form.headersText,'header')
+		const saved=await api.saveMCPServer(input);setForm(null);setNotice(`${saved.name} saved · ${saved.status}${saved.last_error?` · ${saved.last_error}`:''}`);await refresh()
+	}catch(err){setError(errorText(err))}finally{setBusy('')}}
+	const test=async(server:MCPServer)=>{setBusy(`test-${server.id}`);setError('');try{const result=await api.testMCPServer(server.id);setNotice(`Connection healthy · ${result.tool_count} tools discovered · ${result.latency_ms} ms`)}catch(err){setError(errorText(err))}finally{setBusy('')}}
+	const toggle=async(server:MCPServer)=>{setBusy(`toggle-${server.id}`);setError('');try{const result=await api.setMCPServerEnabled(server.id,!server.enabled);setNotice(`${result.name} ${result.enabled?'enabled':'disabled'} · ${result.status}${result.last_error?` · ${result.last_error}`:''}`);await refresh()}catch(err){setError(errorText(err))}finally{setBusy('')}}
+	const retry=async(server:MCPServer)=>{setBusy(`retry-${server.id}`);setError('');try{const result=await api.retryMCPServer(server.id);setNotice(`${result.name} reconnected · ${result.tool_count} tools loaded`);await refresh()}catch(err){setError(errorText(err));await refresh()}finally{setBusy('')}}
+	const remove=async(server:MCPServer)=>{if(!confirm(`Permanently delete MCP server “${server.name}”?`))return;setBusy(`delete-${server.id}`);setError('');try{await api.deleteMCPServer(server.id);setNotice(`${server.name} deleted.`);await refresh()}catch(err){setError(errorText(err))}finally{setBusy('')}}
+	return <div className="mcp-page page-stack">
+		<div className="page-actions"><div><p>External MCP Servers</p><span>Connect tool providers through shell-free stdio commands or MCP Streamable HTTP.</span></div><button className="primary" onClick={openCreate}><Plus size={15}/>Add MCP server</button></div>
+		<div className="mcp-boundary-note"><ShieldAlert size={16}/><div><b>External trust boundary</b><span>MCP tools execute in their own server's authority and are not automatically covered by OpsPilot's SSH policy or approval gate. Only enable servers you trust.</span></div></div>
+		{notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
+		{error&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
+		{form&&<form className="mcp-form panel" onSubmit={save}><header><div><Zap size={19}/><span><small>{form.id?'EDIT MCP SERVER':'NEW MCP SERVER'}</small><h3>{form.id?form.name||'MCP server':'Connect an external tool provider'}</h3></span></div><button type="button" onClick={()=>setForm(null)}><X size={15}/></button></header><div className="mcp-form-grid"><label><span>Display name</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})} placeholder="GitHub tools" required/></label><label><span>Transport</span><select value={form.transport} onChange={event=>setForm({...form,transport:event.target.value as MCPTransport})}><option value="stdio">stdio · local process</option><option value="streamable_http">Streamable HTTP</option></select></label>{form.transport==='stdio'?<><label><span>Command</span><input value={form.command} onChange={event=>setForm({...form,command:event.target.value})} placeholder="npx" required/></label><label><span>Working directory · optional</span><input value={form.cwd} onChange={event=>setForm({...form,cwd:event.target.value})} placeholder="/absolute/path"/></label><label className="mcp-wide"><span>Arguments · one exact argument per line</span><textarea value={form.argsText} onChange={event=>setForm({...form,argsText:event.target.value})} placeholder={'-y\n@modelcontextprotocol/server-filesystem\n/srv/projects'}/></label></>:<label className="mcp-wide"><span>Streamable HTTP endpoint</span><input value={form.url} onChange={event=>setForm({...form,url:event.target.value})} placeholder="https://mcp.example.com/mcp" required/></label>}<label className="mcp-wide"><span>Environment variables · NAME=value, encrypted</span><textarea value={form.envText} onChange={event=>setForm({...form,envText:event.target.value,clearEnv:false})} placeholder={form.id?'Leave blank to preserve stored values':'GITHUB_TOKEN=…'}/>{form.id&&<small>Blank preserves stored values. <label><input type="checkbox" checked={form.clearEnv} onChange={event=>setForm({...form,clearEnv:event.target.checked,envText:event.target.checked?'':form.envText})}/> Clear all stored environment values</label></small>}</label><label className="mcp-wide"><span>HTTP headers · Name: value, encrypted</span><textarea value={form.headersText} onChange={event=>setForm({...form,headersText:event.target.value,clearHeaders:false})} placeholder={form.id?'Leave blank to preserve stored values':'Authorization: Bearer …'}/>{form.id&&<small>Blank preserves stored values. <label><input type="checkbox" checked={form.clearHeaders} onChange={event=>setForm({...form,clearHeaders:event.target.checked,headersText:event.target.checked?'':form.headersText})}/> Clear all stored headers</label></small>}</label></div><footer><label className="mcp-enable-on-save"><input type="checkbox" checked={form.enabled} onChange={event=>setForm({...form,enabled:event.target.checked})}/><i/><span><b>Enable after save</b><small>Connect, discover tools and rebuild the Eino runtime.</small></span></label><button type="button" onClick={()=>setForm(null)}>Cancel</button><button className="primary" disabled={busy==='save'}>{busy==='save'?<LoaderCircle className="spin" size={14}/>:<Save size={14}/>} {busy==='save'?'Saving…':'Save server'}</button></footer></form>}
+		<div className="mcp-grid">{servers.map(server=><article className={`mcp-card panel ${server.status}`} key={server.id}><header><div className="mcp-card-icon"><Zap size={19}/></div><span><h3>{server.name}</h3><code>{server.transport==='stdio'?server.command:server.url}</code></span><em className={server.status}><CircleDot size={9}/>{server.status}</em></header><dl><div><dt>Discovered tools</dt><dd>{server.tool_count}</dd></div><div><dt>Secrets</dt><dd>{(server.env_keys?.length||0)+(server.header_keys?.length||0)} configured</dd></div><div><dt>Last connected</dt><dd>{server.connected_at?new Date(server.connected_at).toLocaleString():'—'}</dd></div></dl>{server.last_error&&<div className="mcp-card-error"><ShieldAlert size={13}/><span>{server.last_error}</span></div>}<div className="mcp-actions"><button onClick={()=>void test(server)} disabled={!!busy}><Activity size={13}/>{busy===`test-${server.id}`?'Testing…':'Test'}</button><button onClick={()=>openEdit(server)} disabled={!!busy}><Edit3 size={13}/>Edit</button>{server.enabled&&server.status!=='ready'&&<button onClick={()=>void retry(server)} disabled={!!busy}><RefreshCw className={busy===`retry-${server.id}`?'spin':''} size={13}/>Retry</button>}<button className={server.enabled?'disable':'enable'} onClick={()=>void toggle(server)} disabled={!!busy}>{busy===`toggle-${server.id}`?<LoaderCircle className="spin" size={13}/>:server.enabled?<X size={13}/>:<Check size={13}/>} {server.enabled?'Disable':'Enable'}</button><button className="danger" onClick={()=>void remove(server)} disabled={!!busy}><Trash2 size={13}/></button></div>{server.tools?.length?<details className="mcp-tools"><summary>{server.tools.length} model-facing tools <ChevronRight size={13}/></summary><div>{server.tools.map(item=><section key={item.exposed_name}><code>{item.exposed_name}</code><span>remote · {item.name}</span><p>{item.description}</p></section>)}</div></details>:null}</article>)}</div>
+		{!servers.length&&<Empty icon={<Zap/>} title="No external MCP servers" text="Add a stdio or Streamable HTTP server, test it, then enable its tools for the main Agent."/>}
+	</div>
+}
+
+type ToolParameterView = {name:string;type:string;description:string;required:boolean}
+
+const toolCategoryLabels:Record<string,string>={planning:'Task planning',execution:'Command execution',hosts:'SSH hosts',tasks:'Long tasks',remote_files:'Remote files',workspace:'Workspace',history:'Audit history',approvals:'Approvals',skills:'Ops skills',mcp:'External MCP'}
+const toolGuardLabels:Record<LLMToolGuard,string>={read_only:'Read only',policy_checked:'Dynamic policy',approval_required:'Human approval',agent_state:'Agent state',audited_control:'Audited control',external_mcp:'External MCP'}
+
+function schemaRecord(value:unknown):Record<string,unknown>{return value!==null&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:{}}
+function schemaType(value:unknown){if(Array.isArray(value))return value.map(String).join(' | ');return typeof value==='string'?value:'any'}
+function toolParameters(tool?:LLMToolDescriptor):ToolParameterView[]{
+	if(!tool)return[]
+	const schema=schemaRecord(tool.input_schema)
+	const properties=schemaRecord(schema.properties)
+	const required=new Set(Array.isArray(schema.required)?schema.required.map(String):[])
+	return Object.entries(properties).map(([name,value])=>{const field=schemaRecord(value);return{name,type:schemaType(field.type),description:typeof field.description==='string'?field.description:'',required:required.has(name)}})
+}
+
+function LLMToolsPage({catalog,refresh}:{catalog:LLMToolCatalog|null;refresh:()=>Promise<void>}){
+	const [query,setQuery]=useState('')
+	const [category,setCategory]=useState('all')
+	const [selectedName,setSelectedName]=useState('')
+	const [refreshing,setRefreshing]=useState(false)
+	const tools=catalog?.tools||[]
+	const categories=useMemo(()=>Array.from(new Set(tools.map(tool=>tool.category))),[tools])
+	const filtered=useMemo(()=>{const needle=query.trim().toLowerCase();return tools.filter(tool=>(category==='all'||tool.category===category)&&(!needle||`${tool.name} ${tool.description} ${tool.category}`.toLowerCase().includes(needle)))},[tools,query,category])
+	const selected=filtered.find(tool=>tool.name===selectedName)||filtered[0]
+	const parameters=toolParameters(selected)
+	const protectedCount=tools.filter(tool=>tool.guard==='approval_required').length
+	const readOnlyCount=tools.filter(tool=>tool.guard==='read_only').length
+	const refreshCatalog=async()=>{setRefreshing(true);try{await refresh()}finally{setRefreshing(false)}}
+
+	return <div className="llm-tools-page page-stack">
+		<section className={`tool-catalog-hero panel ${catalog?.loaded?'loaded':'unloaded'}`}>
+			<div className="tool-catalog-mark"><FunctionSquare size={24}/><i/></div>
+			<div><span>LIVE CHATMODEL TOOLSET</span><h2>{catalog?.loaded?'Functions currently loaded by the LLM':'No function toolset is loaded'}</h2><p>This is the runtime snapshot passed to the main Eino Agent, not a hand-written capability document.</p></div>
+			<dl><div><dt>Agent</dt><dd>{catalog?.agent||'ops-pilot'}</dd></div><div><dt>Model</dt><dd>{catalog?.model||'Not loaded'}</dd></div><div><dt>Functions</dt><dd>{catalog?.count??0}</dd></div><div><dt>Execution</dt><dd>{catalog?.execution_mode||'sequential'}</dd></div></dl>
+			<button className="tool-catalog-refresh" onClick={refreshCatalog} disabled={refreshing}><RefreshCw className={refreshing?'spin':''} size={14}/>{refreshing?'Refreshing…':'Refresh snapshot'}</button>
+		</section>
+		<section className="tool-catalog-note"><BrainCircuit size={16}/><div><b>Main Agent tool boundary</b><span>The two approval-review SubAgents remain tool-free. Only <code>{catalog?.agent||'ops-pilot'}</code> receives the functions shown below.</span></div><small>{catalog?.loaded_at?`Loaded ${new Date(catalog.loaded_at).toLocaleString()}`:'Waiting for a model runtime'}</small></section>
+		<div className="tool-catalog-metrics"><Metric label="Loaded functions" value={String(catalog?.count??0)} tone="green"/><Metric label="Read-only helpers" value={String(readOnlyCount)}/><Metric label="Always approval-gated" value={String(protectedCount)} tone="amber"/><Metric label="Framework" value={catalog?.framework||'Eino'}/></div>
+		<div className="tool-catalog-toolbar panel"><label><Search size={15}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder="Search function name or purpose…"/></label><select value={category} onChange={event=>setCategory(event.target.value)}><option value="all">All categories · {tools.length}</option>{categories.map(value=><option value={value} key={value}>{toolCategoryLabels[value]||value} · {tools.filter(tool=>tool.category===value).length}</option>)}</select><span>{filtered.length} visible</span></div>
+		{!catalog?<div className="tool-catalog-loading panel"><LoaderCircle className="spin" size={20}/>Loading runtime function snapshot…</div>:!catalog.loaded?<Empty icon={<FunctionSquare/>} title="Agent runtime is not loaded" text="Activate a working model provider; functions appear here after the Eino runner builds successfully."/>:<div className="tool-catalog-browser">
+			<section className="tool-function-list panel">{filtered.length?filtered.map(tool=>{const count=toolParameters(tool).length;return <button className={selected?.name===tool.name?'active':''} onClick={()=>setSelectedName(tool.name)} key={tool.name}><div className="tool-function-icon"><Braces size={16}/></div><span><code>{tool.name}</code><p>{tool.description}</p><small><em>{toolCategoryLabels[tool.category]||tool.category}</em><i className={tool.guard}>{toolGuardLabels[tool.guard]}</i></small></span><b>{count}<small>ARGS</small></b><ChevronRight size={14}/></button>}):<div className="tool-filter-empty"><Search size={20}/><b>No matching functions</b><span>Change the search text or category filter.</span></div>}</section>
+			<aside className="tool-function-inspector panel">{selected?<><header><div className="tool-function-icon"><FunctionSquare size={18}/></div><span><small>FUNCTION DETAIL</small><code>{selected.name}</code></span><em className={selected.guard}>{toolGuardLabels[selected.guard]}</em></header><p className="tool-function-description">{selected.description}</p><dl className="tool-function-meta"><div><dt>Category</dt><dd>{toolCategoryLabels[selected.category]||selected.category}</dd></div><div><dt>Arguments</dt><dd>{parameters.length}</dd></div><div><dt>Safety gate</dt><dd>{toolGuardLabels[selected.guard]}</dd></div></dl><section className="tool-parameter-list"><h3>Input parameters <span>{parameters.filter(item=>item.required).length} required</span></h3>{parameters.length?parameters.map(parameter=><div key={parameter.name}><code>{parameter.name}</code><em>{parameter.type}</em>{parameter.required&&<b>required</b>}<p>{parameter.description||'No additional description.'}</p></div>):<p className="tool-no-arguments">This function takes no arguments.</p>}</section><details className="tool-schema-raw"><summary>Raw JSON Schema <ChevronRight size={13}/></summary><pre>{JSON.stringify(selected.input_schema,null,2)}</pre></details></>:<div className="tool-inspector-empty"><Braces size={26}/><span>Select a function to inspect its model-facing schema.</span></div>}</aside>
+		</div>}
+	</div>
+}
+
+function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<void>}){
+	const [query,setQuery]=useState('')
+	const [selectedName,setSelectedName]=useState('')
+	const [selected,setSelected]=useState<ManagedSkill|null>(null)
+	const [draft,setDraft]=useState('')
+	const [loading,setLoading]=useState(false)
+	const [saving,setSaving]=useState(false)
+	const [uploading,setUploading]=useState(false)
+	const [uploadOpen,setUploadOpen]=useState(false)
+	const [uploadName,setUploadName]=useState('')
+	const [uploadFile,setUploadFile]=useState<File|null>(null)
+	const [deleteName,setDeleteName]=useState('')
+	const [deleting,setDeleting]=useState(false)
+	const [toggling,setToggling]=useState(false)
+	const [notice,setNotice]=useState('')
+	const [error,setError]=useState('')
+	const filtered=useMemo(()=>{const needle=query.trim().toLowerCase();return skills.filter(skill=>!needle||`${skill.name} ${skill.summary}`.toLowerCase().includes(needle))},[skills,query])
+	useEffect(()=>{if(!skills.length){setSelectedName('');setSelected(null);setDraft('');return}if(!selectedName||!skills.some(skill=>skill.name===selectedName))setSelectedName(skills[0].name)},[skills,selectedName])
+	useEffect(()=>{if(!selectedName)return;let cancelled=false;setLoading(true);setError('');api.skill(selectedName).then(skill=>{if(cancelled)return;setSelected(skill);setDraft(skill.content||'')}).catch(err=>{if(!cancelled)setError(errorText(err))}).finally(()=>{if(!cancelled)setLoading(false)});return()=>{cancelled=true}},[selectedName])
+	const dirty=!!selected&&draft!==selected.content
+	const selectFile=(file:File|null)=>{setUploadFile(file);if(file&&!uploadName){const base=file.name.replace(/\.(markdown|md|zip)$/i,'').replace(/[^A-Za-z0-9_.-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,64);setUploadName(base)}}
+	const upload=async(event:FormEvent)=>{event.preventDefault();if(!uploadFile)return;setUploading(true);setError('');setNotice('');try{const result=await api.uploadSkill(uploadName.trim(),uploadFile);await refresh();setSelectedName(result.name);setSelected(result);setDraft(result.content||'');setUploadOpen(false);setUploadName('');setUploadFile(null);setNotice(`${result.name} uploaded and immediately available to the Agent.`)}catch(err){setError(errorText(err))}finally{setUploading(false)}}
+	const save=async()=>{if(!selected)return;setSaving(true);setError('');setNotice('');try{const result=await api.saveSkill(selected.name,draft);setSelected(result);setDraft(result.content||'');await refresh();setNotice(`${result.name} saved. The next ops_skill_get call will load this version.`)}catch(err){setError(errorText(err))}finally{setSaving(false)}}
+	const permanentlyDelete=async()=>{if(!deleteName)return;setDeleting(true);setError('');try{await api.deleteSkill(deleteName);setDeleteName('');setSelectedName('');setSelected(null);setDraft('');await refresh();setNotice(`${deleteName} permanently deleted.`)}catch(err){setError(errorText(err))}finally{setDeleting(false)}}
+	const toggleEnabled=async()=>{if(!selected)return;setToggling(true);setError('');setNotice('');try{const result=await api.setSkillEnabled(selected.name,!selected.enabled);setSelected(result);setDraft(result.content||draft);await refresh();setNotice(`${result.name} ${result.enabled?'enabled and visible to the Agent':'disabled and removed from ops_skill_list'}.`)}catch(err){setError(errorText(err))}finally{setToggling(false)}}
+
+	return <div className="skills-page page-stack">
+		<div className="page-actions"><div><p>Administrator Skill Registry</p><span>Skills are trusted operator-authored instructions. Uploads and edits become available to the Agent immediately.</span></div><button className="primary" onClick={()=>{setUploadOpen(value=>!value);setError('')}}><UploadCloud size={15}/>{uploadOpen?'Close upload':'Upload Skill'}</button></div>
+		{notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
+		{error&&<div className="skill-error"><ShieldAlert size={15}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}
+		{uploadOpen&&<form className="skill-upload-panel panel" onSubmit={upload}><div><div className="skill-upload-icon"><UploadCloud size={20}/></div><span><b>Upload Markdown or ZIP package</b><small>A ZIP must contain exactly one <code>SKILL.md</code>. Uploading an existing name replaces its package.</small></span></div><label><span>Skill name</span><input value={uploadName} onChange={event=>setUploadName(event.target.value)} placeholder="nginx-diagnosis" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" required/></label><label className="skill-file-picker"><FileText size={15}/><span><b>{uploadFile?.name||'Choose .md or .zip'}</b><small>{uploadFile?formatFileSize(uploadFile.size):'Maximum package size · 8 MiB'}</small></span><input type="file" accept=".md,.markdown,.zip,text/markdown,application/zip" onChange={event=>selectFile(event.target.files?.[0]||null)} required/></label><button className="primary" disabled={uploading||!uploadFile||!uploadName.trim()}>{uploading?<LoaderCircle className="spin" size={14}/>:<UploadCloud size={14}/>} {uploading?'Uploading…':'Upload & activate'}</button></form>}
+		<section className="skill-registry-summary panel"><div><BookOpen size={19}/><span><b>{skills.filter(skill=>skill.enabled).length} enabled · {skills.length} installed</b><small>Only enabled Skills are discovered dynamically by <code>ops_skill_list</code>.</small></span></div><label><Search size={14}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder="Search skills…"/></label></section>
+		<div className="skill-manager-layout">
+			<section className="skill-list panel">{filtered.length?filtered.map(skill=><button className={`${selectedName===skill.name?'active':''} ${skill.enabled?'':'disabled'}`} onClick={()=>setSelectedName(skill.name)} key={skill.name}><div className="skill-card-icon"><BookOpen size={16}/></div><span><code>{skill.name}</code><p>{skill.summary||'No summary available.'}</p><small><em className={skill.enabled?'enabled':'disabled'}>{skill.enabled?'enabled':'disabled'}</em>{skill.file_count||1} files · {formatFileSize(skill.size_bytes||0)}{skill.updated_at?` · ${new Date(skill.updated_at).toLocaleDateString()}`:''}</small></span><ChevronRight size={14}/></button>):<div className="skill-list-empty"><BookOpen size={23}/><b>{skills.length?'No matching Skills':'No Skills installed'}</b><span>{skills.length?'Change the search text.':'Upload a Markdown or ZIP Skill package.'}</span></div>}</section>
+			<section className="skill-editor panel">{loading?<div className="skill-editor-state"><LoaderCircle className="spin" size={21}/>Loading Skill…</div>:selected?<><header><div><BookOpen size={17}/><span><small>MANAGED SKILL · {selected.enabled?'ENABLED':'DISABLED'}</small><code>{selected.name}</code></span></div><section><button className={selected.enabled?'skill-disable':'skill-enable'} disabled={toggling} onClick={toggleEnabled}>{toggling?<LoaderCircle className="spin" size={13}/>:selected.enabled?<X size={13}/>:<Check size={13}/>} {selected.enabled?'Disable':'Enable'}</button><button disabled={!dirty||saving} onClick={save}>{saving?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {saving?'Saving…':'Save changes'}</button><button className="danger" onClick={()=>setDeleteName(selected.name)}><Trash2 size={13}/>Delete</button></section></header><div className="skill-editor-meta"><span><b>SHA256</b><code title={selected.content_sha256}>{selected.content_sha256?.slice(0,16)||'—'}</code></span><span><b>Files</b><code>{selected.file_count||1}</code></span><span><b>Size</b><code>{formatFileSize(selected.size_bytes||0)}</code></span><span><b>Updated</b><code>{selected.updated_at?new Date(selected.updated_at).toLocaleString():'—'}</code></span></div><div className="skill-editor-split"><label><span>SKILL.md</span><textarea value={draft} spellCheck={false} onChange={event=>setDraft(event.target.value)}/></label><section><span>LIVE PREVIEW</span><div className="markdown-body"><Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">[Blocked image: {alt||'no description'}]</span>}}>{draft||'*Empty Skill*'}</Markdown></div></section></div></>:<div className="skill-editor-state"><BookOpen size={25}/><b>Select a Skill</b><span>View, edit or permanently delete its SKILL.md.</span></div>}</section>
+		</div>
+		{deleteName&&<div className="skill-delete-backdrop"><section className="skill-delete-dialog panel" role="dialog" aria-modal="true"><div><Trash2 size={21}/><span><small>PERMANENT DELETE</small><h3>Delete <code>{deleteName}</code>?</h3></span></div><p>The Skill directory and all reference files will be removed immediately. There is no recycle bin or recovery workflow.</p><footer><button disabled={deleting} onClick={()=>setDeleteName('')}>Cancel</button><button className="danger" disabled={deleting} onClick={permanentlyDelete}>{deleting?<LoaderCircle className="spin" size={14}/>:<Trash2 size={14}/>} {deleting?'Deleting…':'Permanently delete'}</button></footer></section></div>}
+	</div>
 }
 
 function SystemSettingsPage({settings,capabilities,reviewAgentsAvailable,refresh}:{settings:SystemSettings|null;capabilities:ToolCapabilities;reviewAgentsAvailable:boolean;refresh:()=>Promise<void>}) {
@@ -261,13 +424,14 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
   const sendQuery = async (query:string) => {
     query=query.trim(); if(!query||sessionBusy)return
     let querySessionID=sessionId
+    const userEntryID=clientId()
     stickToLatest.current=true
     setApprovalNotice('');setReasoningSeen(false);setRunning(true)
-    setEntries((old) => [...old, { id: clientId(), kind: 'user', content: query }, { id: 'streaming', kind: 'assistant', content: '' }])
+    setEntries((old) => [...old, { id: userEntryID, kind: 'user', content: query, status:'pending' }, { id: 'streaming', kind: 'assistant', content: '' }])
     try {
       await streamChat(sessionId, query, (frame: AgentEvent) => {
         if (frame.session_id) { querySessionID=frame.session_id;setSessionId(frame.session_id); rememberSession(frame.session_id) }
-        if (frame.type === 'approval') { setApprovalNotice(''); void refresh() }
+        if (frame.type === 'approval') { setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item));setApprovalNotice(''); void refresh() }
         if (frame.type === 'reasoning' && frame.content) {
           setReasoningSeen(true)
           const reasoningID=`reasoning_${frame.segment_id||'current'}`
@@ -281,9 +445,10 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
           if (frame.role === 'tool') {setEntries((old) => [...old.filter((item) => item.id !== 'streaming').map((item)=>item.kind==='reasoning'?{...item,active:false}:item), { id: clientId(), kind: 'tool', content: frame.content!, tool: frame.tool_name }, { id: 'streaming', kind: 'assistant', content: '' }]);if(frame.tool_name?.startsWith('ops_plan_')){const nextPlan=planFromToolContent(frame.content);if(nextPlan)setPlan(nextPlan)}if(/approval_id|approval_required/.test(frame.content))void refresh()}
           else setEntries((old) => old.map((item) => item.id === 'streaming' ? {...item, content: item.content + frame.content} : item.kind==='reasoning'?{...item,active:false}:item))
         }
-        if (frame.type === 'error') setEntries((old) => [...old, { id: clientId(), kind: 'error', content: frame.error || 'Agent error' }])
+        if (frame.type === 'done') setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item))
+        if (frame.type === 'error') setEntries((old) => [...old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item), { id: clientId(), kind: 'error', content: frame.error || 'Agent error' }])
       })
-    } catch (err) { setEntries((old) => [...old, { id: clientId(), kind: 'error', content: errorText(err) }]) }
+    } catch (err) { setEntries((old) => [...old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item), { id: clientId(), kind: 'error', content: errorText(err) }]) }
     finally {
       setEntries((old) => old.filter((item) => item.id !== 'streaming' || item.content !== '').map((item)=>item.kind==='reasoning'?{...item,active:false}:item))
       setRunning(false)
@@ -358,7 +523,7 @@ function ChatBubble({ entry, runs, hosts }: {entry: ChatEntry;runs:Run[];hosts:H
   if (entry.kind === 'tool') return <ToolEventCard entry={entry} runs={runs} hosts={hosts}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
   if (entry.kind === 'assistant' && !entry.content) return null
-  return <div className={`bubble ${entry.kind}`}><div className="avatar">{entry.kind === 'user' ? 'YOU' : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? 'Operator' : entry.kind === 'error' ? 'Error' : 'OpsPilot'}</span><div className={`bubble-copy ${entry.kind==='assistant'?'markdown-body':''}`}>{entry.kind==='assistant'?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">[Blocked image: {alt||'no description'}]</span>}}>{entry.content||'…'}</Markdown>:entry.content||'…'}</div></div></div>
+  return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? 'YOU' : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>Operator{entry.status==='failed'&&<em>未进入后续上下文</em>}{entry.status==='pending'&&<em>处理中</em>}</> : entry.kind === 'error' ? 'Error' : 'OpsPilot'}</span><div className={`bubble-copy ${entry.kind==='assistant'?'markdown-body':''}`}>{entry.kind==='assistant'?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">[Blocked image: {alt||'no description'}]</span>}}>{entry.content||'…'}</Markdown>:entry.content||'…'}</div></div></div>
 }
 
 function latestReasoningLine(content:string){

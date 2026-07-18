@@ -148,6 +148,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'tool' | 'reasoning'
   content: string
   tool_name?: string
+  status: 'pending' | 'completed' | 'failed'
   created_at: string
 }
 
@@ -323,4 +324,85 @@ export interface WorkspaceDeleteResult {
 
 export interface ToolCapabilities {
   workspaces: WorkspaceCapability[]
+}
+
+export type LLMToolGuard = 'read_only' | 'policy_checked' | 'approval_required' | 'agent_state' | 'audited_control' | 'external_mcp'
+
+export interface LLMToolDescriptor {
+  name: string
+  description: string
+  category: string
+  guard: LLMToolGuard
+  input_schema: Record<string, unknown>
+}
+
+export interface LLMToolCatalog {
+  loaded: boolean
+  agent: string
+  framework: string
+  execution_mode: string
+  provider_id?: string
+  model?: string
+  loaded_at?: string
+  count: number
+  tools: LLMToolDescriptor[]
+}
+
+export interface ManagedSkill {
+  name: string
+  summary: string
+  enabled: boolean
+  content?: string
+  content_sha256?: string
+  file_count?: number
+  size_bytes?: number
+  updated_at?: string
+}
+
+export type MCPTransport = 'stdio' | 'streamable_http'
+
+export interface MCPTool {
+  name: string
+  exposed_name: string
+  description?: string
+}
+
+export interface MCPServer {
+  id: string
+  name: string
+  transport: MCPTransport
+  command?: string
+  args?: string[]
+  cwd?: string
+  url?: string
+  env_keys?: string[]
+  header_keys?: string[]
+  enabled: boolean
+  status: 'disabled' | 'disconnected' | 'connecting' | 'ready' | 'error'
+  last_error?: string
+  connected_at?: string
+  tool_count: number
+  tools?: MCPTool[]
+  created_at: string
+  updated_at: string
+}
+
+export interface MCPServerInput {
+  id?: string
+  name: string
+  transport: MCPTransport
+  command: string
+  args: string[]
+  cwd: string
+  url: string
+  env?: Record<string,string>
+  headers?: Record<string,string>
+  enabled: boolean
+}
+
+export interface MCPTestResult {
+  ok: boolean
+  latency_ms: number
+  tool_count: number
+  tools: MCPTool[]
 }

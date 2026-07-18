@@ -22,6 +22,7 @@ import (
 	"eino-ops-agent/internal/observability"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/service"
+	"eino-ops-agent/internal/skills"
 	"eino-ops-agent/internal/store"
 )
 
@@ -66,6 +67,23 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/model-providers/{id}/test", s.testModelProvider)
 	s.mux.HandleFunc("GET /api/v1/settings", s.systemSettings)
 	s.mux.HandleFunc("GET /api/v1/capabilities", s.capabilities)
+	s.mux.HandleFunc("GET /api/v1/agent/tools", s.agentTools)
+	s.mux.HandleFunc("GET /api/v1/skills", s.listSkills)
+	s.mux.HandleFunc("POST /api/v1/skills", s.uploadSkill)
+	s.mux.HandleFunc("GET /api/v1/skills/{name}", s.getSkill)
+	s.mux.HandleFunc("PUT /api/v1/skills/{name}", s.saveSkill)
+	s.mux.HandleFunc("DELETE /api/v1/skills/{name}", s.deleteSkill)
+	s.mux.HandleFunc("POST /api/v1/skills/{name}/enable", s.enableSkill)
+	s.mux.HandleFunc("POST /api/v1/skills/{name}/disable", s.disableSkill)
+	s.mux.HandleFunc("GET /api/v1/mcp-servers", s.listMCPServers)
+	s.mux.HandleFunc("POST /api/v1/mcp-servers", s.saveMCPServer)
+	s.mux.HandleFunc("GET /api/v1/mcp-servers/{id}", s.getMCPServer)
+	s.mux.HandleFunc("PUT /api/v1/mcp-servers/{id}", s.updateMCPServer)
+	s.mux.HandleFunc("DELETE /api/v1/mcp-servers/{id}", s.deleteMCPServer)
+	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/enable", s.enableMCPServer)
+	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/disable", s.disableMCPServer)
+	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/retry", s.retryMCPServer)
+	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/test", s.testMCPServer)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/files", s.listWorkspaceFiles)
 	s.mux.HandleFunc("POST /api/v1/workspaces/{id}/files", s.uploadWorkspaceFile)
 	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}/files", s.deleteWorkspaceFile)
@@ -104,6 +122,216 @@ func (s *Server) routes() {
 
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"workspaces": s.service.ListAdminWorkspaceCapabilities()})
+}
+
+func (s *Server) agentTools(w http.ResponseWriter, _ *http.Request) {
+	if s.agent == nil {
+		writeJSON(w, http.StatusOK, agent.ToolCatalog{Agent: "ops-pilot", Framework: "Eino InferTool", ExecutionMode: "sequential", Tools: []agent.ToolDescriptor{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.agent.ToolCatalog())
+}
+
+func (s *Server) listSkills(w http.ResponseWriter, _ *http.Request) {
+	result, err := s.service.ListSkills()
+	respond(w, result, err)
+}
+
+func (s *Server) getSkill(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.GetAdminSkill(r.PathValue("name"))
+	if errors.Is(err, skills.ErrNotFound) {
+		writeErrorStatus(w, err, http.StatusNotFound)
+		return
+	}
+	respond(w, result, err)
+}
+
+func (s *Server) uploadSkill(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 9<<20)
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		status := http.StatusBadRequest
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeErrorStatus(w, fmt.Errorf("invalid skill upload: %w", err), status)
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeErrorStatus(w, fmt.Errorf("skill file is required"), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	name := strings.TrimSpace(r.FormValue("name"))
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(header.Filename), filepath.Ext(header.Filename))
+	}
+	result, err := s.service.ImportAdminSkill(r.Context(), name, header.Filename, file, actor(r))
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) saveSkill(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, (2<<20)+(16<<10))
+	var input service.SkillContentInput
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.SaveAdminSkill(r.Context(), r.PathValue("name"), input.Content, actor(r))
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) deleteSkill(w http.ResponseWriter, r *http.Request) {
+	err := s.service.DeleteAdminSkill(r.Context(), r.PathValue("name"), actor(r))
+	if errors.Is(err, skills.ErrNotFound) {
+		writeErrorStatus(w, err, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) enableSkill(w http.ResponseWriter, r *http.Request) {
+	s.setSkillEnabled(w, r, true)
+}
+
+func (s *Server) disableSkill(w http.ResponseWriter, r *http.Request) {
+	s.setSkillEnabled(w, r, false)
+}
+
+func (s *Server) setSkillEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
+	result, err := s.service.SetAdminSkillEnabled(r.Context(), r.PathValue("name"), enabled, actor(r))
+	if errors.Is(err, skills.ErrNotFound) {
+		writeErrorStatus(w, err, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if s.agent != nil {
+		if err := s.agent.Reload(r.Context()); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) listMCPServers(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ListMCPServers(r.Context())
+	respond(w, result, err)
+}
+
+func (s *Server) getMCPServer(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.GetMCPServer(r.Context(), r.PathValue("id"))
+	respond(w, result, err)
+}
+
+func (s *Server) saveMCPServer(w http.ResponseWriter, r *http.Request) {
+	s.saveMCPServerInput(w, r, "", http.StatusCreated)
+}
+
+func (s *Server) updateMCPServer(w http.ResponseWriter, r *http.Request) {
+	s.saveMCPServerInput(w, r, r.PathValue("id"), http.StatusOK)
+}
+
+func (s *Server) saveMCPServerInput(w http.ResponseWriter, r *http.Request, id string, status int) {
+	var input domain.MCPServerInput
+	if !decode(w, r, &input) {
+		return
+	}
+	if id != "" {
+		input.ID = id
+	}
+	result, err := s.service.SaveMCPServer(r.Context(), input, actor(r))
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	if err := s.reloadAgent(r.Context()); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, status, result)
+}
+
+func (s *Server) deleteMCPServer(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.DeleteMCPServer(r.Context(), r.PathValue("id"), actor(r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.reloadAgent(r.Context()); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) enableMCPServer(w http.ResponseWriter, r *http.Request) {
+	s.setMCPServerEnabled(w, r, true)
+}
+
+func (s *Server) disableMCPServer(w http.ResponseWriter, r *http.Request) {
+	s.setMCPServerEnabled(w, r, false)
+}
+
+func (s *Server) setMCPServerEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
+	result, err := s.service.SetMCPServerEnabled(r.Context(), r.PathValue("id"), enabled, actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.reloadAgent(r.Context()); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) retryMCPServer(w http.ResponseWriter, r *http.Request) {
+	err := s.service.ReconnectMCPServer(r.Context(), r.PathValue("id"))
+	reloadErr := s.reloadAgent(r.Context())
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadGateway)
+		return
+	}
+	if reloadErr != nil {
+		writeError(w, reloadErr)
+		return
+	}
+	result, err := s.service.GetMCPServer(r.Context(), r.PathValue("id"))
+	respond(w, result, err)
+}
+
+func (s *Server) testMCPServer(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.TestMCPServer(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) reloadAgent(ctx context.Context) error {
+	if s.agent == nil {
+		return nil
+	}
+	return s.agent.Reload(ctx)
 }
 
 func (s *Server) listWorkspaceFiles(w http.ResponseWriter, r *http.Request) {

@@ -72,6 +72,7 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	defer app.store.Close()
+	defer app.service.CloseMCPServers()
 
 	switch args[0] {
 	case "serve":
@@ -128,6 +129,14 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 	}
 	transport := sshx.NewOpenSSHTransport(cfg.OpenSSH, cfg.Limits)
 	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	if err := svc.InitializeSkills(); err != nil {
+		st.Close()
+		return nil, fmt.Errorf("initialize skill registry: %w", err)
+	}
+	if err := svc.InitializeMCPServers(ctx); err != nil {
+		st.Close()
+		return nil, fmt.Errorf("initialize MCP servers: %w", err)
+	}
 	runtime, err := agent.New(ctx, cfg.Model, svc, st)
 	if err != nil {
 		st.Close()

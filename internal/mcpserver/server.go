@@ -179,12 +179,12 @@ func New(svc *service.Service, version string) *Server {
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ops_skill_list", Description: "List operational methodology skills. Skills grant no additional SSH privileges."},
 		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, agent.SkillListOutput, error) {
-			items, err := skills.List()
+			items, err := svc.ListEnabledSkills()
 			return nil, agent.SkillListOutput{Skills: items}, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ops_skill_get", Description: "Load a diagnosis, deployment, or recovery skill."},
-		func(_ context.Context, _ *mcp.CallToolRequest, input agent.SkillInput) (*mcp.CallToolResult, skills.Skill, error) {
-			item, err := skills.Get(input.Name)
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SkillInput) (*mcp.CallToolResult, skills.Skill, error) {
+			item, err := svc.LoadSkill(ctx, input.Name, "mcp-client")
 			return nil, item, err
 		})
 	return &Server{server: server}

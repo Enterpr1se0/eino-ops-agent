@@ -122,6 +122,60 @@ type SystemSettingsInput struct {
 	BeginnerExplanationsEnabled *bool `json:"beginner_explanations_enabled,omitempty"`
 }
 
+type MCPTransport string
+
+const (
+	MCPTransportStdio          MCPTransport = "stdio"
+	MCPTransportStreamableHTTP MCPTransport = "streamable_http"
+)
+
+type MCPTool struct {
+	Name        string `json:"name"`
+	ExposedName string `json:"exposed_name"`
+	Description string `json:"description,omitempty"`
+}
+
+type MCPServer struct {
+	ID            string       `json:"id"`
+	Name          string       `json:"name"`
+	Transport     MCPTransport `json:"transport"`
+	Command       string       `json:"command,omitempty"`
+	Args          []string     `json:"args,omitempty"`
+	Cwd           string       `json:"cwd,omitempty"`
+	URL           string       `json:"url,omitempty"`
+	EnvKeys       []string     `json:"env_keys,omitempty"`
+	HeaderKeys    []string     `json:"header_keys,omitempty"`
+	SecretsCipher string       `json:"-"`
+	Enabled       bool         `json:"enabled"`
+	Status        string       `json:"status"`
+	LastError     string       `json:"last_error,omitempty"`
+	ConnectedAt   *time.Time   `json:"connected_at,omitempty"`
+	ToolCount     int          `json:"tool_count"`
+	Tools         []MCPTool    `json:"tools,omitempty"`
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
+}
+
+type MCPServerInput struct {
+	ID        string            `json:"id,omitempty"`
+	Name      string            `json:"name"`
+	Transport MCPTransport      `json:"transport"`
+	Command   string            `json:"command,omitempty"`
+	Args      []string          `json:"args,omitempty"`
+	Cwd       string            `json:"cwd,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Enabled   bool              `json:"enabled"`
+}
+
+type MCPTestResult struct {
+	OK        bool      `json:"ok"`
+	LatencyMS int64     `json:"latency_ms"`
+	ToolCount int       `json:"tool_count"`
+	Tools     []MCPTool `json:"tools"`
+}
+
 type WebSession struct {
 	TokenHash string    `json:"-"`
 	CSRFToken string    `json:"csrf_token"`
@@ -140,6 +194,7 @@ type ChatMessage struct {
 	Role      string    `json:"role"`
 	Content   string    `json:"content"`
 	ToolName  string    `json:"tool_name,omitempty"`
+	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

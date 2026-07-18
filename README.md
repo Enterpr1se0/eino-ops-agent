@@ -6,7 +6,7 @@ OpsPilot 是一个使用 Go 与 Eino 构建的 AI 运维 Agent。它把通用 SS
 
 ## 项目亮点
 
-- Eino `ChatModelAgent` + 34 个强类型 Tools，复杂任务会创建持久化步骤计划并严格逐项推进，支持多套 OpenAI-compatible 模型配置、连通测试与运行时热切换。
+- Eino `ChatModelAgent` + 34 个内置强类型 Tools + 动态 MCP Tools，复杂任务会创建持久化步骤计划并严格逐项推进，支持多套 OpenAI-compatible 模型配置、连通测试与运行时热切换。
 - 两个隔离、无 Tool 的 Eino SubAgent 并行辅助审批：解释 Agent 面向小白说明影响、风险与回滚；风险 Agent 独立给出证据和控制建议，并且只能维持或上调确定性风险，不能批准或执行。
 - SSH、文件、任务与审计查询能力同时暴露为 Eino Function Tools 和官方 MCP Go SDK stdio Server；计划工具只服务于 Agent 会话编排。
 - OpenSSH 受控封装，支持 `ssh-agent`、私钥、账号密码、配置别名、ProxyJump、受控 sudo 与严格 host key 校验。
@@ -16,6 +16,7 @@ OpsPilot 是一个使用 Go 与 Eino 构建的 AI 运维 Agent。它把通用 SS
 - 启动白名单 Workspace，可安全读、搜、patch 和生成制品；本地修改使用 Go 文件 API，不向模型开放宿主 Shell。
 - 单管理员 Cookie/CSRF 认证、SQLite 审计、结构化服务端日志、持久化可取消长任务、历史对话、SSE 与 React 控制台。
 - Linux 诊断、任意项目部署、服务恢复三个内置 Skill。
+- Web 扩展中心可上传、编辑、永久删除及启停 Skill，也可管理多个 stdio / Streamable HTTP MCP Server；外部工具完成发现后以稳定命名空间热注入 Eino。
 
 ```mermaid
 flowchart LR
@@ -148,6 +149,15 @@ CLI 审批示例：
 ```
 
 MCP 与 Eino 复用同一个 Service、Policy 和 Audit Store；不存在权限更宽的旁路。
+
+Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsPilot 作为 MCP Client 连接外部工具服务。支持两种标准传输：
+
+- `stdio`：使用 command + 独立 args 数组直接启动子进程，不经过宿主 Shell；可配置绝对工作目录和加密环境变量。
+- `streamable_http`：连接绝对 HTTP(S) MCP endpoint，可配置加密 HTTP Header。
+
+保存后的服务器可以 Test、Retry、Enable、Disable、Edit 或永久 Delete。启用时控制面连接服务器、分页发现 `tools/list`，再以 `mcp__<server-hash>__<tool>` 名称注入主 Eino Agent；禁用会关闭 MCP Session，旧 Tool 句柄立即失效，并热重建模型函数列表。环境变量和 Header 使用 AES-256-GCM 加密，Web 只显示键名，不回显值。当前仅导入 MCP Tools，不导入 Resources、Prompts 或 Sampling。
+
+外部 MCP Tool 拥有对应 MCP Server 自身的执行权限，不会自动经过 OpsPilot 的 SSH Policy 或人工审批。因此只应启用管理员信任的服务器；这与 OpsPilot 自己作为 MCP Server 时复用受控 SSH Service 的安全语义不同。
 
 主要工具：
 

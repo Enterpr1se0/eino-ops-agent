@@ -3,15 +3,53 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/store"
+
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
 )
+
+type scriptedAgentRunner struct {
+	mu       sync.Mutex
+	attempts [][]*adk.AgentEvent
+	calls    int
+	inputs   [][]*schema.Message
+}
+
+func (r *scriptedAgentRunner) Run(_ context.Context, messages []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	r.mu.Lock()
+	index := r.calls
+	r.calls++
+	r.inputs = append(r.inputs, append([]*schema.Message(nil), messages...))
+	var events []*adk.AgentEvent
+	if index < len(r.attempts) {
+		events = r.attempts[index]
+	}
+	r.mu.Unlock()
+	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	go func() {
+		for _, event := range events {
+			generator.Send(event)
+		}
+		generator.Close()
+	}()
+	return iterator
+}
+
+func (r *scriptedAgentRunner) snapshot() (int, [][]*schema.Message) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls, append([][]*schema.Message(nil), r.inputs...)
+}
 
 func TestProviderSendsHelloAndAcceptsNonEmptyResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +120,127 @@ func TestRuntimeTracksOneActiveRunPerSession(t *testing.T) {
 	runtime.endSession("session_test")
 	if runtime.IsSessionActive("session_test") {
 		t.Fatal("completed run remained active")
+	}
+}
+
+func TestQueryRetriesEmptyResponseWithoutDuplicatingUserMessage(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{
+		nil,
+		{adk.EventFromMessage(schema.AssistantMessage("recovered", nil), nil, schema.Assistant, "")},
+	}}
+	runtime := &Runtime{runner: runner, store: st}
+	var emitted []Event
+	answer, err := runtime.Query(ctx, "session_retry", "continue", func(event Event) {
+		emitted = append(emitted, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "recovered" {
+		t.Fatalf("answer = %q", answer)
+	}
+	calls, inputs := runner.snapshot()
+	if calls != 2 || len(inputs) != 2 || len(inputs[0]) != 1 || len(inputs[1]) != 1 {
+		t.Fatalf("retry calls/inputs = %d %#v", calls, inputs)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_retry", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[0].Role != "user" || messages[0].Status != "completed" || messages[1].Role != "assistant" {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+	done := 0
+	for _, event := range emitted {
+		if event.Type == "done" {
+			done++
+		}
+	}
+	if done != 1 {
+		t.Fatalf("done events = %d, events = %#v", done, emitted)
+	}
+}
+
+func TestQueryRejectsRepeatedEmptyResponseAndExcludesFailedTurn(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{nil, nil}}
+	runtime := &Runtime{runner: runner, store: st}
+	var emitted []Event
+	_, err = runtime.Query(ctx, "session_empty", "continue", func(event Event) {
+		emitted = append(emitted, event)
+	})
+	if !errors.Is(err, ErrEmptyResponse) {
+		t.Fatalf("error = %v", err)
+	}
+	calls, _ := runner.snapshot()
+	if calls != emptyResponseMaxAttempts {
+		t.Fatalf("calls = %d", calls)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_empty", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Role != "user" || messages[0].Status != "failed" {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+	modelMessages, err := st.ListChatModelMessages(ctx, "session_empty", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(modelMessages) != 0 {
+		t.Fatalf("failed turn leaked into model history: %#v", modelMessages)
+	}
+	for _, event := range emitted {
+		if event.Type == "done" {
+			t.Fatalf("empty query emitted done: %#v", emitted)
+		}
+	}
+}
+
+func TestQueryDoesNotRetryAfterToolActivityWithoutFinalAnswer(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(schema.ToolMessage("tool completed", "call-1"), nil, schema.Tool, "ssh_exec"),
+	}}}
+	runtime := &Runtime{runner: runner, store: st}
+	var emitted []Event
+	_, err = runtime.Query(ctx, "session_tool_empty", "inspect host", func(event Event) {
+		emitted = append(emitted, event)
+	})
+	if !errors.Is(err, ErrEmptyResponse) {
+		t.Fatalf("error = %v", err)
+	}
+	calls, _ := runner.snapshot()
+	if calls != 1 {
+		t.Fatalf("unsafe retry after tool activity: calls = %d", calls)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_tool_empty", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[0].Status != "completed" || messages[1].Role != "tool" {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+	for _, event := range emitted {
+		if event.Type == "done" {
+			t.Fatalf("incomplete query emitted done: %#v", emitted)
+		}
 	}
 }
 
