@@ -1,0 +1,399 @@
+package sshx
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"eino-ops-agent/internal/config"
+	"eino-ops-agent/internal/domain"
+
+	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
+)
+
+type testSSHServer struct {
+	listener         net.Listener
+	signer           ssh.Signer
+	password         string
+	root             string
+	allowedPublicKey ssh.PublicKey
+	wg               sync.WaitGroup
+}
+
+func startTestSSHServer(t *testing.T, password string) *testSSHServer {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &testSSHServer{listener: listener, signer: signer, password: password, root: t.TempDir()}
+	server.wg.Add(1)
+	go server.serve()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		server.wg.Wait()
+	})
+	return server
+}
+
+func (s *testSSHServer) host() domain.Host {
+	host, portText, _ := net.SplitHostPort(s.listener.Addr().String())
+	port, _ := strconv.Atoi(portText)
+	return domain.Host{
+		ID: "host_native_test", Name: "native-test", Address: host, Port: port, User: "ops",
+		AuthType: "password", Password: s.password,
+	}
+}
+
+func (s *testSSHServer) serve() {
+	defer s.wg.Done()
+	for {
+		connection, err := s.listener.Accept()
+		if err != nil {
+			return
+		}
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			defer connection.Close()
+			serverConfig := &ssh.ServerConfig{
+				PasswordCallback: func(_ ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+					if string(password) != s.password {
+						return nil, fmt.Errorf("invalid password")
+					}
+					return nil, nil
+				},
+			}
+			serverConfig.PublicKeyCallback = func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+				if s.allowedPublicKey == nil || !bytes.Equal(key.Marshal(), s.allowedPublicKey.Marshal()) {
+					return nil, fmt.Errorf("invalid public key")
+				}
+				return nil, nil
+			}
+			serverConfig.AddHostKey(s.signer)
+			_, channels, requests, err := ssh.NewServerConn(connection, serverConfig)
+			if err != nil {
+				return
+			}
+			go ssh.DiscardRequests(requests)
+			for newChannel := range channels {
+				if newChannel.ChannelType() == "direct-tcpip" {
+					s.wg.Add(1)
+					go func() {
+						defer s.wg.Done()
+						s.handleDirectTCPIP(newChannel)
+					}()
+					continue
+				}
+				if newChannel.ChannelType() != "session" {
+					_ = newChannel.Reject(ssh.UnknownChannelType, "unsupported channel")
+					continue
+				}
+				channel, channelRequests, err := newChannel.Accept()
+				if err != nil {
+					continue
+				}
+				s.wg.Add(1)
+				go func() {
+					defer s.wg.Done()
+					s.handleSession(channel, channelRequests)
+				}()
+			}
+		}()
+	}
+}
+
+func (s *testSSHServer) handleDirectTCPIP(newChannel ssh.NewChannel) {
+	var request struct {
+		DestinationAddress string
+		DestinationPort    uint32
+		OriginAddress      string
+		OriginPort         uint32
+	}
+	if err := ssh.Unmarshal(newChannel.ExtraData(), &request); err != nil {
+		_ = newChannel.Reject(ssh.ConnectionFailed, "invalid direct-tcpip request")
+		return
+	}
+	upstream, err := net.Dial("tcp", net.JoinHostPort(request.DestinationAddress, strconv.Itoa(int(request.DestinationPort))))
+	if err != nil {
+		_ = newChannel.Reject(ssh.ConnectionFailed, "target unavailable")
+		return
+	}
+	defer upstream.Close()
+	channel, requests, err := newChannel.Accept()
+	if err != nil {
+		return
+	}
+	defer channel.Close()
+	go ssh.DiscardRequests(requests)
+	copyDone := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(upstream, channel); copyDone <- struct{}{} }()
+	go func() { _, _ = io.Copy(channel, upstream); copyDone <- struct{}{} }()
+	<-copyDone
+}
+
+func (s *testSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.Request) {
+	defer channel.Close()
+	for request := range requests {
+		switch request.Type {
+		case "exec":
+			var payload struct{ Command string }
+			if err := ssh.Unmarshal(request.Payload, &payload); err != nil {
+				_ = request.Reply(false, nil)
+				return
+			}
+			_ = request.Reply(true, nil)
+			if strings.Contains(payload.Command, "hang-forever") {
+				for range requests {
+				}
+				return
+			}
+			if strings.Contains(payload.Command, "bash -se") {
+				_, _ = io.ReadAll(channel)
+			}
+			_, _ = io.WriteString(channel, "native-ok\n")
+			exitStatus := uint32(0)
+			if strings.Contains(payload.Command, "exit-seven") {
+				exitStatus = 7
+			}
+			_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{exitStatus}))
+			return
+		case "subsystem":
+			var payload struct{ Name string }
+			if err := ssh.Unmarshal(request.Payload, &payload); err != nil || payload.Name != "sftp" {
+				_ = request.Reply(false, nil)
+				continue
+			}
+			_ = request.Reply(true, nil)
+			server, err := sftp.NewServer(channel)
+			if err == nil {
+				_ = server.Serve()
+				_ = server.Close()
+			}
+			return
+		default:
+			_ = request.Reply(false, nil)
+		}
+	}
+}
+
+func TestNativeSSHTrustExecAndExitStatus(t *testing.T) {
+	server := startTestSSHServer(t, "native-password")
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	transport := NewNativeSSHTransport(config.SSH{DefaultKnownHosts: knownHosts}, config.Default().Limits)
+	connection := ConnectionSpec{Target: server.host()}
+
+	_, err := transport.Exec(context.Background(), connection, domain.ExecRequest{Mode: domain.ExecProgram, Program: "printf", Args: []string{"ok"}, TimeoutSeconds: 5})
+	if err == nil || !strings.Contains(err.Error(), "known_hosts") {
+		t.Fatalf("unknown host key was not rejected: %v", err)
+	}
+	key, err := transport.ScanHostKey(context.Background(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key.Fingerprint == "" || key.Algorithm != ssh.KeyAlgoED25519 {
+		t.Fatalf("unexpected scanned key: %#v", key)
+	}
+	if _, err := transport.TrustHostKey(context.Background(), connection, "SHA256:not-the-key"); err == nil {
+		t.Fatal("mismatched host key fingerprint was trusted")
+	}
+	if _, err := transport.TrustHostKey(context.Background(), connection, key.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+
+	var streamed strings.Builder
+	result, err := transport.ExecStream(context.Background(), connection, domain.ExecRequest{Mode: domain.ExecProgram, Program: "printf", Args: []string{"ok"}, TimeoutSeconds: 5}, func(stream string, data []byte) {
+		if stream == "stdout" {
+			streamed.Write(data)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || string(result.Stdout) != "native-ok\n" || streamed.String() != "native-ok\n" {
+		t.Fatalf("unexpected native SSH result: %#v streamed=%q", result, streamed.String())
+	}
+
+	result, err = transport.Exec(context.Background(), connection, domain.ExecRequest{Mode: domain.ExecProgram, Program: "exit-seven", TimeoutSeconds: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 7 {
+		t.Fatalf("remote exit status was not preserved: %#v", result)
+	}
+}
+
+func TestNativeSSHRequiresKnownHostsPath(t *testing.T) {
+	server := startTestSSHServer(t, "native-password")
+	transport := NewNativeSSHTransport(config.SSH{}, config.Default().Limits)
+	connection := ConnectionSpec{Target: server.host()}
+
+	if _, err := transport.TrustHostKey(context.Background(), connection, "SHA256:test"); err == nil || !strings.Contains(err.Error(), "known_hosts path is not configured") {
+		t.Fatalf("missing known_hosts path returned an unclear trust error: %v", err)
+	}
+	if _, err := transport.Exec(context.Background(), connection, domain.ExecRequest{Mode: domain.ExecProgram, Program: "true", TimeoutSeconds: 5}); err == nil || !strings.Contains(err.Error(), "known_hosts path is not configured") {
+		t.Fatalf("missing known_hosts path returned an unclear execution error: %v", err)
+	}
+}
+
+func TestNativeSFTPUpload(t *testing.T) {
+	server := startTestSSHServer(t, "sftp-password")
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	transport := NewNativeSSHTransport(config.SSH{DefaultKnownHosts: knownHosts}, config.Default().Limits)
+	connection := ConnectionSpec{Target: server.host()}
+	key, err := transport.ScanHostKey(context.Background(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.TrustHostKey(context.Background(), connection, key.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	localPath := filepath.Join(t.TempDir(), "artifact.txt")
+	if err := os.WriteFile(localPath, []byte("native sftp payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remotePath := filepath.Join(server.root, "uploaded.txt")
+	result, err := transport.Exec(context.Background(), connection, domain.ExecRequest{
+		Mode: domain.ExecWorkspaceUpload, LocalPath: localPath, RemotePath: filepath.ToSlash(remotePath), TimeoutSeconds: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("unexpected SFTP result: %#v", result)
+	}
+	data, err := os.ReadFile(remotePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "native sftp payload" {
+		t.Fatalf("unexpected uploaded data %q", data)
+	}
+}
+
+func TestNativeSSHProxyJump(t *testing.T) {
+	jumpServer := startTestSSHServer(t, "jump-password")
+	targetServer := startTestSSHServer(t, "target-password")
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	transport := NewNativeSSHTransport(config.SSH{DefaultKnownHosts: knownHosts}, config.Default().Limits)
+
+	jump := jumpServer.host()
+	jump.Name = "jump"
+	jumpConnection := ConnectionSpec{Target: jump}
+	jumpKey, err := transport.ScanHostKey(context.Background(), jumpConnection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.TrustHostKey(context.Background(), jumpConnection, jumpKey.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+
+	target := targetServer.host()
+	target.Name = "target"
+	connection := ConnectionSpec{Target: target, Jumps: []domain.Host{jump}}
+	targetKey, err := transport.ScanHostKey(context.Background(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.TrustHostKey(context.Background(), connection, targetKey.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	result, err := transport.Exec(context.Background(), connection, domain.ExecRequest{Mode: domain.ExecProgram, Program: "printf", Args: []string{"via-jump"}, TimeoutSeconds: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || string(result.Stdout) != "native-ok\n" {
+		t.Fatalf("unexpected ProxyJump result: %#v", result)
+	}
+}
+
+func TestNativeSSHContextCancellationClosesSession(t *testing.T) {
+	server := startTestSSHServer(t, "cancel-password")
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	transport := NewNativeSSHTransport(config.SSH{DefaultKnownHosts: knownHosts}, config.Default().Limits)
+	connection := ConnectionSpec{Target: server.host()}
+	key, err := transport.ScanHostKey(context.Background(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.TrustHostKey(context.Background(), connection, key.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, execErr := transport.Exec(ctx, connection, domain.ExecRequest{Mode: domain.ExecProgram, Program: "hang-forever", TimeoutSeconds: 5})
+		done <- execErr
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("unexpected cancellation error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("native SSH execution did not stop after context cancellation")
+	}
+}
+
+func TestNativeSSHPrivateKeyAuthentication(t *testing.T) {
+	server := startTestSSHServer(t, "unused-password")
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientSigner, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.allowedPublicKey = clientSigner.PublicKey()
+	block, err := ssh.MarshalPrivateKey(privateKey, "native-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKeyData := pem.EncodeToMemory(block)
+	host := server.host()
+	host.AuthType = "key"
+	host.Password = ""
+	host.PrivateKey = privateKeyData
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	transport := NewNativeSSHTransport(config.SSH{DefaultKnownHosts: knownHosts}, config.Default().Limits)
+	connection := ConnectionSpec{Target: host}
+	key, err := transport.ScanHostKey(context.Background(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.TrustHostKey(context.Background(), connection, key.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	result, err := transport.Exec(context.Background(), connection, domain.ExecRequest{Mode: domain.ExecProgram, Program: "printf", TimeoutSeconds: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("unexpected key-auth result: %#v", result)
+	}
+}

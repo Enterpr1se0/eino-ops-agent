@@ -21,41 +21,41 @@ const (
 )
 
 type Host struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	Address         string    `json:"address"`
-	Port            int       `json:"port"`
-	User            string    `json:"user"`
-	AuthType        string    `json:"auth_type"`
-	ConfigAlias     string    `json:"config_alias,omitempty"`
-	IdentityFile    string    `json:"identity_file,omitempty"`
-	KnownHostsFile  string    `json:"known_hosts_file,omitempty"`
-	ProxyJump       string    `json:"proxy_jump,omitempty"`
-	PasswordCipher  string    `json:"-"`
-	HasPassword     bool      `json:"has_password"`
-	SudoMode        string    `json:"sudo_mode"`
-	SudoCipher      string    `json:"-"`
-	HasSudoPassword bool      `json:"has_sudo_password"`
-	Password        string    `json:"-"`
-	SudoPassword    string    `json:"-"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	Address          string    `json:"address"`
+	Port             int       `json:"port"`
+	User             string    `json:"user"`
+	AuthType         string    `json:"auth_type"`
+	PrivateKeyCipher string    `json:"-"`
+	HasPrivateKey    bool      `json:"has_private_key"`
+	KnownHostsFile   string    `json:"known_hosts_file,omitempty"`
+	ProxyJumpHostID  string    `json:"proxy_jump_host_id,omitempty"`
+	PasswordCipher   string    `json:"-"`
+	HasPassword      bool      `json:"has_password"`
+	SudoMode         string    `json:"sudo_mode"`
+	SudoCipher       string    `json:"-"`
+	HasSudoPassword  bool      `json:"has_sudo_password"`
+	Password         string    `json:"-"`
+	SudoPassword     string    `json:"-"`
+	PrivateKey       []byte    `json:"-"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type HostInput struct {
-	ID             string `json:"id,omitempty"`
-	Name           string `json:"name"`
-	Address        string `json:"address"`
-	Port           int    `json:"port"`
-	User           string `json:"user"`
-	AuthType       string `json:"auth_type"`
-	ConfigAlias    string `json:"config_alias,omitempty"`
-	IdentityFile   string `json:"identity_file,omitempty"`
-	KnownHostsFile string `json:"known_hosts_file,omitempty"`
-	ProxyJump      string `json:"proxy_jump,omitempty"`
-	Password       string `json:"password,omitempty"`
-	SudoMode       string `json:"sudo_mode"`
-	SudoPassword   string `json:"sudo_password,omitempty"`
+	ID              string `json:"id,omitempty"`
+	Name            string `json:"name"`
+	Address         string `json:"address"`
+	Port            int    `json:"port"`
+	User            string `json:"user"`
+	AuthType        string `json:"auth_type"`
+	PrivateKey      string `json:"private_key,omitempty"`
+	KnownHostsFile  string `json:"known_hosts_file,omitempty"`
+	ProxyJumpHostID string `json:"proxy_jump_host_id,omitempty"`
+	Password        string `json:"password,omitempty"`
+	SudoMode        string `json:"sudo_mode"`
+	SudoPassword    string `json:"sudo_password,omitempty"`
 }
 
 type HostCapability struct {
@@ -107,17 +107,41 @@ type ModelCatalog struct {
 	Count  int      `json:"count"`
 }
 
-const DefaultAgentMaxIterations = 20
+const (
+	DefaultAgentMaxIterations     = 50
+	MinAgentMaxIterations         = 5
+	MaxAgentMaxIterations         = 100
+	DefaultSubagentTimeoutSeconds = 30
+	MinSubagentTimeoutSeconds     = 5
+	MaxSubagentTimeoutSeconds     = 120
+)
+
+const (
+	WorkspaceShellModeSandbox  = "sandbox"
+	WorkspaceShellModeHost     = "host"
+	WorkspaceShellModeDisabled = "disabled"
+)
 
 type SystemSettings struct {
 	AgentMaxIterations          int       `json:"agent_max_iterations"`
 	ApprovalExplanationsEnabled bool      `json:"approval_explanations_enabled"`
+	SubagentModelProviderID     string    `json:"subagent_model_provider_id"`
+	SubagentTimeoutSeconds      int       `json:"subagent_timeout_seconds"`
+	WorkspaceShellMode          string    `json:"workspace_shell_mode"`
+	WorkspaceShellPlatform      string    `json:"workspace_shell_platform,omitempty"`
+	WorkspaceShellBackend       string    `json:"workspace_shell_backend,omitempty"`
+	WorkspaceShellName          string    `json:"workspace_shell_name,omitempty"`
+	WorkspaceSandboxAvailable   bool      `json:"workspace_sandbox_available"`
+	WorkspaceHostShellAvailable bool      `json:"workspace_host_shell_available"`
 	UpdatedAt                   time.Time `json:"updated_at"`
 }
 
 type SystemSettingsInput struct {
-	AgentMaxIterations          int   `json:"agent_max_iterations"`
-	ApprovalExplanationsEnabled *bool `json:"approval_explanations_enabled,omitempty"`
+	AgentMaxIterations          int     `json:"agent_max_iterations"`
+	ApprovalExplanationsEnabled *bool   `json:"approval_explanations_enabled,omitempty"`
+	SubagentModelProviderID     *string `json:"subagent_model_provider_id,omitempty"`
+	SubagentTimeoutSeconds      *int    `json:"subagent_timeout_seconds,omitempty"`
+	WorkspaceShellMode          *string `json:"workspace_shell_mode,omitempty"`
 }
 
 type MCPTransport string
@@ -186,6 +210,7 @@ type ChatSession struct {
 	Title        string    `json:"title"`
 	MessageCount int       `json:"message_count"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	Active       bool      `json:"active"`
 }
 
 type ChatMessage struct {
@@ -223,30 +248,33 @@ const (
 	ExecWorkspaceSearch ExecMode = "workspace_search"
 	ExecWorkspacePatch  ExecMode = "workspace_patch"
 	ExecWorkspaceUpload ExecMode = "workspace_upload"
+	ExecWorkspaceShell  ExecMode = "workspace_shell"
 )
 
 type ExecRequest struct {
-	HostID          string            `json:"host_id" jsonschema:"registered host identifier; never an address or credential"`
-	Mode            ExecMode          `json:"mode,omitempty" jsonschema:"program for argv execution or script for a reviewed bash script"`
-	Program         string            `json:"program,omitempty" jsonschema:"remote executable name for program mode"`
-	Args            []string          `json:"args,omitempty" jsonschema:"separate arguments; do not include shell quoting"`
-	Script          string            `json:"script,omitempty" jsonschema:"bash script content for script mode"`
-	Cwd             string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory"`
-	Env             map[string]string `json:"env,omitempty" jsonschema:"non-secret environment values"`
-	Elevated        bool              `json:"elevated,omitempty" jsonschema:"request root through the host sudo policy; never pass sudo or a password as a program or argument"`
-	TimeoutSeconds  int               `json:"timeout_seconds,omitempty" jsonschema:"1-600 seconds for synchronous execution"`
-	Reason          string            `json:"reason" jsonschema:"why this command is necessary"`
-	ExpectedChanges string            `json:"expected_changes,omitempty" jsonschema:"expected server changes"`
-	Rollback        string            `json:"rollback,omitempty" jsonschema:"rollback instructions for mutations"`
-	RemotePath      string            `json:"remote_path,omitempty" jsonschema:"absolute remote file path for transfers"`
-	WorkspaceID     string            `json:"workspace_id,omitempty" jsonschema:"registered workspace identifier"`
-	RelativePath    string            `json:"relative_path,omitempty" jsonschema:"path relative to the workspace root"`
-	ExpectedSHA256  string            `json:"expected_sha256,omitempty" jsonschema:"workspace file version observed before mutation"`
-	Validator       string            `json:"validator,omitempty" jsonschema:"allowlisted validator identifier"`
-	SearchPattern   string            `json:"search_pattern,omitempty" jsonschema:"literal workspace search pattern"`
-	OffsetBytes     int64             `json:"offset_bytes,omitempty" jsonschema:"bounded file read offset"`
-	MaxBytes        int               `json:"max_bytes,omitempty" jsonschema:"bounded file read length"`
-	LocalPath       string            `json:"-"`
+	HostID                string            `json:"host_id" jsonschema:"registered host identifier; never an address or credential"`
+	Mode                  ExecMode          `json:"mode,omitempty" jsonschema:"program for argv execution or script for a reviewed bash script"`
+	Program               string            `json:"program,omitempty" jsonschema:"remote executable name for program mode"`
+	Args                  []string          `json:"args,omitempty" jsonschema:"separate arguments; do not include shell quoting"`
+	Script                string            `json:"script,omitempty" jsonschema:"bash script content for script mode"`
+	Cwd                   string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory, or a clean workspace-relative directory for workspace_shell"`
+	Env                   map[string]string `json:"env,omitempty" jsonschema:"non-secret environment values"`
+	Elevated              bool              `json:"elevated,omitempty" jsonschema:"request root through the host sudo policy; never pass sudo or a password as a program or argument"`
+	TimeoutSeconds        int               `json:"timeout_seconds,omitempty" jsonschema:"1-600 seconds for synchronous execution"`
+	Reason                string            `json:"reason" jsonschema:"why this command is necessary"`
+	ExpectedChanges       string            `json:"expected_changes,omitempty" jsonschema:"expected server changes"`
+	Rollback              string            `json:"rollback,omitempty" jsonschema:"rollback instructions for mutations"`
+	RemotePath            string            `json:"remote_path,omitempty" jsonschema:"absolute remote file path for transfers"`
+	WorkspaceID           string            `json:"workspace_id,omitempty" jsonschema:"registered workspace identifier"`
+	WorkspaceShellBackend string            `json:"workspace_shell_backend,omitempty" jsonschema:"control-plane-selected workspace shell backend bound into approval"`
+	SSHConnectionDigest   string            `json:"ssh_connection_digest,omitempty" jsonschema:"control-plane-selected SSH connection revision bound into approval"`
+	RelativePath          string            `json:"relative_path,omitempty" jsonschema:"path relative to the workspace root"`
+	ExpectedSHA256        string            `json:"expected_sha256,omitempty" jsonschema:"workspace file version observed before mutation"`
+	Validator             string            `json:"validator,omitempty" jsonschema:"allowlisted validator identifier"`
+	SearchPattern         string            `json:"search_pattern,omitempty" jsonschema:"literal workspace search pattern"`
+	OffsetBytes           int64             `json:"offset_bytes,omitempty" jsonschema:"bounded file read offset"`
+	MaxBytes              int               `json:"max_bytes,omitempty" jsonschema:"bounded file read length"`
+	LocalPath             string            `json:"-"`
 }
 
 type ToolMeta struct {
@@ -382,12 +410,13 @@ type Approval struct {
 
 type Task struct {
 	ToolMeta
-	ID        string    `json:"id"`
-	RunID     string    `json:"run_id"`
-	HostID    string    `json:"host_id"`
-	Status    string    `json:"status"`
-	StartedAt time.Time `json:"started_at"`
-	EndedAt   time.Time `json:"ended_at,omitempty"`
+	ID                  string    `json:"id"`
+	RunID               string    `json:"run_id"`
+	HostID              string    `json:"host_id"`
+	Status              string    `json:"status"`
+	OperatorInstruction string    `json:"operator_instruction,omitempty"`
+	StartedAt           time.Time `json:"started_at"`
+	EndedAt             time.Time `json:"ended_at,omitempty"`
 }
 
 type AuditEvent struct {

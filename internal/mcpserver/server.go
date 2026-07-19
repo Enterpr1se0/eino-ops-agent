@@ -41,10 +41,10 @@ func New(svc *service.Service, version string) *Server {
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_start", Description: "Start a cancellable long-running SSH command."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ExecInput) (*mcp.CallToolResult, domain.Task, error) {
-			output, err := svc.StartTask(ctx, execRequest(input), "mcp-client")
-			output, err = agent.NormalizeTaskStart(output, err)
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_start", Description: "Start a cancellable long-running SSH command and return its current execution result. Poll task status or tail while it is running."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ExecInput) (*mcp.CallToolResult, agent.TaskOutput, error) {
+			task, err := svc.StartTask(ctx, execRequest(input), "mcp-client")
+			output, err := agent.TaskStartToolOutput(svc, task, err)
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_status", Description: "Read task status and bounded redacted output."},
@@ -162,6 +162,12 @@ func New(svc *service.Service, version string) *Server {
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
+	mcp.AddTool(server, &mcp.Tool{Name: "workspace_shell", Description: "Run an approval-gated script through the operator-selected Workspace sandbox or host shell backend."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspaceShellInput) (*mcp.CallToolResult, domain.ExecResult, error) {
+			output, err := svc.RunWorkspaceShell(ctx, input.WorkspaceID, input.Script, input.Cwd, input.Env, input.TimeoutSeconds, input.Reason, input.ExpectedChanges, input.Rollback, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
+			return nil, output, err
+		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_history_search", Description: "Search previous commands and redacted outputs."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.HistorySearchInput) (*mcp.CallToolResult, agent.HistorySearchOutput, error) {
 			runs, err := svc.SearchRuns(ctx, input.Query, input.HostID, input.Limit)
@@ -171,11 +177,6 @@ func New(svc *service.Service, version string) *Server {
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.HistoryGetInput) (*mcp.CallToolResult, service.HistoryResult, error) {
 			output, err := svc.GetRun(ctx, input.RunID, false)
 			return nil, output, err
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_approval_status", Description: "Check a human approval. This tool cannot grant approval."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ApprovalInput) (*mcp.CallToolResult, agent.ApprovalOutput, error) {
-			approval, err := svc.Store().GetApproval(ctx, input.ApprovalID)
-			return nil, agent.ApprovalOutput{Approval: approval}, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ops_skill_list", Description: "List operational methodology skills. Skills grant no additional SSH privileges."},
 		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, agent.SkillListOutput, error) {

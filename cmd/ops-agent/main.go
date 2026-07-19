@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -127,7 +128,7 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 		st.Close()
 		return nil, err
 	}
-	transport := sshx.NewOpenSSHTransport(cfg.OpenSSH, cfg.Limits)
+	transport := sshx.NewNativeSSHTransport(cfg.SSH, cfg.Limits)
 	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), cfg.Limits, cfg)
 	if err := svc.InitializeSkills(); err != nil {
 		st.Close()
@@ -202,18 +203,28 @@ func hostCommand(ctx context.Context, app *application, args []string) error {
 		return printJSON(hosts, err)
 	case "add":
 		fs := flag.NewFlagSet("host add", flag.ContinueOnError)
-		var host domain.Host
+		var host domain.HostInput
+		var identityPath string
 		fs.StringVar(&host.Name, "name", "", "host name")
 		fs.StringVar(&host.Address, "address", "", "host address")
 		fs.IntVar(&host.Port, "port", 22, "SSH port")
 		fs.StringVar(&host.User, "user", "", "SSH user")
-		fs.StringVar(&host.ConfigAlias, "alias", "", "OpenSSH config alias")
-		fs.StringVar(&host.IdentityFile, "identity", "", "private key path reference")
-		fs.StringVar(&host.ProxyJump, "jump", "", "ProxyJump target")
+		fs.StringVar(&identityPath, "identity", "", "private key file to upload into encrypted storage")
+		fs.StringVar(&host.ProxyJumpHostID, "jump-host", "", "registered SSH ProxyJump host ID")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		created, err := app.service.AddHost(ctx, host, "local-cli")
+		host.AuthType = "agent"
+		host.SudoMode = "none"
+		if identityPath != "" {
+			privateKey, err := readCLIPrivateKey(identityPath)
+			if err != nil {
+				return err
+			}
+			host.AuthType = "key"
+			host.PrivateKey = string(privateKey)
+		}
+		created, err := app.service.SaveHost(ctx, host, "local-cli")
 		return printJSON(created, err)
 	case "probe", "scan-key", "delete":
 		if len(args) < 2 {
@@ -237,6 +248,29 @@ func hostCommand(ctx context.Context, app *application, args []string) error {
 	default:
 		return fmt.Errorf("unknown host command %q", args[0])
 	}
+}
+
+func readCLIPrivateKey(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open SSH private key upload: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("SSH private key upload is not a regular file")
+	}
+	if info.Size() <= 0 || info.Size() > sshx.MaxPrivateKeyBytes {
+		return nil, fmt.Errorf("SSH private key upload has an invalid size")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, sshx.MaxPrivateKeyBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read SSH private key upload: %w", err)
+	}
+	if err := sshx.ValidatePrivateKey(data); err != nil {
+		return nil, fmt.Errorf("invalid SSH private key upload: %w", err)
+	}
+	return data, nil
 }
 
 type stringList []string

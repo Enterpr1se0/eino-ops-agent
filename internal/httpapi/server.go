@@ -68,6 +68,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/settings", s.systemSettings)
 	s.mux.HandleFunc("GET /api/v1/capabilities", s.capabilities)
 	s.mux.HandleFunc("GET /api/v1/agent/tools", s.agentTools)
+	s.mux.HandleFunc("POST /api/v1/agent/tools/{name}/enable", s.enableAgentTool)
+	s.mux.HandleFunc("POST /api/v1/agent/tools/{name}/disable", s.disableAgentTool)
 	s.mux.HandleFunc("GET /api/v1/skills", s.listSkills)
 	s.mux.HandleFunc("POST /api/v1/skills", s.uploadSkill)
 	s.mux.HandleFunc("GET /api/v1/skills/{name}", s.getSkill)
@@ -86,7 +88,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/test", s.testMCPServer)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/files", s.listWorkspaceFiles)
 	s.mux.HandleFunc("POST /api/v1/workspaces/{id}/files", s.uploadWorkspaceFile)
-	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}/files", s.deleteWorkspaceFile)
+	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}/files", s.deleteWorkspaceEntry)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/preview", s.previewWorkspaceFile)
 	s.mux.HandleFunc("PUT /api/v1/settings", s.saveSystemSettings)
 	s.mux.HandleFunc("GET /api/v1/hosts", s.listHosts)
@@ -127,6 +129,31 @@ func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) agentTools(w http.ResponseWriter, _ *http.Request) {
 	if s.agent == nil {
 		writeJSON(w, http.StatusOK, agent.ToolCatalog{Agent: "ops-pilot", Framework: "Eino InferTool", ExecutionMode: "sequential", Tools: []agent.ToolDescriptor{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.agent.ToolCatalog())
+}
+
+func (s *Server) enableAgentTool(w http.ResponseWriter, r *http.Request) {
+	s.setAgentToolEnabled(w, r, true)
+}
+
+func (s *Server) disableAgentTool(w http.ResponseWriter, r *http.Request) {
+	s.setAgentToolEnabled(w, r, false)
+}
+
+func (s *Server) setAgentToolEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
+	name := r.PathValue("name")
+	if s.agent == nil || !s.agent.HasTool(name) {
+		writeErrorStatus(w, fmt.Errorf("agent function %q not found", name), http.StatusNotFound)
+		return
+	}
+	if err := s.service.SetAgentToolEnabled(r.Context(), name, enabled, actor(r)); err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	if err := s.agent.Reload(r.Context()); err != nil {
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.agent.ToolCatalog())
@@ -344,8 +371,8 @@ func (s *Server) previewWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	respond(w, result, err)
 }
 
-func (s *Server) deleteWorkspaceFile(w http.ResponseWriter, r *http.Request) {
-	result, err := s.service.DeleteAdminWorkspaceFile(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"), actor(r))
+func (s *Server) deleteWorkspaceEntry(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.DeleteAdminWorkspaceEntry(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"), actor(r))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -570,7 +597,12 @@ func (s *Server) saveModelProvider(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if result.Active && s.agent != nil {
+	settings, err := s.service.SystemSettings(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if (result.Active || settings.SubagentModelProviderID == result.ID) && s.agent != nil {
 		if err := s.agent.Reload(r.Context()); err != nil {
 			writeError(w, err)
 			return
@@ -638,6 +670,10 @@ func (s *Server) activateModelProvider(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteModelProvider(w http.ResponseWriter, r *http.Request) {
 	wasActive, err := s.service.DeleteModelProvider(r.Context(), r.PathValue("id"), actor(r))
 	if err != nil {
+		if errors.Is(err, service.ErrModelProviderInUse) {
+			writeErrorStatus(w, err, http.StatusConflict)
+			return
+		}
 		writeError(w, err)
 		return
 	}
@@ -678,7 +714,7 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
 	var host domain.HostInput
-	if !decode(w, r, &host) {
+	if !decodeLimit(w, r, &host, 3<<20) {
 		return
 	}
 	result, err := s.service.SaveHost(r.Context(), host, actor(r))
@@ -962,7 +998,16 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 func (s *Server) chatSessions(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	result, err := s.service.ListChatSessions(r.Context(), limit)
-	respond(w, result, err)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if s.agent != nil {
+		for index := range result {
+			result[index].Active = s.agent.IsSessionActive(result[index].ID)
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) deleteChatSession(w http.ResponseWriter, r *http.Request) {
@@ -978,7 +1023,11 @@ func (s *Server) deleteChatSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func decode(w http.ResponseWriter, r *http.Request, target any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	return decodeLimit(w, r, target, 2<<20)
+}
+
+func decodeLimit(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

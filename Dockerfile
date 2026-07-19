@@ -14,7 +14,7 @@ COPY --from=web /src/web/dist ./web/dist
 RUN CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/ops-agent ./cmd/ops-agent
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-client ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates bubblewrap && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=backend /out/ops-agent /usr/local/bin/ops-agent
 COPY --from=backend /src/web/dist ./web/dist

@@ -191,6 +191,30 @@ func (s *Store) InterruptActiveTasks(ctx context.Context) error {
 	return err
 }
 
+func (s *Store) AgentToolStates(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name,enabled FROM agent_tool_settings`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		var enabled int
+		if err := rows.Scan(&name, &enabled); err != nil {
+			return nil, err
+		}
+		result[name] = enabled != 0
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) SetAgentToolEnabled(ctx context.Context, name string, enabled bool) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_tool_settings(name,enabled,updated_at) VALUES(?,?,?)
+ON CONFLICT(name) DO UPDATE SET enabled=excluded.enabled,updated_at=excluded.updated_at`, name, boolInt(enabled), formatTime(time.Now().UTC()))
+	return err
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS hosts (
@@ -199,11 +223,10 @@ CREATE TABLE IF NOT EXISTS hosts (
   address TEXT NOT NULL,
   port INTEGER NOT NULL,
   username TEXT NOT NULL,
-	  auth_type TEXT NOT NULL DEFAULT 'agent',
-  config_alias TEXT NOT NULL DEFAULT '',
-  identity_file TEXT NOT NULL DEFAULT '',
+  auth_type TEXT NOT NULL DEFAULT 'agent',
+	private_key_cipher TEXT NOT NULL DEFAULT '',
   known_hosts_file TEXT NOT NULL DEFAULT '',
-  proxy_jump TEXT NOT NULL DEFAULT '',
+	  proxy_jump_host_id TEXT NOT NULL DEFAULT '',
 	  password_cipher TEXT NOT NULL DEFAULT '',
 	  sudo_mode TEXT NOT NULL DEFAULT 'none',
 	  sudo_password_cipher TEXT NOT NULL DEFAULT '',
@@ -356,6 +379,9 @@ CREATE TABLE IF NOT EXISTS system_settings (
   id INTEGER PRIMARY KEY CHECK(id=1),
   agent_max_iterations INTEGER NOT NULL,
   approval_explanations_enabled INTEGER NOT NULL DEFAULT 1,
+  subagent_model_provider_id TEXT NOT NULL DEFAULT '',
+  subagent_timeout_seconds INTEGER NOT NULL DEFAULT 30,
+  workspace_shell_mode TEXT NOT NULL DEFAULT 'sandbox',
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS mcp_servers (
@@ -374,8 +400,16 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled,name);
+CREATE TABLE IF NOT EXISTS agent_tool_settings (
+  name TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name='ssh_approval_status'`); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(id,agent_max_iterations,updated_at) VALUES(1,?,?)`,
@@ -386,6 +420,7 @@ CREATE INDEX IF NOT EXISTS idx_mcp_servers_enabled ON mcp_servers(enabled,name);
 		`ALTER TABLE runs ADD COLUMN request_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE approvals ADD COLUMN request_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'agent'`,
+		`ALTER TABLE hosts ADD COLUMN proxy_jump_host_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN password_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN sudo_mode TEXT NOT NULL DEFAULT 'none'`,
 		`ALTER TABLE hosts ADD COLUMN sudo_password_cipher TEXT NOT NULL DEFAULT ''`,
@@ -413,13 +448,73 @@ CASE WHEN subagent_reviews_enabled<>0 AND beginner_explanations_enabled<>0 THEN 
 			return err
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE hosts SET auth_type='key' WHERE auth_type='agent' AND identity_file<>''`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE system_settings ADD COLUMN workspace_shell_mode TEXT NOT NULL DEFAULT 'sandbox'`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE hosts SET auth_type='ssh_config' WHERE auth_type='agent' AND config_alias<>''`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE system_settings ADD COLUMN subagent_model_provider_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
-	return nil
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE system_settings ADD COLUMN subagent_timeout_seconds INTEGER NOT NULL DEFAULT 30`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE hosts ADD COLUMN private_key_cipher TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	return s.migrateNativeOnlyHosts(ctx)
+}
+
+func (s *Store) migrateNativeOnlyHosts(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(hosts)`)
+	if err != nil {
+		return err
+	}
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	obsolete := []string{"transport_backend", "config_alias", "proxy_jump", "identity_file"}
+	needsMigration := false
+	for _, column := range obsolete {
+		needsMigration = needsMigration || columns[column]
+	}
+	if !needsMigration {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`DELETE FROM approvals`,
+		`DELETE FROM file_operations`,
+		`DELETE FROM tasks`,
+		`DELETE FROM runs`,
+		`DELETE FROM hosts`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("clear legacy SSH data: %w", err)
+		}
+	}
+	for _, column := range obsolete {
+		if columns[column] {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE hosts DROP COLUMN `+column); err != nil {
+				return fmt.Errorf("drop legacy hosts.%s: %w", column, err)
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpsertHost(ctx context.Context, host domain.Host) (domain.Host, error) {
@@ -433,14 +528,14 @@ func (s *Store) UpsertHost(ctx context.Context, host domain.Host) (domain.Host, 
 	}
 	host.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO hosts(id,name,address,port,username,auth_type,config_alias,identity_file,known_hosts_file,proxy_jump,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO hosts(id,name,address,port,username,auth_type,private_key_cipher,known_hosts_file,proxy_jump_host_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,port=excluded.port,
-username=excluded.username,auth_type=excluded.auth_type,config_alias=excluded.config_alias,identity_file=excluded.identity_file,
-known_hosts_file=excluded.known_hosts_file,proxy_jump=excluded.proxy_jump,password_cipher=excluded.password_cipher,
+username=excluded.username,auth_type=excluded.auth_type,private_key_cipher=excluded.private_key_cipher,
+known_hosts_file=excluded.known_hosts_file,proxy_jump_host_id=excluded.proxy_jump_host_id,password_cipher=excluded.password_cipher,
 sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,updated_at=excluded.updated_at`,
-		host.ID, host.Name, host.Address, host.Port, host.User, host.AuthType, host.ConfigAlias, host.IdentityFile,
-		host.KnownHostsFile, host.ProxyJump, host.PasswordCipher, host.SudoMode, host.SudoCipher,
+		host.ID, host.Name, host.Address, host.Port, host.User, host.AuthType, host.PrivateKeyCipher,
+		host.KnownHostsFile, host.ProxyJumpHostID, host.PasswordCipher, host.SudoMode, host.SudoCipher,
 		formatTime(host.CreatedAt), formatTime(host.UpdatedAt))
 	if err != nil {
 		return domain.Host{}, err
@@ -449,8 +544,8 @@ sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,
 }
 
 func (s *Store) GetHost(ctx context.Context, id string) (domain.Host, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,address,port,username,auth_type,config_alias,identity_file,
-known_hosts_file,proxy_jump,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE id=? OR name=?`, id, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,address,port,username,auth_type,private_key_cipher,
+known_hosts_file,proxy_jump_host_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE id=? OR name=?`, id, id)
 	return scanHost(row)
 }
 
@@ -643,26 +738,36 @@ func (s *Store) GetSystemSettings(ctx context.Context) (domain.SystemSettings, e
 	var settings domain.SystemSettings
 	var explanationsEnabled int
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,approval_explanations_enabled,updated_at FROM system_settings WHERE id=1`).Scan(
-		&settings.AgentMaxIterations, &explanationsEnabled, &updated,
+	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,workspace_shell_mode,updated_at FROM system_settings WHERE id=1`).Scan(
+		&settings.AgentMaxIterations, &explanationsEnabled, &settings.SubagentModelProviderID, &settings.SubagentTimeoutSeconds, &settings.WorkspaceShellMode, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.SystemSettings{AgentMaxIterations: domain.DefaultAgentMaxIterations, ApprovalExplanationsEnabled: true}, nil
+		return domain.SystemSettings{
+			AgentMaxIterations: domain.DefaultAgentMaxIterations, ApprovalExplanationsEnabled: true,
+			SubagentTimeoutSeconds: domain.DefaultSubagentTimeoutSeconds, WorkspaceShellMode: domain.WorkspaceShellModeSandbox,
+		}, nil
 	}
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
 	settings.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	settings.ApprovalExplanationsEnabled = explanationsEnabled != 0
+	if settings.SubagentTimeoutSeconds < domain.MinSubagentTimeoutSeconds || settings.SubagentTimeoutSeconds > domain.MaxSubagentTimeoutSeconds {
+		settings.SubagentTimeoutSeconds = domain.DefaultSubagentTimeoutSeconds
+	}
 	return settings, nil
 }
 
 func (s *Store) SaveSystemSettings(ctx context.Context, settings domain.SystemSettings) (domain.SystemSettings, error) {
 	settings.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,approval_explanations_enabled,updated_at) VALUES(1,?,?,?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,workspace_shell_mode,updated_at) VALUES(1,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,
-approval_explanations_enabled=excluded.approval_explanations_enabled,updated_at=excluded.updated_at`,
-		settings.AgentMaxIterations, boolInt(settings.ApprovalExplanationsEnabled), formatTime(settings.UpdatedAt))
+approval_explanations_enabled=excluded.approval_explanations_enabled,
+subagent_model_provider_id=excluded.subagent_model_provider_id,
+subagent_timeout_seconds=excluded.subagent_timeout_seconds,
+workspace_shell_mode=excluded.workspace_shell_mode,updated_at=excluded.updated_at`,
+		settings.AgentMaxIterations, boolInt(settings.ApprovalExplanationsEnabled), settings.SubagentModelProviderID,
+		settings.SubagentTimeoutSeconds, settings.WorkspaceShellMode, formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
@@ -689,8 +794,8 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 }
 
 func (s *Store) ListHosts(ctx context.Context) ([]domain.Host, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,address,port,username,auth_type,config_alias,identity_file,
-known_hosts_file,proxy_jump,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE auth_type<>'workspace' ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,address,port,username,auth_type,private_key_cipher,
+known_hosts_file,proxy_jump_host_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE auth_type<>'workspace' ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -723,8 +828,8 @@ type scanner interface{ Scan(...any) error }
 func scanHost(row scanner) (domain.Host, error) {
 	var host domain.Host
 	var created, updated string
-	err := row.Scan(&host.ID, &host.Name, &host.Address, &host.Port, &host.User, &host.AuthType, &host.ConfigAlias,
-		&host.IdentityFile, &host.KnownHostsFile, &host.ProxyJump, &host.PasswordCipher, &host.SudoMode,
+	err := row.Scan(&host.ID, &host.Name, &host.Address, &host.Port, &host.User, &host.AuthType,
+		&host.PrivateKeyCipher, &host.KnownHostsFile, &host.ProxyJumpHostID, &host.PasswordCipher, &host.SudoMode,
 		&host.SudoCipher, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Host{}, ErrNotFound
@@ -733,6 +838,7 @@ func scanHost(row scanner) (domain.Host, error) {
 	host.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	host.HasPassword = host.PasswordCipher != ""
 	host.HasSudoPassword = host.SudoCipher != ""
+	host.HasPrivateKey = host.PrivateKeyCipher != ""
 	return host, err
 }
 
@@ -1163,6 +1269,42 @@ func (s *Store) ListChatMessages(ctx context.Context, sessionID string, limit in
 
 func (s *Store) ListChatModelMessages(ctx context.Context, sessionID string, limit int) ([]domain.ChatMessage, error) {
 	return s.listChatMessages(ctx, sessionID, limit, true)
+}
+
+// ListChatContextMessages returns the persisted, provider-relevant transcript.
+// Reasoning is deliberately excluded, while tool evidence and failed turns are
+// retained so the next model run can recover operational state.
+func (s *Store) ListChatContextMessages(ctx context.Context, sessionID string, limit int) ([]domain.ChatMessage, bool, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT role,content,tool_name,status,created_at FROM (
+SELECT role,content,tool_name,status,created_at FROM chat_messages
+WHERE session_id=? AND role IN ('user','assistant','tool') AND status IN ('completed','failed')
+ORDER BY created_at DESC LIMIT ?)
+ORDER BY created_at`, sessionID, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	result := make([]domain.ChatMessage, 0, limit+1)
+	for rows.Next() {
+		var message domain.ChatMessage
+		var created string
+		if err := rows.Scan(&message.Role, &message.Content, &message.ToolName, &message.Status, &created); err != nil {
+			return nil, false, err
+		}
+		message.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		result = append(result, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated := len(result) > limit
+	if truncated {
+		result = result[len(result)-limit:]
+	}
+	return result, truncated, nil
 }
 
 func (s *Store) listChatMessages(ctx context.Context, sessionID string, limit int, modelOnly bool) ([]domain.ChatMessage, error) {

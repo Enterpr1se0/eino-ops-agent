@@ -3,13 +3,14 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronRight, CircleDot, Clock3, Cpu, Edit3, FileText, FolderOpen, FunctionSquare, History, KeyRound, LockKeyhole, LogOut,
-  ListChecks, LoaderCircle, Plus, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, TerminalSquare, Trash2, UploadCloud, X, Zap,
+  ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, TerminalSquare, Trash2, UploadCloud, X, Zap,
 } from 'lucide-react'
 import { api, streamChat } from './api'
-import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, ToolCapabilities, WorkspaceCapability, WorkspaceFilePreview } from './types'
+import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, ToolCapabilities, WorkspaceCapability, WorkspaceFilePreview, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'config' | 'extensions' | 'audit' | 'logs'
 type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; active?: boolean; streaming?: boolean; status?: 'pending' | 'completed' | 'failed' }
+type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 
 function historyEntries(messages:ChatMessage[]):ChatEntry[]{
   return messages.map((item,index)=>({id:`history_${index}_${item.created_at}`,kind:item.role,content:item.content,tool:item.tool_name,status:item.status}))
@@ -130,7 +131,7 @@ function LoginPage({onAuthenticated}:{onAuthenticated:()=>void}){
 	const [busy,setBusy]=useState(false)
 	const [error,setError]=useState('')
 	const submit=async(event:FormEvent)=>{event.preventDefault();setBusy(true);setError('');try{await api.login(password);setPassword('');onAuthenticated()}catch(err){setError(errorText(err))}finally{setBusy(false)}}
-	return <div className="auth-screen"><section className="login-card"><div className="login-mark"><TerminalSquare size={29}/></div><span>OPS PILOT · SECURE CONTROL PLANE</span><h1>Administrator sign in</h1><p>SSH credentials, approvals, logs and workspace operations are protected by the local administrator session.</p><form onSubmit={submit}><label><span>Administrator password</span><div className="login-input"><LockKeyhole size={17}/><input type="password" autoComplete="current-password" value={password} onChange={event=>setPassword(event.target.value)} autoFocus required minLength={12}/></div></label>{error&&<div className="login-error"><ShieldAlert size={15}/>{error}</div>}<button className="primary" disabled={busy||password.length<12}>{busy?<LoaderCircle className="spin" size={17}/>:<ShieldCheck size={17}/>}<span>{busy?'Authenticating…':'Enter control plane'}</span></button></form><small>Initial password: <code>OPS_AGENT_ADMIN_PASSWORD</code></small></section></div>
+	return <div className="auth-screen"><section className="login-card"><div className="login-mark"><TerminalSquare size={29}/></div><span>OPS PILOT · SECURE CONTROL PLANE</span><h1>Administrator sign in</h1><p>SSH credentials, approvals, logs and workspace operations are protected by the local administrator session.</p><form onSubmit={submit}><label><span>Administrator password</span><div className="login-input"><LockKeyhole size={17}/><input type="password" autoComplete="current-password" value={password} onChange={event=>setPassword(event.target.value)} autoFocus required/></div></label>{error&&<div className="login-error"><ShieldAlert size={15}/>{error}</div>}<button className="primary" disabled={busy||password.length===0}>{busy?<LoaderCircle className="spin" size={17}/>:<ShieldCheck size={17}/>}<span>{busy?'Authenticating…':'Enter control plane'}</span></button></form><small>Initial password: <code>OPS_AGENT_ADMIN_PASSWORD</code></small></section></div>
 }
 
 type ConfigurationSection = 'models' | 'hosts' | 'system'
@@ -140,15 +141,15 @@ function ConfigurationPage({hosts,providers,settings,capabilities,health,refresh
   const tabs:[ConfigurationSection,React.ReactNode,string,string][]=[
     ['models',<Cpu size={17}/>, 'Model providers', `${providers.length} configured`],
     ['hosts',<Server size={17}/>, 'SSH hosts', `${hosts.length} registered`],
-    ['system',<SlidersHorizontal size={17}/>, 'System settings', `${settings?.agent_max_iterations??20} max iterations`],
+    ['system',<SlidersHorizontal size={17}/>, 'System settings', `${settings?.agent_max_iterations??50} max iterations`],
   ]
   return <div className="configuration-center page-stack">
-    <section className="configuration-hero panel"><div><span>CONTROL PLANE CONFIGURATION</span><h2>One place for every Agent dependency</h2><p>Manage inference, remote access and runtime safeguards without editing local files.</p></div><dl><div><dt>Active model</dt><dd>{health?.model?.model||'Not configured'}</dd></div><div><dt>SSH targets</dt><dd>{hosts.length}</dd></div><div><dt>Loop budget</dt><dd>{settings?.agent_max_iterations??20} rounds</dd></div></dl></section>
+    <section className="configuration-hero panel"><div><span>CONTROL PLANE CONFIGURATION</span><h2>One place for every Agent dependency</h2><p>Manage inference, remote access and runtime safeguards without editing local files.</p></div><dl><div><dt>Active model</dt><dd>{health?.model?.model||'Not configured'}</dd></div><div><dt>SSH targets</dt><dd>{hosts.length}</dd></div><div><dt>Loop budget</dt><dd>{settings?.agent_max_iterations??50} rounds</dd></div></dl></section>
     <div className="configuration-tabs" role="tablist" aria-label="Configuration sections">{tabs.map(([id,icon,label,meta])=><button type="button" role="tab" aria-selected={section===id} className={section===id?'active':''} onClick={()=>setSection(id)} key={id}>{icon}<span><b>{label}</b><small>{meta}</small></span><ChevronRight size={15}/></button>)}</div>
     <div className="configuration-content" role="tabpanel">
       {section==='models'&&<ModelsPage providers={providers} health={health} refresh={refresh}/>} 
-      {section==='hosts'&&<HostsPage hosts={hosts} refresh={refresh}/>} 
-	  {section==='system'&&<SystemSettingsPage settings={settings} capabilities={capabilities} explanationAgentAvailable={!!health?.model?.explanation_agent_available} refresh={refresh}/>}
+      {section==='hosts'&&<HostsPage hosts={hosts} refresh={refresh}/>}
+	  {section==='system'&&<SystemSettingsPage settings={settings} providers={providers} capabilities={capabilities} modelStatus={health?.model} refresh={refresh}/>}
     </div>
   </div>
 }
@@ -245,28 +246,32 @@ function LLMToolsPage({catalog,refresh}:{catalog:LLMToolCatalog|null;refresh:()=
 	const [category,setCategory]=useState('all')
 	const [selectedName,setSelectedName]=useState('')
 	const [refreshing,setRefreshing]=useState(false)
+	const [busyName,setBusyName]=useState('')
+	const [error,setError]=useState('')
 	const tools=catalog?.tools||[]
 	const categories=useMemo(()=>Array.from(new Set(tools.map(tool=>tool.category))),[tools])
 	const filtered=useMemo(()=>{const needle=query.trim().toLowerCase();return tools.filter(tool=>(category==='all'||tool.category===category)&&(!needle||`${tool.name} ${tool.description} ${tool.category}`.toLowerCase().includes(needle)))},[tools,query,category])
 	const selected=filtered.find(tool=>tool.name===selectedName)||filtered[0]
 	const parameters=toolParameters(selected)
-	const protectedCount=tools.filter(tool=>tool.guard==='approval_required').length
-	const readOnlyCount=tools.filter(tool=>tool.guard==='read_only').length
+	const protectedCount=tools.filter(tool=>tool.enabled&&tool.guard==='approval_required').length
+	const readOnlyCount=tools.filter(tool=>tool.enabled&&tool.guard==='read_only').length
 	const refreshCatalog=async()=>{setRefreshing(true);try{await refresh()}finally{setRefreshing(false)}}
+	const setEnabled=async(tool:LLMToolDescriptor)=>{setBusyName(tool.name);setError('');try{await api.setLLMToolEnabled(tool.name,!tool.enabled);await refresh()}catch(err){setError(errorText(err))}finally{setBusyName('')}}
 
 	return <div className="llm-tools-page page-stack">
 		<section className={`tool-catalog-hero panel ${catalog?.loaded?'loaded':'unloaded'}`}>
 			<div className="tool-catalog-mark"><FunctionSquare size={24}/><i/></div>
 			<div><span>LIVE CHATMODEL TOOLSET</span><h2>{catalog?.loaded?'Functions currently loaded by the LLM':'No function toolset is loaded'}</h2><p>This is the runtime snapshot passed to the main Eino Agent, not a hand-written capability document.</p></div>
-			<dl><div><dt>Agent</dt><dd>{catalog?.agent||'ops-pilot'}</dd></div><div><dt>Model</dt><dd>{catalog?.model||'Not loaded'}</dd></div><div><dt>Functions</dt><dd>{catalog?.count??0}</dd></div><div><dt>Execution</dt><dd>{catalog?.execution_mode||'sequential'}</dd></div></dl>
+			<dl><div><dt>Agent</dt><dd>{catalog?.agent||'ops-pilot'}</dd></div><div><dt>Model</dt><dd>{catalog?.model||'Not loaded'}</dd></div><div><dt>Functions</dt><dd>{catalog?.count??0} / {catalog?.total??0}</dd></div><div><dt>Execution</dt><dd>{catalog?.execution_mode||'sequential'}</dd></div></dl>
 			<button className="tool-catalog-refresh" onClick={refreshCatalog} disabled={refreshing}><RefreshCw className={refreshing?'spin':''} size={14}/>{refreshing?'Refreshing…':'Refresh snapshot'}</button>
 		</section>
-		<section className="tool-catalog-note"><BrainCircuit size={16}/><div><b>Main Agent tool boundary</b><span>The approval explanation Agent remains tool-free. Only <code>{catalog?.agent||'ops-pilot'}</code> receives the functions shown below.</span></div><small>{catalog?.loaded_at?`Loaded ${new Date(catalog.loaded_at).toLocaleString()}`:'Waiting for a model runtime'}</small></section>
-		<div className="tool-catalog-metrics"><Metric label="Loaded functions" value={String(catalog?.count??0)} tone="green"/><Metric label="Read-only helpers" value={String(readOnlyCount)}/><Metric label="Always approval-gated" value={String(protectedCount)} tone="amber"/><Metric label="Framework" value={catalog?.framework||'Eino'}/></div>
+		<section className="tool-catalog-note"><BrainCircuit size={16}/><div><b>Main Agent tool boundary</b><span>The approval explanation Agent remains tool-free. Only enabled functions are passed to <code>{catalog?.agent||'ops-pilot'}</code>.</span></div><small>{catalog?.loaded_at?`Loaded ${new Date(catalog.loaded_at).toLocaleString()}`:'Waiting for a model runtime'}</small></section>
+		{error&&<div className="tool-function-error"><ShieldAlert size={15}/><span>{error}</span><button onClick={()=>setError('')} title="Dismiss"><X size={14}/></button></div>}
+		<div className="tool-catalog-metrics"><Metric label="Enabled functions" value={String(catalog?.count??0)} tone="green"/><Metric label="Available functions" value={String(catalog?.total??0)}/><Metric label="Read-only enabled" value={String(readOnlyCount)}/><Metric label="Approval-gated enabled" value={String(protectedCount)} tone="amber"/></div>
 		<div className="tool-catalog-toolbar panel"><label><Search size={15}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder="Search function name or purpose…"/></label><select value={category} onChange={event=>setCategory(event.target.value)}><option value="all">All categories · {tools.length}</option>{categories.map(value=><option value={value} key={value}>{toolCategoryLabels[value]||value} · {tools.filter(tool=>tool.category===value).length}</option>)}</select><span>{filtered.length} visible</span></div>
 		{!catalog?<div className="tool-catalog-loading panel"><LoaderCircle className="spin" size={20}/>Loading runtime function snapshot…</div>:!catalog.loaded?<Empty icon={<FunctionSquare/>} title="Agent runtime is not loaded" text="Activate a working model provider; functions appear here after the Eino runner builds successfully."/>:<div className="tool-catalog-browser">
-			<section className="tool-function-list panel">{filtered.length?filtered.map(tool=>{const count=toolParameters(tool).length;return <button className={selected?.name===tool.name?'active':''} onClick={()=>setSelectedName(tool.name)} key={tool.name}><div className="tool-function-icon"><Braces size={16}/></div><span><code>{tool.name}</code><p>{tool.description}</p><small><em>{toolCategoryLabels[tool.category]||tool.category}</em><i className={tool.guard}>{toolGuardLabels[tool.guard]}</i></small></span><b>{count}<small>ARGS</small></b><ChevronRight size={14}/></button>}):<div className="tool-filter-empty"><Search size={20}/><b>No matching functions</b><span>Change the search text or category filter.</span></div>}</section>
-			<aside className="tool-function-inspector panel">{selected?<><header><div className="tool-function-icon"><FunctionSquare size={18}/></div><span><small>FUNCTION DETAIL</small><code>{selected.name}</code></span><em className={selected.guard}>{toolGuardLabels[selected.guard]}</em></header><p className="tool-function-description">{selected.description}</p><dl className="tool-function-meta"><div><dt>Category</dt><dd>{toolCategoryLabels[selected.category]||selected.category}</dd></div><div><dt>Arguments</dt><dd>{parameters.length}</dd></div><div><dt>Safety gate</dt><dd>{toolGuardLabels[selected.guard]}</dd></div></dl><section className="tool-parameter-list"><h3>Input parameters <span>{parameters.filter(item=>item.required).length} required</span></h3>{parameters.length?parameters.map(parameter=><div key={parameter.name}><code>{parameter.name}</code><em>{parameter.type}</em>{parameter.required&&<b>required</b>}<p>{parameter.description||'No additional description.'}</p></div>):<p className="tool-no-arguments">This function takes no arguments.</p>}</section><details className="tool-schema-raw"><summary>Raw JSON Schema <ChevronRight size={13}/></summary><pre>{JSON.stringify(selected.input_schema,null,2)}</pre></details></>:<div className="tool-inspector-empty"><Braces size={26}/><span>Select a function to inspect its model-facing schema.</span></div>}</aside>
+			<section className="tool-function-list panel">{filtered.length?filtered.map(tool=>{const count=toolParameters(tool).length;return <button className={`${selected?.name===tool.name?'active':''} ${tool.enabled?'':'disabled'}`} onClick={()=>setSelectedName(tool.name)} key={tool.name}><div className="tool-function-icon"><Braces size={16}/></div><span><code>{tool.name}</code><p>{tool.description}</p><small><em>{toolCategoryLabels[tool.category]||tool.category}</em><i className={tool.guard}>{toolGuardLabels[tool.guard]}</i>{!tool.enabled&&<i className="disabled">Disabled</i>}</small></span><b>{count}<small>ARGS</small></b><ChevronRight size={14}/></button>}):<div className="tool-filter-empty"><Search size={20}/><b>No matching functions</b><span>Change the search text or category filter.</span></div>}</section>
+			<aside className={`tool-function-inspector panel ${selected?.enabled?'':'disabled'}`}>{selected?<><header><div className="tool-function-icon"><FunctionSquare size={18}/></div><span><small>FUNCTION DETAIL</small><code>{selected.name}</code></span><div className="tool-function-controls"><em className={selected.guard}>{toolGuardLabels[selected.guard]}</em><button className={selected.enabled?'enabled':''} role="switch" aria-checked={selected.enabled} onClick={()=>void setEnabled(selected)} disabled={busyName===selected.name} title={selected.enabled?'Disable function':'Enable function'}>{busyName===selected.name?<LoaderCircle className="spin" size={14}/>:<Power size={14}/>}<span>{selected.enabled?'Enabled':'Disabled'}</span></button></div></header><p className="tool-function-description">{selected.description}</p><dl className="tool-function-meta"><div><dt>Category</dt><dd>{toolCategoryLabels[selected.category]||selected.category}</dd></div><div><dt>Arguments</dt><dd>{parameters.length}</dd></div><div><dt>Safety gate</dt><dd>{toolGuardLabels[selected.guard]}</dd></div></dl><section className="tool-parameter-list"><h3>Input parameters <span>{parameters.filter(item=>item.required).length} required</span></h3>{parameters.length?parameters.map(parameter=><div key={parameter.name}><code>{parameter.name}</code><em>{parameter.type}</em>{parameter.required&&<b>required</b>}<p>{parameter.description||'No additional description.'}</p></div>):<p className="tool-no-arguments">This function takes no arguments.</p>}</section><details className="tool-schema-raw"><summary>Raw JSON Schema <ChevronRight size={13}/></summary><pre>{JSON.stringify(selected.input_schema,null,2)}</pre></details></>:<div className="tool-inspector-empty"><Braces size={26}/><span>Select a function to inspect its model-facing schema.</span></div>}</aside>
 		</div>}
 	</div>
 }
@@ -311,28 +316,40 @@ function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<
 	</div>
 }
 
-function SystemSettingsPage({settings,capabilities,explanationAgentAvailable,refresh}:{settings:SystemSettings|null;capabilities:ToolCapabilities;explanationAgentAvailable:boolean;refresh:()=>Promise<void>}) {
-  const savedValue=settings?.agent_max_iterations??20
+function SystemSettingsPage({settings,providers,capabilities,modelStatus,refresh}:{settings:SystemSettings|null;providers:ModelProvider[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refresh:()=>Promise<void>}) {
+  const savedValue=settings?.agent_max_iterations??50
   const savedExplanation=settings?.approval_explanations_enabled??true
+  const savedSubagentProvider=settings?.subagent_model_provider_id??''
+  const savedSubagentTimeout=settings?.subagent_timeout_seconds??30
+  const savedShellMode=settings?.workspace_shell_mode??'sandbox'
   const [maxIterations,setMaxIterations]=useState(savedValue)
   const [explanationEnabled,setExplanationEnabled]=useState(savedExplanation)
+  const [subagentProvider,setSubagentProvider]=useState(savedSubagentProvider)
+  const [subagentTimeout,setSubagentTimeout]=useState(savedSubagentTimeout)
+  const [shellMode,setShellMode]=useState<WorkspaceShellMode>(savedShellMode)
   const [dirty,setDirty]=useState(false)
   const [saving,setSaving]=useState(false)
   const [notice,setNotice]=useState('')
-  useEffect(()=>{if(!dirty){setMaxIterations(savedValue);setExplanationEnabled(savedExplanation)}},[savedValue,savedExplanation,dirty])
-  const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(50,value||5)));setDirty(true);setNotice('')}
+  useEffect(()=>{if(!dirty){setMaxIterations(savedValue);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setShellMode(savedShellMode)}},[savedValue,savedExplanation,savedSubagentProvider,savedSubagentTimeout,savedShellMode,dirty])
+  const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(100,value||5)));setDirty(true);setNotice('')}
   const toggleExplanation=(value:boolean)=>{setExplanationEnabled(value);setDirty(true);setNotice('')}
-  const save=async(event:FormEvent)=>{event.preventDefault();setSaving(true);try{const result=await api.saveSystemSettings({agent_max_iterations:maxIterations,approval_explanations_enabled:explanationEnabled});setMaxIterations(result.agent_max_iterations);setExplanationEnabled(result.approval_explanations_enabled);setDirty(false);setNotice(`Saved · Agent loop ${result.agent_max_iterations} rounds · Approval explanation ${result.approval_explanations_enabled?'enabled':'disabled'}.`);await refresh()}catch(err){setNotice(errorText(err))}finally{setSaving(false)}}
+  const selectSubagentProvider=(value:string)=>{setSubagentProvider(value);setDirty(true);setNotice('')}
+  const updateSubagentTimeout=(value:number)=>{setSubagentTimeout(Math.max(5,Math.min(120,value||5)));setDirty(true);setNotice('')}
+  const selectShellMode=(value:WorkspaceShellMode)=>{setShellMode(value);setDirty(true);setNotice('')}
+  const save=async(event:FormEvent)=>{event.preventDefault();setSaving(true);try{const result=await api.saveSystemSettings({agent_max_iterations:maxIterations,approval_explanations_enabled:explanationEnabled,subagent_model_provider_id:subagentProvider,subagent_timeout_seconds:subagentTimeout,workspace_shell_mode:shellMode});setMaxIterations(result.agent_max_iterations);setExplanationEnabled(result.approval_explanations_enabled);setSubagentProvider(result.subagent_model_provider_id);setSubagentTimeout(result.subagent_timeout_seconds);setShellMode(result.workspace_shell_mode);setDirty(false);setNotice(`Saved · Subagent timeout ${result.subagent_timeout_seconds}s · Workspace Shell ${result.workspace_shell_mode}.`);await refresh()}catch(err){setNotice(errorText(err))}finally{setSaving(false)}}
+  const selectedSubagentProvider=providers.find(provider=>provider.id===subagentProvider)
+  const subagentRoute=subagentProvider?(selectedSubagentProvider?`${selectedSubagentProvider.name} · ${selectedSubagentProvider.model}`:'Provider unavailable'):'Follow active main provider'
   return <div className="system-settings page-stack">
     <div className="page-actions"><div><p>Agent runtime safeguards</p><span>Runtime changes are persisted locally, audited and applied to new Agent runs without a server restart.</span></div></div>
     {notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
     <form className="settings-panel panel" onSubmit={save}><div className="settings-panel-head"><div className="settings-glyph"><SlidersHorizontal size={20}/></div><div><span>AGENT LOOP</span><h3>Maximum model iterations</h3><p>Limits how many model → tool → model decision rounds a single message may consume.</p></div><strong>{maxIterations}</strong></div>
-      <div className="iteration-editor"><input aria-label="Maximum model iterations" type="range" min="5" max="50" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>Rounds</span><input type="number" min="5" max="50" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div>
-      <div className="iteration-presets"><span>QUICK PRESETS</span>{[10,20,30].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b><small>{value===10?'Short diagnosis':value===20?'Recommended':'Long deployment'}</small></button>)}</div>
-      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>Approval explanation</b><p>One isolated, tool-free Eino Agent explains commands in the background. Deterministic Policy remains the only risk classifier.</p></div><em className={explanationAgentAvailable?'ready':'offline'}><CircleDot size={9}/>{explanationAgentAvailable?'1 runner ready':'model unavailable'}</em></div><label><span><b>Command explanation Agent</b><small>Explains effects, risks, practical tips and rollback guidance without changing approval risk.</small></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label></div>
+      <div className="iteration-editor"><input aria-label="Maximum model iterations" type="range" min="5" max="100" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>Rounds</span><input type="number" min="5" max="100" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div>
+      <div className="iteration-presets"><span>QUICK PRESETS</span>{[20,50,100].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b><small>{value===20?'Short diagnosis':value===50?'Recommended':'Long deployment'}</small></button>)}</div>
+      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>Approval explanation</b><p>One isolated, tool-free Eino Agent explains commands in the background. Deterministic Policy remains the only risk classifier.</p></div><em className={modelStatus?.explanation_agent_available?'ready':'offline'}><CircleDot size={9}/>{modelStatus?.explanation_agent_available?'1 runner ready':'model unavailable'}</em></div><label className="subagent-toggle"><span><b>Command explanation Agent</b><small>Explains effects, risks, practical tips and rollback guidance without changing approval risk.</small></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label><div className="subagent-config-grid"><label><span><b>Model provider</b><small>{subagentRoute}</small></span><select value={subagentProvider} onChange={event=>selectSubagentProvider(event.target.value)}><option value="">Follow active main provider</option>{providers.map(provider=><option value={provider.id} key={provider.id}>{provider.name} · {provider.model}</option>)}</select></label><label><span><b>Request timeout</b><small>Applied to each background explanation request.</small></span><div className="subagent-timeout-input"><input aria-label="Subagent request timeout" type="number" min="5" max="120" step="1" value={subagentTimeout} onChange={event=>updateSubagentTimeout(Number(event.target.value))}/><em>seconds</em></div></label></div>{modelStatus?.explanation_error&&<div className="subagent-runtime-error"><ShieldAlert size={14}/><span>{modelStatus.explanation_error}</span></div>}</div>
+	  <div className="workspace-shell-settings"><div className="workspace-shell-settings-head"><TerminalSquare size={18}/><div><b>Workspace Shell backend</b><p>Controls whether Workspace scripts run in Bubblewrap, directly on this host, or remain unavailable.</p></div><em>{settings?.workspace_shell_platform||'detecting'}</em></div><div className="workspace-shell-modes" role="group" aria-label="Workspace Shell backend"><button type="button" className={shellMode==='sandbox'?'active':''} disabled={!settings?.workspace_sandbox_available} onClick={()=>selectShellMode('sandbox')}><ShieldCheck size={16}/><span><b>Sandbox</b><small>{settings?.workspace_sandbox_available?'Linux · Bubblewrap · no network':'Unavailable on this host'}</small></span></button><button type="button" className={`${shellMode==='host'?'active ':''}host`} disabled={!settings?.workspace_host_shell_available} onClick={()=>selectShellMode('host')}><TerminalSquare size={16}/><span><b>Host Shell</b><small>{settings?.workspace_host_shell_available?`${settings.workspace_shell_name||'system shell'} · full host authority`:'No supported shell detected'}</small></span></button><button type="button" className={shellMode==='disabled'?'active':''} onClick={()=>selectShellMode('disabled')}><Power size={16}/><span><b>Disabled</b><small>Remove shell execution capability</small></span></button></div>{shellMode==='host'&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><span><b>Full host filesystem and network access</b><small>Every Host Shell invocation requires a new one-time human approval. Session approvals are prohibited, and read-only Workspaces cannot use this backend.</small></span></div>}{shellMode==='sandbox'&&!settings?.workspace_sandbox_available&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><span><b>Configured sandbox is unavailable</b><small>Execution fails closed. There is no automatic fallback to Host Shell.</small></span></div>}</div>
 	  <div className="workspace-capabilities"><div><FileText size={17}/><span><b>Allowlisted Workspaces</b><small>Startup allowlist only. Browse and upload files directly from the Agent conversation.</small></span><em>{capabilities.workspaces.length}</em></div>{capabilities.workspaces.length?capabilities.workspaces.map(workspace=><section className="workspace-summary-row" key={workspace.id}><div><code>{workspace.id}</code><span className={workspace.access}>{workspace.access.replace('_',' ')}</span></div><code title={workspace.root}>{workspace.root}</code><small>{workspace.validators?.length?`validators · ${workspace.validators.join(', ')}`:'no validators'}</small></section>):<p>No local Workspace is exposed. The Agent remains SSH-only.</p>}</div>
-      <div className="settings-advice"><ShieldCheck size={17}/><div><b>The safety limit remains enforced</b><p>Higher values support installations and multi-step recovery, but can increase token usage and tool calls. Values are restricted to 5–50.</p></div></div>
-      <div className="settings-footer"><span>{settings?.updated_at?`Last updated ${new Date(settings.updated_at).toLocaleString()}`:'Using system default'}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setExplanationEnabled(savedExplanation);setDirty(false);setNotice('')}}>Discard</button><button className="primary" disabled={!dirty||saving}>{saving?'Applying…':'Save & apply'}</button></div>
+      <div className="settings-advice"><ShieldCheck size={17}/><div><b>The safety limit remains enforced</b><p>Higher values support installations and multi-step recovery, but can increase token usage and tool calls. Values are restricted to 5–100.</p></div></div>
+      <div className="settings-footer"><span>{settings?.updated_at?`Last updated ${new Date(settings.updated_at).toLocaleString()}`:'Using system default'}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setShellMode(savedShellMode);setDirty(false);setNotice('')}}>Discard</button><button className="primary" disabled={!dirty||saving}>{saving?'Applying…':'Save & apply'}</button></div>
     </form>
 	<AdminPasswordPanel/>
   </div>
@@ -355,6 +372,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [historyError, setHistoryError] = useState('')
   const [loadingSession, setLoadingSession] = useState('')
+  const [historyOpen,setHistoryOpen]=useState(false)
   const [running, setRunning] = useState(false)
   const [detachedRunning,setDetachedRunning]=useState(false)
   const [reasoningSeen, setReasoningSeen] = useState(false)
@@ -363,6 +381,8 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
 	const [workspaceID,setWorkspaceID]=useState('')
   const messagesRef=useRef<HTMLDivElement>(null)
   const stickToLatest=useRef(true)
+  const activeStreamRef=useRef<ActiveChatStream|null>(null)
+  const sessionLoadRef=useRef('')
   const hostNames = useMemo(() => hosts.map((host) => host.name).join(', '), [hosts])
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
 	const pendingExplanationID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
@@ -371,6 +391,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
 	useEffect(()=>{if(selectedWorkspace&&workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
 	useEffect(()=>{onStreamingChange(running)},[running,onStreamingChange])
 	useEffect(()=>()=>onStreamingChange(false),[onStreamingChange])
+	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort()},[])
 	useEffect(()=>{
 		if(!pendingExplanationID)return
 		void refreshApprovals()
@@ -384,16 +405,27 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
     } catch (err) { setHistoryError(errorText(err)); return [] }
   }, [])
 
+  const detachActiveStream = useCallback(() => {
+    const stream=activeStreamRef.current
+    if(!stream)return
+    activeStreamRef.current=null
+    stream.controller.abort()
+    setRunning(false)
+  }, [])
+
   const loadSession = useCallback(async (id: string) => {
+    const requestID=clientId()
+    sessionLoadRef.current=requestID
     setLoadingSession(id)
     stickToLatest.current=true
     try {
       const state = await api.chatState(id)
+      if(sessionLoadRef.current!==requestID)return
       setEntries(historyEntries(state.messages||[]));setDetachedRunning(!!state.active);setPlan(state.plan||null)
       setSessionId(id); rememberSession(id); setHistoryError('')
       void refresh()
-    } catch (err) { setHistoryError(errorText(err)) }
-    finally { setLoadingSession('') }
+    } catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
+    finally { if(sessionLoadRef.current===requestID)setLoadingSession('') }
   }, [refresh])
 
   useEffect(()=>{
@@ -406,6 +438,13 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
     void sync();const timer=window.setInterval(()=>void sync(),2500)
     return()=>{active=false;window.clearInterval(timer)}
   },[sessionId,running,detachedRunning,refreshSessions])
+
+  const activeSessionCount=useMemo(()=>sessions.filter(item=>item.active).length,[sessions])
+  useEffect(()=>{
+    if(!activeSessionCount)return
+    const timer=window.setInterval(()=>{if(document.visibilityState==='visible')void refreshSessions()},2500)
+    return()=>window.clearInterval(timer)
+  },[activeSessionCount,refreshSessions])
 
   useEffect(()=>{
     if(!stickToLatest.current)return
@@ -428,12 +467,28 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
   }, [loadSession])
 
   const newChat = () => {
-    if (running) return
+    detachActiveStream()
+    sessionLoadRef.current=''
+    setLoadingSession('')
+    setHistoryOpen(false)
     stickToLatest.current=true;setSessionId(''); setEntries([]); setMessage(''); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setPlan(null); rememberSession(newSessionMarker)
+    void refreshSessions()
+  }
+
+  const switchSession = (id:string) => {
+    setHistoryOpen(false)
+    if(id===sessionId){
+      if(loadingSession){sessionLoadRef.current='';setLoadingSession('')}
+      return
+    }
+    detachActiveStream()
+    void loadSession(id)
+    void refreshSessions()
   }
 
   const removeSession = async (session: ChatSession) => {
-    if (running || (session.id===sessionId&&detachedRunning) || !confirm(`Delete conversation “${session.title}”?`)) return
+    const active=session.active||(session.id===sessionId&&sessionBusy)
+    if (active || !confirm(`Delete conversation “${session.title}”?`)) return
     try {
       await api.deleteChatSession(session.id)
       if (session.id === sessionId) newChat()
@@ -442,15 +497,20 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
   }
 
   const sendQuery = async (query:string) => {
-    query=query.trim(); if(!query||sessionBusy)return
+    query=query.trim(); if(!query||sessionBusy||loadingSession)return
     let querySessionID=sessionId
     const userEntryID=clientId()
+    const streamID=clientId()
+    const controller=new AbortController()
+    activeStreamRef.current={id:streamID,sessionId:sessionId,controller}
+    const isAttached=()=>activeStreamRef.current?.id===streamID
     stickToLatest.current=true
     setApprovalNotice('');setReasoningSeen(false);setRunning(true)
     setEntries((old) => [...old, { id: userEntryID, kind: 'user', content: query, status:'pending' }, { id: 'streaming', kind: 'assistant', content: '', streaming:true }])
     try {
       await streamChat(sessionId, query, (frame: AgentEvent) => {
-        if (frame.session_id) { querySessionID=frame.session_id;setSessionId(frame.session_id); rememberSession(frame.session_id) }
+        if(!isAttached())return
+        if (frame.session_id) { querySessionID=frame.session_id;activeStreamRef.current!.sessionId=frame.session_id;setSessionId(frame.session_id); rememberSession(frame.session_id) }
         if (frame.type === 'approval') { setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item));setApprovalNotice('');void refreshApprovals() }
         if (frame.type === 'reasoning' && frame.content) {
           setReasoningSeen(true)
@@ -467,23 +527,26 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
         }
         if (frame.type === 'done') setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item.id==='streaming'?{...item,streaming:false}:item))
         if (frame.type === 'error') setEntries((old) => [...old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item.id==='streaming'?{...item,streaming:false}:item), { id: clientId(), kind: 'error', content: frame.error || 'Agent error' }])
-      })
-    } catch (err) { setEntries((old) => [...old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item), { id: clientId(), kind: 'error', content: errorText(err) }]) }
+      },controller.signal)
+    } catch (err) { if(isAttached())setEntries((old) => [...old.map(item=>item.id===userEntryID?{...item,status:'failed' as const}:item), { id: clientId(), kind: 'error', content: errorText(err) }]) }
     finally {
+      if(!isAttached())return
       setEntries((old) => old.filter((item) => item.id !== 'streaming' || item.content !== '').map((item)=>item.id==='streaming'?{...item,streaming:false}:deactivateReasoning(item)))
       setRunning(false)
-      if(querySessionID){try{const state=await api.chatState(querySessionID);setDetachedRunning(!!state.active);setPlan(state.plan||null);if(state.active)setEntries(old=>[...historyEntries(state.messages||[]),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))])}catch{/* polling or the next reload will recover state */}}
+      if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setPlan(state.plan||null);if(state.active)setEntries(old=>[...historyEntries(state.messages||[]),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))])}catch{/* polling or the next reload will recover state */}}
+      if(!isAttached())return
+      activeStreamRef.current=null
       void refreshSessions();void refresh()
     }
   }
 
-  const submit = (event: FormEvent) => {event.preventDefault();const query=message.trim();if(!query||sessionBusy)return;setMessage('');void sendQuery(query)}
+  const submit = (event: FormEvent) => {event.preventDefault();const query=message.trim();if(!query||sessionBusy||loadingSession)return;setMessage('');void sendQuery(query)}
   const streamingResponseStarted=entries.some((item)=>item.id==='streaming'&&item.content!=='')
 
   return <div className="chat-layout">
-	<ChatWorkspacePanel workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} onSelect={setWorkspaceID} refresh={refresh}/>
+    <ChatWorkspacePanel workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} onSelect={setWorkspaceID} refresh={refresh}/>
     <div className="chat-main panel">
-      <div className="panel-header"><div><Bot size={18}/><span>OpsPilot session</span></div><span className="session-id">{sessionId ? sessionId.slice(0, 20) : 'NEW SESSION'}</span></div>
+      <div className="panel-header"><div><Bot size={18}/><span>OpsPilot session</span></div><div className="chat-header-actions"><span className="session-id">{sessionId ? sessionId.slice(0, 20) : 'NEW SESSION'}</span><button className="mobile-history-button" onClick={()=>setHistoryOpen(true)} title="Conversations" aria-label="Open conversations"><History size={15}/>{activeSessionCount>0&&<em>{activeSessionCount}</em>}</button></div></div>
       <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} refresh={refresh} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
       <div className="session-plan-slot">{plan&&<SessionPlan plan={plan}/>}</div>
       <div className="messages" ref={messagesRef} onScroll={event=>{const element=event.currentTarget;stickToLatest.current=element.scrollHeight-element.scrollTop-element.clientHeight<90}}>
@@ -494,12 +557,13 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
         {running && !reasoningSeen && !streamingResponseStarted && <div className="thinking"><span/><span/><span/> 等待模型响应</div>}
         {detachedRunning&&!running&&<div className="thinking background-agent"><span/><span/><span/> Agent 正在后台继续执行，刷新页面不会中断</div>}
       </div>
-	  <form className="composer" onSubmit={submit}>{sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>LLM 运行中</b></div>}<div className="context-line"><span><Server size={13}/>{hosts.length ? `${hosts.length} hosts: ${hostNames}` : 'No hosts registered'}</span><span className="composer-workspace"><FolderOpen size={13}/>{selectedWorkspace?`Workspace: ${selectedWorkspace.id}`:'No Workspace'}</span>{selectedWorkspace?.access==='read_write'&&<QuickWorkspaceUpload workspace={selectedWorkspace} refresh={refresh}/>}<span><Cpu size={13}/>{modelName || 'No active model'}</span><span><ShieldCheck size={13}/>Guarded execution</span></div><div className="input-row"><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder={!agentAvailable?'Configure and activate a model provider':sessionBusy?'Agent is still running in this conversation…':'Describe an incident or deployment goal…'} disabled={!agentAvailable||sessionBusy} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button disabled={!agentAvailable || sessionBusy || !message.trim()}><Send size={18}/></button></div></form>
+	  <form className="composer" onSubmit={submit}>{sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>LLM 运行中</b></div>}<div className="context-line"><span><Server size={13}/>{hosts.length ? `${hosts.length} hosts: ${hostNames}` : 'No hosts registered'}</span><span className="composer-workspace"><FolderOpen size={13}/>{selectedWorkspace?`Workspace: ${selectedWorkspace.id}`:'No Workspace'}</span>{selectedWorkspace?.access==='read_write'&&<QuickWorkspaceUpload workspace={selectedWorkspace} refresh={refresh}/>}<span><Cpu size={13}/>{modelName || 'No active model'}</span><span><ShieldCheck size={13}/>Guarded execution</span></div><div className="input-row"><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder={!agentAvailable?'Configure and activate a model provider':loadingSession?'Loading conversation…':sessionBusy?'Agent is still running in this conversation…':'Describe an incident or deployment goal…'} disabled={!agentAvailable||sessionBusy||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button disabled={!agentAvailable || sessionBusy || !!loadingSession || !message.trim()}><Send size={18}/></button></div></form>
     </div>
-	<aside className="context-panel conversation-panel panel"><div className="panel-header"><div><History size={17}/><span>Conversations</span></div><button className="new-chat-button" onClick={newChat} disabled={running} title="New conversation"><Plus size={14}/>New</button></div><div className="session-list">
+	{historyOpen&&<button className="conversation-backdrop" onClick={()=>setHistoryOpen(false)} aria-label="Close conversations"/>}
+	<aside className={`context-panel conversation-panel panel ${historyOpen?'mobile-open':''}`}><div className="panel-header"><div><History size={17}/><span>Conversations</span></div><section className="conversation-header-actions"><button className="new-chat-button" onClick={newChat} title="New conversation"><Plus size={14}/>New</button><button className="conversation-close-button" onClick={()=>setHistoryOpen(false)} title="Close conversations" aria-label="Close conversations"><X size={14}/></button></section></div><div className="session-list">
       {historyError&&<div className="history-error">{historyError}</div>}
       {!sessions.length&&!historyError&&<div className="history-empty">No saved conversations yet.</div>}
-      {sessions.map(session=>{const pending=approvals.filter(item=>item.session_id===session.id).length;const active=session.id===sessionId&&detachedRunning;return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>loadSession(session.id)} disabled={running||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{pending} approval</em>}{active&&<em className="session-running-count">running</em>}</b><span>{new Date(session.updated_at).toLocaleString()} · {session.message_count} messages</span></button><button className="session-delete" onClick={()=>removeSession(session)} disabled={running||active} title={active?'Agent is still running':'Delete conversation'}><Trash2 size={13}/></button></div>})}
+      {sessions.map(session=>{const pending=approvals.filter(item=>item.session_id===session.id).length;const active=session.active||(session.id===sessionId&&sessionBusy);return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>switchSession(session.id)} disabled={loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{pending} approval</em>}{active&&<em className="session-running-count">running</em>}</b><span>{new Date(session.updated_at).toLocaleString()} · {session.message_count} messages</span></button><button className="session-delete" onClick={()=>removeSession(session)} disabled={active} title={active?'Agent is still running':'Delete conversation'}><Trash2 size={13}/></button></div>})}
     </div><div className="session-summary"><Metric label="Saved" value={sessions.length.toString()} tone="green"/><Metric label="Hosts" value={hosts.length.toString()}/></div></aside>
   </div>
 }
@@ -517,10 +581,10 @@ function ChatWorkspacePanel({workspaces,workspaceID,onSelect,refresh}:{workspace
 	const choose=(event:React.ChangeEvent<HTMLInputElement>)=>{const selected=event.target.files?.[0]||null;setFile(selected);setTarget(selected?(path==='.'?selected.name:`${path}/${selected.name}`):'');setNotice('')}
 	const upload=async()=>{if(!workspace||!file||!target.trim())return;setUploading(true);setNotice('');try{const result=await api.uploadWorkspaceFile(workspace.id,file,target.trim());setNotice(`Uploaded · ${result.path}`);setFile(null);setTarget('');setInputKey(value=>value+1);await load();await refresh()}catch(err){setNotice(errorText(err))}finally{setUploading(false)}}
 	const openEntry=async(name:string,type:'file'|'directory')=>{const next=path==='.'?name:`${path}/${name}`;if(type==='directory'){setPath(next);return}if(!workspace)return;setPreviewLoading(next);setNotice('');try{setPreview(await api.previewWorkspaceFile(workspace.id,next))}catch(err){setNotice(errorText(err))}finally{setPreviewLoading('')}}
-	const removeEntry=async(name:string)=>{if(!workspace)return;const next=path==='.'?name:`${path}/${name}`;if(!confirm(`Delete “${next}”?\n\nThe file will be moved to OpsPilot's recovery area.`))return;setDeleting(next);setNotice('');try{const result=await api.deleteWorkspaceFile(workspace.id,next);if(preview?.path===next)setPreview(null);setNotice(`Deleted · recoverable as ${result.trash_id}`);await load();await refresh()}catch(err){setNotice(errorText(err))}finally{setDeleting('')}}
+	const removeEntry=async(name:string,type:'file'|'directory')=>{if(!workspace)return;const next=path==='.'?name:`${path}/${name}`;const target=type==='directory'?'folder and all of its contents':'file';if(!confirm(`Delete ${target} “${next}”?\n\nIt will be moved to OpsPilot's recovery area.`))return;setDeleting(next);setNotice('');try{const result=await api.deleteWorkspaceEntry(workspace.id,next);if(preview?.path===next)setPreview(null);setNotice(`Deleted ${result.type} · recoverable as ${result.trash_id}`);await load();await refresh()}catch(err){setNotice(errorText(err))}finally{setDeleting('')}}
 	const up=()=>{if(path==='.')return;const parts=path.split('/');parts.pop();setPath(parts.join('/')||'.')}
 	if(!workspace)return <aside className="workspace-browser-panel panel empty"><div className="panel-header"><div><FolderOpen size={17}/><span>Workspace</span></div></div><div className="workspace-empty"><FolderOpen size={23}/><span>No Workspace configured</span></div></aside>
-	return <><aside className="workspace-browser-panel panel"><div className="panel-header"><div><FolderOpen size={17}/><span>Workspace</span></div>{workspaces.length>1?<select value={workspace.id} onChange={event=>onSelect(event.target.value)}>{workspaces.map(item=><option value={item.id} key={item.id}>{item.id}</option>)}</select>:<code>{workspace.id}</code>}</div><div className="chat-workspace-head"><span><b>Local files</b><small title={workspace.root}>{workspace.root}</small></span><em className={workspace.access}>{workspace.access.replace('_',' ')}</em></div><div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title="Parent directory">‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label title="Upload file"><UploadCloud size={14}/><input key={inputKey} type="file" onChange={choose}/></label>}<button onClick={()=>void load()} title="Refresh files"><RefreshCw size={12}/></button></div>{file&&<div className="chat-upload-row"><input value={target} onChange={event=>setTarget(event.target.value)} aria-label="Relative upload path"/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'…':'Upload'}</button><button onClick={()=>{setFile(null);setTarget('');setInputKey(value=>value+1)}} title="Cancel upload"><X size={11}/></button></div>}<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>Loading</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=path==='.'?entry.name:`${path}/${entry.name}`;return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?'Preview file':'Open directory'}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{entry.type==='file'&&workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>void removeEntry(entry.name)} disabled={deleting===fullPath} title="Delete file"><Trash2 size={12}/></button>}</div>}):<span className="workspace-files-state">This directory is empty. Upload a file here.</span>}</div>{notice&&<div className={`chat-workspace-notice ${notice.startsWith('Uploaded')||notice.startsWith('Deleted')?'success':'error'}`}>{notice}</div>}<div className="workspace-browser-hint"><FileText size={12}/><span>Click a file to preview it. Nothing is added to the conversation automatically.</span></div></aside>{preview&&<div className="workspace-preview-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)setPreview(null)}}><section className="workspace-preview-dialog" role="dialog" aria-modal="true" aria-label={`Preview ${preview.path}`}><header><div><FileText size={18}/><span><b>{preview.path}</b><small>{formatFileSize(preview.size)} · SHA-256 {preview.sha256}</small></span></div><button onClick={()=>setPreview(null)} title="Close preview"><X size={16}/></button></header>{preview.binary?<div className="workspace-binary-preview"><FileText size={30}/><b>Binary file</b><span>This file cannot be rendered as text. Its size and checksum are shown above.</span></div>:<pre>{preview.content||''}</pre>}{preview.truncated&&<footer>Preview is limited to the first 1 MiB. The original file was not modified.</footer>}</section></div>}</>
+	return <><aside className="workspace-browser-panel panel"><div className="panel-header"><div><FolderOpen size={17}/><span>Workspace</span></div>{workspaces.length>1?<select value={workspace.id} onChange={event=>onSelect(event.target.value)}>{workspaces.map(item=><option value={item.id} key={item.id}>{item.id}</option>)}</select>:<code>{workspace.id}</code>}</div><div className="chat-workspace-head"><span><b>Local files</b><small title={workspace.root}>{workspace.root}</small></span><em className={workspace.access}>{workspace.access.replace('_',' ')}</em></div><div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title="Parent directory">‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label title="Upload file"><UploadCloud size={14}/><input key={inputKey} type="file" onChange={choose}/></label>}<button onClick={()=>void load()} title="Refresh files"><RefreshCw size={12}/></button></div>{file&&<div className="chat-upload-row"><input value={target} onChange={event=>setTarget(event.target.value)} aria-label="Relative upload path"/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'…':'Upload'}</button><button onClick={()=>{setFile(null);setTarget('');setInputKey(value=>value+1)}} title="Cancel upload"><X size={11}/></button></div>}<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>Loading</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=path==='.'?entry.name:`${path}/${entry.name}`;return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?'Preview file':'Open directory'}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>void removeEntry(entry.name,entry.type)} disabled={deleting===fullPath} title={`Delete ${entry.type}`}><Trash2 size={12}/></button>}</div>}):<span className="workspace-files-state">This directory is empty. Upload a file here.</span>}</div>{notice&&<div className={`chat-workspace-notice ${notice.startsWith('Uploaded')||notice.startsWith('Deleted')?'success':'error'}`}>{notice}</div>}<div className="workspace-browser-hint"><FileText size={12}/><span>Click a file to preview it. Nothing is added to the conversation automatically.</span></div></aside>{preview&&<div className="workspace-preview-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)setPreview(null)}}><section className="workspace-preview-dialog" role="dialog" aria-modal="true" aria-label={`Preview ${preview.path}`}><header><div><FileText size={18}/><span><b>{preview.path}</b><small>{formatFileSize(preview.size)} · SHA-256 {preview.sha256}</small></span></div><button onClick={()=>setPreview(null)} title="Close preview"><X size={16}/></button></header>{preview.binary?<div className="workspace-binary-preview"><FileText size={30}/><b>Binary file</b><span>This file cannot be rendered as text. Its size and checksum are shown above.</span></div>:<pre>{preview.content||''}</pre>}{preview.truncated&&<footer>Preview is limited to the first 1 MiB. The original file was not modified.</footer>}</section></div>}</>
 }
 
 function QuickWorkspaceUpload({workspace,refresh}:{workspace:WorkspaceCapability;refresh:()=>Promise<void>}){
@@ -562,7 +626,7 @@ function ReasoningCard({content,active}:{content:string;active:boolean}){
 }
 
 type JsonRecord = Record<string,unknown>
-const toolLabels:Record<string,string>={ssh_exec:'执行远程命令',ssh_run_script:'执行 Bash 脚本',ssh_file_read:'读取远程文件',ssh_file_search:'搜索远程文件',ssh_file_list:'列出远程目录',ssh_file_stat:'读取文件信息',ssh_file_write:'事务写入远程文件',ssh_file_apply_patch:'事务应用远程补丁',ssh_config_apply:'应用远程配置事务',ssh_config_restore:'恢复远程配置备份',ssh_task_start:'启动远程任务',ssh_task_status:'查看任务状态',ssh_task_tail:'查看任务输出',ssh_task_list:'列出持久任务',ssh_host_list:'列出主机',ssh_host_inspect:'检查主机',workspace_list:'列出 Workspace',workspace_file_list:'列出 Workspace 目录',workspace_file_read:'读取 Workspace 文件',workspace_file_search:'搜索 Workspace 文件',workspace_file_apply_patch:'应用 Workspace 补丁',workspace_file_upload:'上传 Workspace 文件',ssh_history_search:'搜索执行历史',ssh_history_get:'读取执行历史',ssh_approval_status:'查询审批状态',ops_skill_list:'列出 Skills',ops_skill_get:'加载 Skill',ops_plan_create:'创建任务计划',ops_plan_get:'读取任务计划',ops_plan_step_update:'推进任务步骤'}
+const toolLabels:Record<string,string>={ssh_exec:'执行远程命令',ssh_run_script:'执行 Bash 脚本',ssh_file_read:'读取远程文件',ssh_file_search:'搜索远程文件',ssh_file_list:'列出远程目录',ssh_file_stat:'读取文件信息',ssh_file_write:'事务写入远程文件',ssh_file_apply_patch:'事务应用远程补丁',ssh_config_apply:'应用远程配置事务',ssh_config_restore:'恢复远程配置备份',ssh_task_start:'启动远程任务',ssh_task_status:'查看任务状态',ssh_task_tail:'查看任务输出',ssh_task_list:'列出持久任务',ssh_host_list:'列出主机',ssh_host_inspect:'检查主机',workspace_list:'列出 Workspace',workspace_file_list:'列出 Workspace 目录',workspace_file_read:'读取 Workspace 文件',workspace_file_search:'搜索 Workspace 文件',workspace_file_apply_patch:'应用 Workspace 补丁',workspace_file_upload:'上传 Workspace 文件',workspace_shell:'在 Workspace 运行 Shell',ssh_history_search:'搜索执行历史',ssh_history_get:'读取执行历史',ops_skill_list:'列出 Skills',ops_skill_get:'加载 Skill',ops_plan_create:'创建任务计划',ops_plan_get:'读取任务计划',ops_plan_step_update:'推进任务步骤'}
 function jsonRecord(value:unknown):JsonRecord|undefined{return value!==null&&typeof value==='object'&&!Array.isArray(value)?value as JsonRecord:undefined}
 function parseRecord(value:string):JsonRecord{try{return jsonRecord(JSON.parse(value))||{value:JSON.parse(value)}}catch{return{value}}}
 function requestFromRun(run?:Run):JsonRecord|undefined{if(!run)return;try{return jsonRecord(JSON.parse(run.request_json))}catch{return}}
@@ -575,22 +639,25 @@ function formatDuration(value:unknown,run?:Run){if(typeof value==='number'&&Numb
 
 function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host[]}){
   const payload=parseRecord(entry.content)
-  const runID=textValue(payload.run_id)
+	const taskPayload=jsonRecord(payload.task)
+	const resultPayload=jsonRecord(payload.result)
+  const runID=textValue(payload.run_id)||textValue(taskPayload?.run_id)||textValue(resultPayload?.run_id)
   const run=runs.find(item=>item.id===runID)
   const display=jsonRecord(payload._display)
   const request=jsonRecord(display?.request)||requestFromRun(run)
   const hostID=textValue(display?.host_id)||run?.host_id||textValue(request?.host_id)
   const hostName=hosts.find(host=>host.id===hostID||host.name===hostID)?.name||hostID||'—'
-  const status=textValue(payload.status)||run?.status||'completed'
-  const risk=textValue(display?.risk)||run?.risk||''
+  const status=textValue(payload.status)||textValue(taskPayload?.status)||textValue(resultPayload?.status)||run?.status||'completed'
+  const risk=textValue(display?.risk)||textValue(resultPayload?.risk)||run?.risk||''
   const program=request?fullProgram(request):''
   const script=request?textValue(request.script):''
   const remotePath=request?textValue(request.remote_path):''
 	const workspaceID=request?textValue(request.workspace_id):''
 	const relativePath=request?textValue(request.relative_path):''
 	const requestMode=request?textValue(request.mode):''
+	const workspaceShellBackend=request?textValue(request.workspace_shell_backend):''
 	const workspaceTransfer=requestMode==='workspace_upload'
-	const file=jsonRecord(payload.file)
+	const file=jsonRecord(payload.file)||jsonRecord(resultPayload?.file)
 	const filePath=textValue(file?.path)||remotePath||relativePath
 	const transferSummary=workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:''
   const planSteps=Array.isArray(payload.steps)?payload.steps.map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
@@ -598,27 +665,28 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const operation=filePath||(script?'Bash script':program||toolLabels[entry.tool||'']||entry.tool||'Tool result')
   const args=request&&Array.isArray(request.args)?request.args.map(value=>String(value)):[]
   const env=request?jsonRecord(request.env):undefined
-  const stdout=textValue(payload.stdout)||run?.stdout_redacted||''
-  const stderr=textValue(payload.stderr)||run?.stderr_redacted||run?.error||''
+  const stdout=textValue(payload.stdout)||textValue(resultPayload?.stdout)||run?.stdout_redacted||''
+  const stderr=textValue(payload.stderr)||textValue(resultPayload?.stderr)||run?.stderr_redacted||run?.error||''
   const stdoutPreview=latestOutput(stdout)
 	const commandSummary=transferSummary||filePath||program||(script?compactScript(script):'')||planSummary||operation
-  const instruction=textValue(payload.operator_instruction)
+  const instruction=textValue(payload.operator_instruction)||textValue(taskPayload?.operator_instruction)||textValue(resultPayload?.operator_instruction)
   const rawPayload={...payload};delete rawPayload._display
   const [expanded,setExpanded]=useState(false)
-  const exitCode=typeof payload.exit_code==='number'?payload.exit_code:run?.exit_code??'—'
+  const resultExitCode=resultPayload?.exit_code
+  const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
   return <details className={`tool-event tool-event-rich ${status}`} open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}>
     <summary><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><b>{toolLabels[entry.tool||'']||entry.tool||'SSH Tool'}：</b><code title={commandSummary}>{commandSummary}</code></div><span className={`tool-status ${status}`}>{status.replaceAll('_',' ')}</span><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>STDOUT · 最新 {Math.min(3,stdoutPreview.split('\n').length)} 行</span><pre>{stdoutPreview}</pre></div>}</summary>
     <div className="tool-event-body">
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
-		  <div className="tool-command-head"><span>{filePath?'受控文件操作':`LLM 请求运行的完整${script?'脚本':'命令'}`}</span>{request.elevated===true&&<em><ShieldAlert size={12}/>受控 sudo</em>}</div>
+		  <div className="tool-command-head"><span>{filePath?'受控文件操作':`LLM 请求运行的完整${script?'脚本':'命令'}`}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?'Host Shell':'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>受控 sudo</em>}</div>
 		  <div className="tool-command-block">{workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
 		  {filePath&&script&&<details className="tool-raw"><summary>查看完整事务脚本 / Patch</summary><pre>{script}</pre></details>}
           {program&&<CompactTable title="ARGV · 原始参数" columns={['INDEX','VALUE']} rows={[[0,textValue(request.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>} 
           {env&&Object.keys(env).length>0&&<CompactTable title="环境变量" columns={['KEY','VALUE']} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>} 
         </section>
         <aside className="tool-context-pane">
-		  <dl className="tool-context-grid"><div><dt>{workspaceTransfer?'目标主机':workspaceID?'Workspace':'目标主机'}</dt><dd>{workspaceTransfer?hostName:workspaceID||hostName}</dd></div><div><dt>{workspaceTransfer?'源文件':filePath?'文件路径':'工作目录'}</dt><dd>{workspaceTransfer?`${workspaceID}:${relativePath}`:filePath||textValue(request.cwd)||'默认目录'}</dd></div><div><dt>权限</dt><dd>{request.elevated===true?'managed sudo':'普通用户'}</dd></div><div><dt>风险</dt><dd>{risk||'—'}</dd></div><div><dt>状态</dt><dd>{status}</dd></div><div><dt>退出码</dt><dd>{exitCode}</dd></div><div><dt>耗时</dt><dd>{formatDuration(payload.duration,run)}</dd></div><div><dt>Run ID</dt><dd>{runID||'—'}</dd></div></dl>
+		  <dl className="tool-context-grid"><div><dt>{workspaceTransfer?'目标主机':workspaceID?'Workspace':'目标主机'}</dt><dd>{workspaceTransfer?hostName:workspaceID||hostName}</dd></div><div><dt>{workspaceTransfer?'源文件':filePath?'文件路径':'工作目录'}</dt><dd>{workspaceTransfer?`${workspaceID}:${relativePath}`:filePath||textValue(request.cwd)||'默认目录'}</dd></div><div><dt>权限</dt><dd>{workspaceShellBackend==='host'?'宿主机完整权限':workspaceShellBackend==='sandbox'?'Bubblewrap 沙盒':request.elevated===true?'managed sudo':'普通用户'}</dd></div><div><dt>风险</dt><dd>{risk||'—'}</dd></div><div><dt>状态</dt><dd>{status}</dd></div><div><dt>退出码</dt><dd>{exitCode}</dd></div><div><dt>耗时</dt><dd>{formatDuration(payload.duration??resultPayload?.duration,run)}</dd></div><div><dt>Run ID</dt><dd>{runID||'—'}</dd></div></dl>
           {textValue(request.reason)&&<div className="tool-reason"><span>执行原因</span><p>{textValue(request.reason)}</p></div>}
           {textValue(request.expected_changes)&&<div className="tool-reason change"><span>预期变化</span><p>{textValue(request.expected_changes)}</p></div>}
           {textValue(request.rollback)&&<div className="tool-reason rollback"><span>回滚方案</span><p>{textValue(request.rollback)}</p></div>}
@@ -689,7 +757,8 @@ function CommandExplanationPanel({review}:{review?:CommandReview}){
 function ApprovalDialog({approval,pendingCount,hosts,running,refresh,onNotice}:{approval:Approval;pendingCount:number;hosts:Host[];running:boolean;refresh:()=>Promise<void>;onNotice:(message:string)=>void}) {
   const [challenge,setChallenge]=useState('')
   const [note,setNote]=useState('')
-  const [busy,setBusy]=useState('')
+  const [decisionBusy,setDecisionBusy]=useState<''|'once'|'session'|'reject'>('')
+  const [explanationBusy,setExplanationBusy]=useState(false)
   const [error,setError]=useState('')
   let request:Record<string,unknown>={}
   try{request=JSON.parse(approval.request_json)}catch{request={request:approval.request_json}}
@@ -697,6 +766,8 @@ function ApprovalDialog({approval,pendingCount,hosts,running,refresh,onNotice}:{
 	const workspaceID=textValue(request.workspace_id)
 	const filePath=textValue(request.remote_path)||textValue(request.relative_path)
 	const requestMode=textValue(request.mode),relativePath=textValue(request.relative_path),remotePath=textValue(request.remote_path)
+	const workspaceShellBackend=textValue(request.workspace_shell_backend)
+	const hostWorkspaceShell=requestMode==='workspace_shell'&&workspaceShellBackend==='host'
 	const workspaceTransfer=requestMode==='workspace_upload'
   const operation=workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:fullProgram(request)||script||`${requestMode} ${filePath}`.trim()||'受控操作'
 	const targetHost=hosts.find(host=>host.id===approval.host_id)?.name||approval.host_id
@@ -704,58 +775,63 @@ function ApprovalDialog({approval,pendingCount,hosts,running,refresh,onNotice}:{
 	const expectedSHA=textValue(request.expected_sha256),validator=textValue(request.validator)
 	const explanationPending=approval.ai_review?.status==='pending'
   const decide=async(scope:'once'|'session')=>{
-    setBusy(scope);setError('')
+    setDecisionBusy(scope);setError('')
     try{const result=await api.approve(approval.id,challenge,note.trim()||'Reviewed and approved in the current Agent session.',scope);onNotice(`审批已通过 · ${result.status} · ${result.run_id}`);await refresh()}
-    catch(err){setError(errorText(err))}finally{setBusy('')}
+    catch(err){setError(errorText(err))}finally{setDecisionBusy('')}
   }
   const reject=async()=>{
     const instruction=note.trim();if(!instruction){setError('请先输入希望 OpsPilot 改为执行的方案。');return}
-    setBusy('reject');setError('')
-    try{await api.reject(approval.id,instruction);onNotice('审批已拒绝 · OpsPilot 正在按你的替代方案继续。');await refresh()}catch(err){setError(errorText(err))}finally{setBusy('')}
+    setDecisionBusy('reject');setError('')
+    try{await api.reject(approval.id,instruction);onNotice('审批已拒绝 · OpsPilot 正在按你的替代方案继续。');await refresh()}catch(err){setError(errorText(err))}finally{setDecisionBusy('')}
   }
   const retryExplanation=async()=>{
-    setBusy('explanation');setError('')
+    setExplanationBusy(true);setError('')
     try{
       const updated=await api.retryApprovalExplanation(approval.id)
       const status=updated.ai_review?.status
       onNotice(status==='completed'?'命令解释已重新生成。':'解释 Agent 已重试，但模型仍处于降级状态。')
       await refresh()
-    }catch(err){setError(errorText(err))}finally{setBusy('')}
+    }catch(err){setError(errorText(err))}finally{setExplanationBusy(false)}
   }
-  const disabled=!!busy
-	return <div className="approval-modal-backdrop"><section className={`approval-dialog ${approval.risk}`} role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title"><div className="approval-dialog-head"><div className="approval-dialog-icon"><ShieldAlert size={20}/></div><div><span>HUMAN APPROVAL · {pendingCount>1?`1 OF ${pendingCount}`:'CURRENT SESSION'}</span><h2 id="approval-dialog-title">OpsPilot 请求执行受控操作</h2></div><em className={`risk ${approval.risk}`}>{approval.risk.replace('_',' ')}</em></div><div className="approval-operation"><span className="approval-command-label">{filePath?'完整受控文件事务':`LLM 请求运行的完整${script?'脚本':'命令'}`}</span>{filePath&&<div className="approval-file-target"><FileText size={15}/><div><b>{workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:filePath}</b><span>{expectedSHA?`Expected SHA256 · ${expectedSHA}`:'未绑定已有版本'}{validator?` · Validator ${validator}`:''}</span></div></div>}<pre className="approval-command-preview">{script||`$ ${operation}`}</pre><dl><div><dt>{workspaceTransfer?'Host':workspaceID?'Workspace':'Host'}</dt><dd>{hostName}</dd></div><div><dt>Expires</dt><dd><Clock3 size={12}/>{new Date(approval.expires_at).toLocaleTimeString()}</dd></div><div><dt>Digest</dt><dd>{approval.request_digest.slice(0,12)}</dd></div></dl>{typeof request.reason==='string'&&<p>{request.reason}</p>}</div><CommandExplanationPanel review={approval.ai_review}/><div className="review-retry-row"><span>{explanationPending?'后台解释不会阻塞当前审批。':'只重新生成命令说明，不会修改风险或执行命令。'}</span><button disabled={disabled||explanationPending} onClick={retryExplanation}><RefreshCw className={busy==='explanation'||explanationPending?'spin':''} size={13}/>{explanationPending?'解释 Agent 工作中…':busy==='explanation'?'正在重新解释…':'重新生成命令解释'}</button></div>{approval.challenge&&<label className="approval-challenge-input"><span>Break-glass challenge · 输入 <code>{approval.challenge}</code></span><input value={challenge} onChange={event=>setChallenge(event.target.value)} placeholder="输入上方 challenge" autoComplete="off" autoFocus/></label>}<label className="approval-guidance"><span>审批说明 / 拒绝后告诉 LLM 应该改做什么</span><textarea value={note} maxLength={2000} onChange={event=>setNote(event.target.value)} placeholder="例如：不要重启服务，先只读取最近 100 行日志并分析原因。" autoFocus={!approval.challenge}/></label>{error&&<div className="approval-dialog-error"><ShieldAlert size={14}/>{error}</div>}<details className="approval-request-detail"><summary>查看完整请求</summary><pre>{JSON.stringify(request,null,2)}</pre></details><div className="approval-choice-grid"><button className="allow-once" disabled={disabled} onClick={()=>decide('once')}><Check size={16}/><span><b>{busy==='once'?'正在执行…':'仅允许本次'}</b><small>只批准当前请求摘要</small></span></button><button className="allow-session" disabled={disabled||approval.risk==='critical'} onClick={()=>decide('session')} title={approval.risk==='critical'?'Critical 操作不能会话级放行':''}><ShieldCheck size={16}/><span><b>{busy==='session'?'正在授权…':'本会话允许相同操作'}</b><small>{approval.risk==='critical'?'Critical 不可用':'目标、内容和参数必须完全一致'}</small></span></button><button className="reject-guidance" disabled={disabled||!note.trim()} onClick={reject}><X size={16}/><span><b>{busy==='reject'?'正在反馈…':'拒绝并告诉 LLM'}</b><small>将输入框内容作为新指令</small></span></button></div><p className="approval-wait">{running?'当前 Agent 已暂停在这个 Tool 调用，审批后会从原位置继续。':'原 Agent 连接已结束；本次决定仍会被执行并写入审计。'}</p></section></div>
+  const decisionDisabled=!!decisionBusy
+	return <div className="approval-modal-backdrop"><section className={`approval-dialog ${approval.risk}`} role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title"><div className="approval-dialog-head"><div className="approval-dialog-icon"><ShieldAlert size={20}/></div><div><span>HUMAN APPROVAL · {pendingCount>1?`1 OF ${pendingCount}`:'CURRENT SESSION'}</span><h2 id="approval-dialog-title">OpsPilot 请求执行受控操作</h2></div><em className={`risk ${approval.risk}`}>{approval.risk.replace('_',' ')}</em></div><div className="approval-operation"><span className="approval-command-label">{filePath?'完整受控文件事务':`LLM 请求运行的完整${script?'脚本':'命令'}`}</span>{filePath&&<div className="approval-file-target"><FileText size={15}/><div><b>{workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:filePath}</b><span>{expectedSHA?`Expected SHA256 · ${expectedSHA}`:'未绑定已有版本'}{validator?` · Validator ${validator}`:''}</span></div></div>}<pre className="approval-command-preview">{script||`$ ${operation}`}</pre><dl><div><dt>{workspaceTransfer?'Host':workspaceID?'Workspace':'Host'}</dt><dd>{hostName}</dd></div>{workspaceShellBackend&&<div><dt>Backend</dt><dd>{hostWorkspaceShell?'Host Shell · full authority':'Bubblewrap sandbox'}</dd></div>}<div><dt>Expires</dt><dd><Clock3 size={12}/>{new Date(approval.expires_at).toLocaleTimeString()}</dd></div><div><dt>Digest</dt><dd>{approval.request_digest.slice(0,12)}</dd></div></dl>{hostWorkspaceShell&&<div className="approval-host-shell-warning"><ShieldAlert size={14}/><span>此脚本直接访问宿主机文件系统与网络。本次授权仅对当前请求有效。</span></div>}{typeof request.reason==='string'&&<p>{request.reason}</p>}</div><CommandExplanationPanel review={approval.ai_review}/><div className="review-retry-row"><span>{explanationPending||explanationBusy?'后台解释不会阻塞当前审批。':'只重新生成命令说明，不会修改风险或执行命令。'}</span><button disabled={decisionDisabled||explanationPending||explanationBusy} onClick={retryExplanation}><RefreshCw className={explanationBusy||explanationPending?'spin':''} size={13}/>{explanationPending?'解释 Agent 工作中…':explanationBusy?'正在重新解释…':'重新生成命令解释'}</button></div>{approval.challenge&&<label className="approval-challenge-input"><span>Break-glass challenge · 输入 <code>{approval.challenge}</code></span><input value={challenge} onChange={event=>setChallenge(event.target.value)} placeholder="输入上方 challenge" autoComplete="off" autoFocus/></label>}<label className="approval-guidance"><span>审批说明 / 拒绝后告诉 LLM 应该改做什么</span><textarea value={note} maxLength={2000} onChange={event=>setNote(event.target.value)} placeholder="例如：不要重启服务，先只读取最近 100 行日志并分析原因。" autoFocus={!approval.challenge}/></label>{error&&<div className="approval-dialog-error"><ShieldAlert size={14}/>{error}</div>}<details className="approval-request-detail"><summary>查看完整请求</summary><pre>{JSON.stringify(request,null,2)}</pre></details><div className="approval-choice-grid"><button className="allow-once" disabled={decisionDisabled} onClick={()=>decide('once')}><Check size={16}/><span><b>{decisionBusy==='once'?'正在执行…':'仅允许本次'}</b><small>只批准当前请求摘要</small></span></button><button className="allow-session" disabled={decisionDisabled||approval.risk==='critical'||hostWorkspaceShell} onClick={()=>decide('session')} title={hostWorkspaceShell?'Host Shell 每次都必须单独授权':approval.risk==='critical'?'Critical 操作不能会话级放行':''}><ShieldCheck size={16}/><span><b>{decisionBusy==='session'?'正在授权…':'本会话允许相同操作'}</b><small>{hostWorkspaceShell?'Host Shell 不可用':approval.risk==='critical'?'Critical 不可用':'目标、内容和参数必须完全一致'}</small></span></button><button className="reject-guidance" disabled={decisionDisabled||!note.trim()} onClick={reject}><X size={16}/><span><b>{decisionBusy==='reject'?'正在反馈…':'拒绝并告诉 LLM'}</b><small>将输入框内容作为新指令</small></span></button></div><p className="approval-wait">{running?'当前 Agent 已暂停在这个 Tool 调用，审批后会从原位置继续。':'原 Agent 连接已结束；本次决定仍会被执行并写入审计。'}</p></section></div>
 }
 
-const emptyHostForm: HostInput = {name:'',address:'',port:22,user:'',auth_type:'agent',config_alias:'',identity_file:'',known_hosts_file:'',proxy_jump:'',password:'',sudo_mode:'none',sudo_password:''}
-const authLabels: Record<HostAuthType,string> = {agent:'SSH agent',key:'Private key file',password:'Account password',ssh_config:'SSH config alias'}
+const maxPrivateKeyBytes=1<<20
+const emptyHostForm: HostInput = {name:'',address:'',port:22,user:'',auth_type:'agent',private_key:'',known_hosts_file:'',proxy_jump_host_id:'',password:'',sudo_mode:'none',sudo_password:''}
+const authLabels: Record<HostAuthType,string> = {agent:'SSH agent',key:'Uploaded private key',password:'Account password'}
 const sudoLabels: Record<HostSudoMode,string> = {none:'Disabled',nopasswd:'sudo -n (NOPASSWD)',password:'Managed sudo password'}
 
 function HostsPage({ hosts, refresh }: {hosts:Host[];refresh:()=>Promise<void>}) {
   const [showForm, setShowForm] = useState(false); const [notice, setNotice] = useState(''); const [saving,setSaving]=useState(false)
   const [form, setForm] = useState<HostInput>(emptyHostForm)
+	const [privateKeyName,setPrivateKeyName]=useState(''),[privateKeyError,setPrivateKeyError]=useState(''),[existingPrivateKey,setExistingPrivateKey]=useState(false),[privateKeyInputKey,setPrivateKeyInputKey]=useState(0)
   const editing=!!form.id
-  const openCreate=()=>{setForm(emptyHostForm);setShowForm(true);setNotice('')}
-  const openEdit=(host:Host)=>{setForm({id:host.id,name:host.name,address:host.address,port:host.port,user:host.user,auth_type:host.auth_type||'agent',config_alias:host.config_alias||'',identity_file:host.identity_file||'',known_hosts_file:host.known_hosts_file||'',proxy_jump:host.proxy_jump||'',password:'',sudo_mode:host.sudo_mode||'none',sudo_password:''});setShowForm(true);setNotice('')}
-  const save = async (event:FormEvent) => { event.preventDefault(); setSaving(true); try { const saved=await api.saveHost(form); setShowForm(false); setForm(emptyHostForm); setNotice(`${saved.name} ${editing?'updated':'registered'}. Passwords are encrypted and are never returned by the API.`); await refresh() } catch(err){setNotice(errorText(err))} finally{setSaving(false)} }
-  const scan = async (host:Host) => { try { const key = await api.scanKey(host.id); if (confirm(`Trust ${host.name}?\n\n${key.fingerprint}`)) { await api.trustKey(host.id, key.fingerprint); setNotice(`Trusted ${key.fingerprint}`) } } catch(err){setNotice(errorText(err))} }
+	const resetPrivateKey=()=>{setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(false);setPrivateKeyInputKey(value=>value+1)}
+	const openCreate=()=>{setForm(emptyHostForm);resetPrivateKey();setShowForm(true);setNotice('')}
+	const openEdit=(host:Host)=>{setForm({id:host.id,name:host.name,address:host.address,port:host.port,user:host.user,auth_type:host.auth_type||'agent',private_key:'',known_hosts_file:host.known_hosts_file||'',proxy_jump_host_id:host.proxy_jump_host_id||'',password:'',sudo_mode:host.sudo_mode||'none',sudo_password:''});setPrivateKeyName('');setPrivateKeyError('');setExistingPrivateKey(host.auth_type==='key'&&host.has_private_key);setPrivateKeyInputKey(value=>value+1);setShowForm(true);setNotice('')}
+	const setAuthType=(auth_type:HostAuthType)=>{setForm(current=>({...current,auth_type,password:'',private_key:auth_type==='key'?current.private_key:''}));if(auth_type!=='key'){setPrivateKeyName('');setPrivateKeyError('');setPrivateKeyInputKey(value=>value+1)}}
+	const choosePrivateKey=async(event:React.ChangeEvent<HTMLInputElement>)=>{const selected=event.target.files?.[0];setPrivateKeyError('');if(!selected){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));return}if(selected.size<=0||selected.size>maxPrivateKeyBytes){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));setPrivateKeyError('Private key must be between 1 byte and 1 MiB.');return}try{const content=await selected.text();setPrivateKeyName(selected.name);setForm(current=>({...current,private_key:content}))}catch(err){setPrivateKeyName('');setForm(current=>({...current,private_key:''}));setPrivateKeyError(errorText(err))}}
+	const missingPrivateKey=form.auth_type==='key'&&!form.private_key&&!existingPrivateKey
+	const save = async (event:FormEvent) => { event.preventDefault(); if(missingPrivateKey)return;setSaving(true); try { const saved=await api.saveHost(form); setShowForm(false); setForm(emptyHostForm);resetPrivateKey(); setNotice(`${saved.name} ${editing?'updated':'registered'}. Credentials are encrypted and are never returned by the API.`); await refresh() } catch(err){setNotice(errorText(err))} finally{setSaving(false)} }
+  const scan = async (host:Host) => { try { const key = await api.scanKey(host.id); if (confirm(`Trust ${host.name}?\n\n${key.algorithm?`${key.algorithm}\n`:''}${key.fingerprint}`)) { await api.trustKey(host.id, key.fingerprint); setNotice(`Trusted ${key.fingerprint}`) } } catch(err){setNotice(errorText(err))} }
   const probe = async (host:Host) => { try { const info = await api.probe(host.id); setNotice(`${host.name}: ${Object.values(info).join(' · ')}`) } catch(err){setNotice(errorText(err))} }
   return <div className="page-stack"><div className="page-actions"><div><p>Registered targets</p><span>SSH and sudo credentials are encrypted locally; the model receives only host IDs and capability flags.</span></div><button className="primary" onClick={openCreate}><Plus size={16}/>Add host</button></div>
     {notice && <div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
     {showForm && <form className="host-form panel" onSubmit={save}><div className="host-form-head"><div><h3>{editing?'Edit SSH target':'Register SSH target'}</h3><p>{editing?'Leave password fields blank to keep their encrypted values.':'Choose how the control plane authenticates and whether managed sudo is permitted.'}</p></div><button type="button" className="close-button" onClick={()=>setShowForm(false)}><X size={16}/></button></div><div className="form-grid host-fields">
       <label><span>Name</span><input value={form.name} onChange={event=>setForm({...form,name:event.target.value})} required/></label>
-      <label><span>Address</span><input value={form.address} onChange={event=>setForm({...form,address:event.target.value})} placeholder="192.0.2.10 or server.example.com" required={!form.config_alias}/></label>
+      <label><span>Address</span><input value={form.address} onChange={event=>setForm({...form,address:event.target.value})} placeholder="192.0.2.10 or server.example.com" required/></label>
       <label><span>Port</span><input type="number" min="1" max="65535" value={form.port} onChange={event=>setForm({...form,port:Number(event.target.value)})} required/></label>
-      <label><span>User</span><input value={form.user} onChange={event=>setForm({...form,user:event.target.value})} placeholder="ops" required={!form.config_alias}/></label>
-      <label><span>Authentication</span><select value={form.auth_type} onChange={event=>setForm({...form,auth_type:event.target.value as HostAuthType,password:''})}>{(Object.keys(authLabels) as HostAuthType[]).map(mode=><option value={mode} key={mode}>{authLabels[mode]}</option>)}</select></label>
+      <label><span>User</span><input value={form.user} onChange={event=>setForm({...form,user:event.target.value})} placeholder="ops" required/></label>
+      <label><span>Authentication</span><select value={form.auth_type} onChange={event=>setAuthType(event.target.value as HostAuthType)}>{(Object.keys(authLabels) as HostAuthType[]).map(mode=><option value={mode} key={mode}>{authLabels[mode]}</option>)}</select></label>
       {form.auth_type==='password'&&<label><span>SSH password</span><input type="password" autoComplete="new-password" value={form.password} onChange={event=>setForm({...form,password:event.target.value})} placeholder={editing?'Leave blank to keep stored password':'Required'} required={!editing}/></label>}
-      {form.auth_type==='key'&&<label><span>Identity file</span><input value={form.identity_file} onChange={event=>setForm({...form,identity_file:event.target.value})} placeholder="/home/ops/.ssh/id_ed25519" required/></label>}
-      <label><span>SSH config alias</span><input value={form.config_alias} onChange={event=>setForm({...form,config_alias:event.target.value})} placeholder="Optional alias" required={form.auth_type==='ssh_config'}/></label>
-      <label><span>ProxyJump</span><input value={form.proxy_jump} onChange={event=>setForm({...form,proxy_jump:event.target.value})} placeholder="Optional bastion target"/></label>
+      {form.auth_type==='key'&&<div className="private-key-field"><span>Private key</span><label className={`private-key-picker ${privateKeyError||missingPrivateKey?'invalid':''}`} title={privateKeyName||'Choose an OpenSSH private key'}><UploadCloud size={15}/><span><b>{privateKeyName||(existingPrivateKey?'Stored private key':'Choose private key')}</b><small>{privateKeyName?'Ready to encrypt':existingPrivateKey?'Encrypted key configured':'OpenSSH key · max 1 MiB'}</small></span><input key={privateKeyInputKey} type="file" onChange={event=>void choosePrivateKey(event)}/></label>{(privateKeyError||missingPrivateKey)&&<small className="private-key-error">{privateKeyError||'A private key upload is required.'}</small>}</div>}
+      <label><span>ProxyJump host</span><select value={form.proxy_jump_host_id} onChange={event=>setForm({...form,proxy_jump_host_id:event.target.value})}><option value="">Direct connection</option>{hosts.filter(host=>host.id!==form.id).map(host=><option value={host.id} key={host.id}>{host.name} · {host.user}@{host.address}:{host.port}</option>)}</select></label>
       <label><span>Known hosts file</span><input value={form.known_hosts_file} onChange={event=>setForm({...form,known_hosts_file:event.target.value})} placeholder="Use control-plane default"/></label>
       <label><span>Sudo policy</span><select value={form.sudo_mode} onChange={event=>setForm({...form,sudo_mode:event.target.value as HostSudoMode,sudo_password:''})}>{(Object.keys(sudoLabels) as HostSudoMode[]).map(mode=><option value={mode} key={mode}>{sudoLabels[mode]}</option>)}</select></label>
       {form.sudo_mode==='password'&&<label><span>Sudo password</span><input type="password" autoComplete="new-password" value={form.sudo_password} onChange={event=>setForm({...form,sudo_password:event.target.value})} placeholder={editing?'Leave blank to keep stored password':'Required'} required={!editing}/></label>}
-    </div><div className="credential-note"><ShieldCheck size={15}/><span>LLM 调用提权命令时只设置 <code>elevated: true</code>。所有提权操作都会进入 break-glass 审批，密码不会进入模型上下文。通过局域网填写密码时，请先为 Web 接口配置 HTTPS 隧道。</span></div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>Cancel</button><button className="primary" disabled={saving}>{saving?'Saving…':editing?'Update host':'Save host'}</button></div></form>}
-    <div className="host-grid">{hosts.map(host=><article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{host.config_alias || `${host.user}@${host.address}:${host.port}`}</span></div><span className="host-state">REGISTERED</span></div><dl><div><dt>Authentication</dt><dd>{authLabels[host.auth_type||'agent']}{host.auth_type==='password'&&host.has_password?' · encrypted':''}</dd></div><div><dt>Sudo</dt><dd>{sudoLabels[host.sudo_mode||'none']}{host.sudo_mode==='password'&&host.has_sudo_password?' · encrypted':''}</dd></div><div><dt>Host ID</dt><dd>{host.id}</dd></div></dl><div className="card-actions"><button onClick={()=>probe(host)}><Activity size={15}/>Probe</button><button onClick={()=>scan(host)}><KeyRound size={15}/>Trust key</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>Edit</button><button className="danger" onClick={async()=>{if(confirm(`Delete ${host.name}?`)){await api.deleteHost(host.id);await refresh()}}}><Trash2 size={15}/></button></div></article>)}</div>
+    </div><div className="credential-note"><ShieldCheck size={15}/><span>Built-in SSH. Uploaded keys and passwords are encrypted locally; managed sudo remains bound to <code>elevated: true</code> and break-glass approval.</span></div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>Cancel</button><button className="primary" disabled={saving||!!privateKeyError||missingPrivateKey}>{saving?'Saving…':editing?'Update host':'Save host'}</button></div></form>}
+    <div className="host-grid">{hosts.map(host=>{const encryptedCredential=(host.auth_type==='password'&&host.has_password)||(host.auth_type==='key'&&host.has_private_key);return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${host.address}:${host.port}`}</span></div><span className="host-state">REGISTERED</span></div><dl><div><dt>Authentication</dt><dd>{authLabels[host.auth_type||'agent']}{encryptedCredential?' · encrypted':''}</dd></div><div><dt>Sudo</dt><dd>{sudoLabels[host.sudo_mode||'none']}{host.sudo_mode==='password'&&host.has_sudo_password?' · encrypted':''}</dd></div><div><dt>Host ID</dt><dd>{host.id}</dd></div></dl><div className="card-actions"><button onClick={()=>probe(host)}><Activity size={15}/>Probe</button><button onClick={()=>scan(host)}><KeyRound size={15}/>Trust key</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>Edit</button><button className="danger" onClick={async()=>{if(confirm(`Delete ${host.name}?`)){await api.deleteHost(host.id);await refresh()}}}><Trash2 size={15}/></button></div></article>})}</div>
     {!hosts.length && <Empty icon={<Server/>} title="No SSH hosts" text="Register a target, verify its fingerprint, then let OpsPilot inspect it."/>}
   </div>
 }

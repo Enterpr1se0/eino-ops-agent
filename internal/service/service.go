@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -25,16 +27,17 @@ import (
 )
 
 type Service struct {
-	store      *store.Store
-	policy     *policy.Engine
-	transport  sshx.Transport
-	encryptor  *security.Encryptor
-	redactor   *security.Redactor
-	limits     config.Limits
-	dataDir    string
-	workspaces map[string]config.Workspace
-	validators map[string]config.Validator
-	skills     *skills.Registry
+	store                *store.Store
+	policy               *policy.Engine
+	transport            sshx.Transport
+	encryptor            *security.Encryptor
+	redactor             *security.Redactor
+	limits               config.Limits
+	dataDir              string
+	workspaceSandboxPath string
+	workspaces           map[string]config.Workspace
+	validators           map[string]config.Validator
+	skills               *skills.Registry
 
 	globalSem   chan struct{}
 	semMu       sync.Mutex
@@ -56,8 +59,6 @@ type FreshCommandExplainer interface {
 	ReviewFresh(context.Context, domain.CommandReviewInput) (domain.CommandReview, error)
 }
 
-const approvalExplanationTimeout = 8 * time.Second
-
 type taskState struct {
 	task   domain.Task
 	result domain.ExecResult
@@ -78,10 +79,12 @@ func New(st *store.Store, engine *policy.Engine, transport sshx.Transport, encry
 	}
 	result := &Service{
 		store: st, policy: engine, transport: transport, encryptor: encryptor, redactor: redactor, limits: limits,
-		globalSem: make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
+		workspaceSandboxPath: config.Default().WorkspaceSandboxPath,
+		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
 	}
 	if len(runtimeConfig) > 0 {
 		result.dataDir = runtimeConfig[0].DataDir
+		result.workspaceSandboxPath = runtimeConfig[0].WorkspaceSandboxPath
 		result.skills = skills.NewRegistry(filepath.Join(result.dataDir, "skills"))
 		for _, workspace := range runtimeConfig[0].Workspaces {
 			result.workspaces[workspace.ID] = workspace
@@ -255,12 +258,16 @@ func (s *Service) ListModelProviders(ctx context.Context) ([]domain.ModelProvide
 }
 
 func (s *Service) SystemSettings(ctx context.Context) (domain.SystemSettings, error) {
-	return s.store.GetSystemSettings(ctx)
+	settings, err := s.store.GetSystemSettings(ctx)
+	if err != nil {
+		return domain.SystemSettings{}, err
+	}
+	return s.decorateWorkspaceShellSettings(settings), nil
 }
 
 func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSettingsInput, actor string) (domain.SystemSettings, error) {
-	if input.AgentMaxIterations < 5 || input.AgentMaxIterations > 50 {
-		return domain.SystemSettings{}, fmt.Errorf("agent_max_iterations must be between 5 and 50")
+	if input.AgentMaxIterations < domain.MinAgentMaxIterations || input.AgentMaxIterations > domain.MaxAgentMaxIterations {
+		return domain.SystemSettings{}, fmt.Errorf("agent_max_iterations must be between %d and %d", domain.MinAgentMaxIterations, domain.MaxAgentMaxIterations)
 	}
 	current, err := s.store.GetSystemSettings(ctx)
 	if err != nil {
@@ -270,14 +277,43 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 	if input.ApprovalExplanationsEnabled != nil {
 		current.ApprovalExplanationsEnabled = *input.ApprovalExplanationsEnabled
 	}
+	if input.SubagentModelProviderID != nil {
+		providerID := strings.TrimSpace(*input.SubagentModelProviderID)
+		if providerID != "" {
+			if _, err := s.store.GetModelProvider(ctx, providerID); err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return domain.SystemSettings{}, fmt.Errorf("subagent model provider %q not found", providerID)
+				}
+				return domain.SystemSettings{}, err
+			}
+		}
+		current.SubagentModelProviderID = providerID
+	}
+	if input.SubagentTimeoutSeconds != nil {
+		if *input.SubagentTimeoutSeconds < domain.MinSubagentTimeoutSeconds || *input.SubagentTimeoutSeconds > domain.MaxSubagentTimeoutSeconds {
+			return domain.SystemSettings{}, fmt.Errorf("subagent_timeout_seconds must be between %d and %d", domain.MinSubagentTimeoutSeconds, domain.MaxSubagentTimeoutSeconds)
+		}
+		current.SubagentTimeoutSeconds = *input.SubagentTimeoutSeconds
+	}
+	if input.WorkspaceShellMode != nil {
+		mode := strings.ToLower(strings.TrimSpace(*input.WorkspaceShellMode))
+		switch mode {
+		case domain.WorkspaceShellModeSandbox, domain.WorkspaceShellModeHost, domain.WorkspaceShellModeDisabled:
+			current.WorkspaceShellMode = mode
+		default:
+			return domain.SystemSettings{}, fmt.Errorf("workspace_shell_mode must be sandbox, host, or disabled")
+		}
+	}
 	saved, err := s.store.SaveSystemSettings(ctx, current)
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
 	s.audit(ctx, "", "system_settings_updated", actor, map[string]any{
 		"agent_max_iterations": saved.AgentMaxIterations, "approval_explanations_enabled": saved.ApprovalExplanationsEnabled,
+		"subagent_model_provider_id": saved.SubagentModelProviderID, "subagent_timeout_seconds": saved.SubagentTimeoutSeconds,
+		"workspace_shell_mode": saved.WorkspaceShellMode,
 	})
-	return saved, nil
+	return s.decorateWorkspaceShellSettings(saved), nil
 }
 
 func (s *Service) SetCommandExplainer(explainer CommandExplainer) {
@@ -332,6 +368,13 @@ func (s *Service) DeleteModelProvider(ctx context.Context, id, actor string) (bo
 	if err != nil {
 		return false, err
 	}
+	settings, err := s.store.GetSystemSettings(ctx)
+	if err != nil {
+		return false, err
+	}
+	if settings.SubagentModelProviderID == provider.ID {
+		return false, fmt.Errorf("%w: %q is selected for the subagent; choose another provider in system settings before deleting it", ErrModelProviderInUse, provider.Name)
+	}
 	if err := s.store.DeleteModelProvider(ctx, id); err != nil {
 		return false, err
 	}
@@ -342,16 +385,9 @@ func (s *Service) DeleteModelProvider(ctx context.Context, id, actor string) (bo
 }
 
 func (s *Service) AddHost(ctx context.Context, host domain.Host, actor string) (domain.Host, error) {
-	authType := host.AuthType
-	if authType == "" && host.IdentityFile != "" {
-		authType = "key"
-	} else if authType == "" && host.ConfigAlias != "" {
-		authType = "ssh_config"
-	}
 	return s.SaveHost(ctx, domain.HostInput{
 		ID: host.ID, Name: host.Name, Address: host.Address, Port: host.Port, User: host.User,
-		AuthType: authType, ConfigAlias: host.ConfigAlias, IdentityFile: host.IdentityFile,
-		KnownHostsFile: host.KnownHostsFile, ProxyJump: host.ProxyJump, SudoMode: host.SudoMode,
+		AuthType: host.AuthType, KnownHostsFile: host.KnownHostsFile, ProxyJumpHostID: host.ProxyJumpHostID, SudoMode: host.SudoMode,
 	}, actor)
 }
 
@@ -361,11 +397,19 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	input.Address = strings.TrimSpace(input.Address)
 	input.User = strings.TrimSpace(input.User)
 	input.AuthType = strings.TrimSpace(input.AuthType)
-	input.ConfigAlias = strings.TrimSpace(input.ConfigAlias)
-	input.IdentityFile = strings.TrimSpace(input.IdentityFile)
 	input.KnownHostsFile = strings.TrimSpace(input.KnownHostsFile)
-	input.ProxyJump = strings.TrimSpace(input.ProxyJump)
+	input.ProxyJumpHostID = strings.TrimSpace(input.ProxyJumpHostID)
 	input.SudoMode = strings.TrimSpace(input.SudoMode)
+	var existing domain.Host
+	hasExisting := false
+	if input.ID != "" {
+		var err error
+		existing, err = s.store.GetHost(ctx, input.ID)
+		if err != nil {
+			return domain.Host{}, err
+		}
+		hasExisting = true
+	}
 	if input.Name == "" {
 		return domain.Host{}, fmt.Errorf("host name is required")
 	}
@@ -381,17 +425,14 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	if input.SudoMode == "" {
 		input.SudoMode = "none"
 	}
-	if input.ConfigAlias == "" && (input.Address == "" || input.User == "") {
-		return domain.Host{}, fmt.Errorf("address and user are required without config_alias")
+	if input.Address == "" || input.User == "" {
+		return domain.Host{}, fmt.Errorf("address and user are required")
 	}
-	if input.AuthType == "ssh_config" && input.ConfigAlias == "" {
-		return domain.Host{}, fmt.Errorf("config_alias is required for ssh_config authentication")
-	}
-	if input.AuthType == "key" && input.IdentityFile == "" {
-		return domain.Host{}, fmt.Errorf("identity_file is required for key authentication")
+	if input.AuthType == "key" && input.PrivateKey == "" && (!hasExisting || existing.PrivateKeyCipher == "") {
+		return domain.Host{}, fmt.Errorf("private_key upload is required for key authentication")
 	}
 	switch input.AuthType {
-	case "agent", "key", "password", "ssh_config":
+	case "agent", "key", "password":
 	default:
 		return domain.Host{}, fmt.Errorf("invalid SSH authentication type %q", input.AuthType)
 	}
@@ -407,22 +448,31 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 		return domain.Host{}, fmt.Errorf("password is too long")
 	}
 	if input.AuthType != "key" {
-		input.IdentityFile = ""
+		input.PrivateKey = ""
 	}
 
 	host := domain.Host{
 		ID: input.ID, Name: input.Name, Address: input.Address, Port: input.Port, User: input.User,
-		AuthType: input.AuthType, ConfigAlias: input.ConfigAlias, IdentityFile: input.IdentityFile,
-		KnownHostsFile: input.KnownHostsFile, ProxyJump: input.ProxyJump, SudoMode: input.SudoMode,
+		AuthType: input.AuthType, KnownHostsFile: input.KnownHostsFile, ProxyJumpHostID: input.ProxyJumpHostID, SudoMode: input.SudoMode,
 	}
-	if input.ID != "" {
-		existing, err := s.store.GetHost(ctx, input.ID)
-		if err != nil {
-			return domain.Host{}, err
-		}
+	if hasExisting {
 		host.CreatedAt = existing.CreatedAt
 		host.PasswordCipher = existing.PasswordCipher
 		host.SudoCipher = existing.SudoCipher
+		host.PrivateKeyCipher = existing.PrivateKeyCipher
+	}
+	if input.AuthType != "key" {
+		host.PrivateKeyCipher = ""
+	} else if input.PrivateKey != "" {
+		privateKey := []byte(input.PrivateKey)
+		if err := sshx.ValidatePrivateKey(privateKey); err != nil {
+			return domain.Host{}, fmt.Errorf("invalid SSH private key upload: %w", err)
+		}
+		cipher, err := s.encryptor.Encrypt(privateKey)
+		if err != nil {
+			return domain.Host{}, fmt.Errorf("encrypt SSH private key: %w", err)
+		}
+		host.PrivateKeyCipher = cipher
 	}
 	if input.AuthType != "password" {
 		host.PasswordCipher = ""
@@ -448,13 +498,22 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	if input.SudoMode == "password" && host.SudoCipher == "" {
 		return domain.Host{}, fmt.Errorf("sudo_password is required for password sudo mode")
 	}
+	if input.ProxyJumpHostID != "" {
+		if input.ProxyJumpHostID == input.ID && input.ID != "" {
+			return domain.Host{}, fmt.Errorf("a host cannot use itself as ProxyJump")
+		}
+		_, err := s.store.GetHost(ctx, input.ProxyJumpHostID)
+		if err != nil {
+			return domain.Host{}, fmt.Errorf("load ProxyJump host %q: %w", input.ProxyJumpHostID, err)
+		}
+	}
 
 	created, err := s.store.UpsertHost(ctx, host)
 	if err != nil {
 		return domain.Host{}, err
 	}
 	s.audit(ctx, "", "host_saved", actor, map[string]any{
-		"host_id": created.ID, "name": created.Name, "auth_type": created.AuthType, "sudo_mode": created.SudoMode,
+		"host_id": created.ID, "name": created.Name, "auth_type": created.AuthType, "has_private_key": created.HasPrivateKey, "sudo_mode": created.SudoMode,
 	})
 	return created, nil
 }
@@ -480,6 +539,15 @@ func (s *Service) ListHostCapabilities(ctx context.Context) ([]domain.HostCapabi
 }
 
 func (s *Service) DeleteHost(ctx context.Context, id, actor string) error {
+	hosts, err := s.store.ListHosts(ctx)
+	if err != nil {
+		return err
+	}
+	for _, host := range hosts {
+		if host.ProxyJumpHostID == id {
+			return fmt.Errorf("host %q is still used as ProxyJump by %q", id, host.Name)
+		}
+	}
 	if err := s.store.DeleteHost(ctx, id); err != nil {
 		return err
 	}
@@ -492,11 +560,15 @@ func (s *Service) ProbeHost(ctx context.Context, id string) (sshx.HostInfo, erro
 	if err != nil {
 		return sshx.HostInfo{}, err
 	}
-	host, err = s.hydrateHostSecrets(host, false)
+	connection, _, err := s.resolveSSHConnection(ctx, host)
 	if err != nil {
 		return sshx.HostInfo{}, err
 	}
-	return s.transport.Probe(ctx, host)
+	connection, err = s.hydrateSSHConnection(connection, false)
+	if err != nil {
+		return sshx.HostInfo{}, err
+	}
+	return s.transport.Probe(ctx, connection)
 }
 
 func (s *Service) ScanHostKey(ctx context.Context, id string) (sshx.HostKey, error) {
@@ -504,7 +576,15 @@ func (s *Service) ScanHostKey(ctx context.Context, id string) (sshx.HostKey, err
 	if err != nil {
 		return sshx.HostKey{}, err
 	}
-	return s.transport.ScanHostKey(ctx, host)
+	connection, _, err := s.resolveSSHConnection(ctx, host)
+	if err != nil {
+		return sshx.HostKey{}, err
+	}
+	connection, err = s.hydrateSSHConnection(connection, false)
+	if err != nil {
+		return sshx.HostKey{}, err
+	}
+	return s.transport.ScanHostKey(ctx, connection)
 }
 
 func (s *Service) TrustHostKey(ctx context.Context, id, fingerprint, actor string) (sshx.HostKey, error) {
@@ -512,7 +592,15 @@ func (s *Service) TrustHostKey(ctx context.Context, id, fingerprint, actor strin
 	if err != nil {
 		return sshx.HostKey{}, err
 	}
-	key, err := s.transport.TrustHostKey(ctx, host, fingerprint)
+	connection, _, err := s.resolveSSHConnection(ctx, host)
+	if err != nil {
+		return sshx.HostKey{}, err
+	}
+	connection, err = s.hydrateSSHConnection(connection, false)
+	if err != nil {
+		return sshx.HostKey{}, err
+	}
+	key, err := s.transport.TrustHostKey(ctx, connection, fingerprint)
 	if err == nil {
 		s.audit(ctx, "", "host_key_trusted", actor, map[string]any{"host_id": id, "fingerprint": key.Fingerprint})
 	}
@@ -532,6 +620,17 @@ func (s *Service) Evaluate(ctx context.Context, req domain.ExecRequest) (domain.
 		if _, err := s.prepareWorkspaceUpload(req); err != nil {
 			return domain.Decision{}, err
 		}
+	}
+	if isWorkspaceMode(req.Mode) {
+		if req.SSHConnectionDigest != "" {
+			return domain.Decision{}, fmt.Errorf("SSH connection binding is invalid for local Workspace operations")
+		}
+	} else {
+		_, digest, err := s.resolveSSHConnection(ctx, host)
+		if err != nil {
+			return domain.Decision{}, err
+		}
+		bindSSHRequest(&req, digest)
 	}
 	if err := validateExecutionRequest(host, req); err != nil {
 		return domain.Decision{}, err
@@ -565,6 +664,17 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
+	if isWorkspaceMode(req.Mode) {
+		if req.SSHConnectionDigest != "" {
+			return domain.ExecResult{}, fmt.Errorf("SSH connection binding is invalid for local Workspace operations")
+		}
+	} else {
+		_, digest, connectionErr := s.resolveSSHConnection(ctx, host)
+		if connectionErr != nil {
+			return domain.ExecResult{}, connectionErr
+		}
+		bindSSHRequest(&req, digest)
+	}
 	if err := validateExecutionRequest(host, req); err != nil {
 		return domain.ExecResult{}, err
 	}
@@ -578,7 +688,7 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	// A session grant can only remove repeated Change-level prompts. Critical
 	// requests always require a fresh break-glass challenge, even if policy is
 	// tightened after an earlier grant was created for the same request shape.
-	if decision.Action == domain.ActionApprove && decision.Risk == domain.RiskChange && sessionID != "" {
+	if decision.Action == domain.ActionApprove && decision.Risk == domain.RiskChange && sessionID != "" && !isHostWorkspaceShell(req) {
 		fingerprint, fingerprintErr := approvalFingerprint(req)
 		if fingerprintErr != nil {
 			return domain.ExecResult{}, fingerprintErr
@@ -679,7 +789,7 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		s.audit(ctx, run.ID, "approval_requested", actor, map[string]any{"approval_id": approval.ID, "risk": decision.Risk, "hits": decision.RuleHits})
 		logger.With("component", "approval").InfoContext(ctx, "execution awaiting approval", "approval_id", approval.ID, "risk", decision.Risk, "expires_at", approval.ExpiresAt)
 		if explanationInput != nil && explainer != nil {
-			s.startPendingApprovalExplanation(ctx, approval, *explanationInput, explainer)
+			s.startPendingApprovalExplanation(ctx, approval, *explanationInput, explainer, settings.SubagentTimeoutSeconds)
 		}
 		return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: decision.Risk, ApprovalID: approval.ID, Challenge: challenge, PolicyHits: decision.RuleHits}, nil
 	case domain.ActionAllow:
@@ -699,8 +809,9 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 // startPendingApprovalExplanation keeps model latency outside the human
 // approval critical path. The deterministic policy remains the sole owner of
 // risk and approval requirements; this Agent only adds educational context.
-func (s *Service) startPendingApprovalExplanation(parent context.Context, approval domain.Approval, input domain.CommandReviewInput, explainer CommandExplainer) {
+func (s *Service) startPendingApprovalExplanation(parent context.Context, approval domain.Approval, input domain.CommandReviewInput, explainer CommandExplainer, timeoutSeconds int) {
 	baseCtx := context.WithoutCancel(parent)
+	timeoutSeconds = effectiveSubagentTimeoutSeconds(timeoutSeconds)
 	logger := observability.FromContext(baseCtx).With(
 		"component", "approval", "approval_id", approval.ID, "run_id", approval.RunID,
 	)
@@ -715,10 +826,10 @@ func (s *Service) startPendingApprovalExplanation(parent context.Context, approv
 
 		started := time.Now()
 		logger.InfoContext(baseCtx, "approval explanation started", "risk", approval.Risk)
-		explanationCtx, cancelExplanation := context.WithTimeout(baseCtx, approvalExplanationTimeout)
+		explanationCtx, cancelExplanation := context.WithTimeout(baseCtx, time.Duration(timeoutSeconds)*time.Second)
 		review, reviewErr := explainer.Review(explanationCtx, input)
 		cancelExplanation()
-		review = s.normalizeCommandReview(review, reviewErr, input.Policy.Risk)
+		review = s.normalizeCommandReview(review, reviewErr, input.Policy.Risk, timeoutSeconds)
 		reviewJSON, err := json.Marshal(review)
 		if err != nil {
 			logger.ErrorContext(baseCtx, "encode approval explanation failed", "error", err)
@@ -763,11 +874,16 @@ func (s *Service) startPendingApprovalExplanation(parent context.Context, approv
 	}()
 }
 
-func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr error, deterministicRisk domain.RiskLevel) domain.CommandReview {
+func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr error, deterministicRisk domain.RiskLevel, timeoutSeconds int) domain.CommandReview {
 	if reviewErr != nil {
+		model := review.Model
+		message := reviewErr.Error()
+		if errors.Is(reviewErr, context.DeadlineExceeded) || strings.Contains(strings.ToLower(message), "context deadline exceeded") {
+			message = fmt.Sprintf("command explanation model did not respond within %d seconds", effectiveSubagentTimeoutSeconds(timeoutSeconds))
+		}
 		review = domain.CommandReview{
-			Status: "unavailable", DeterministicRisk: deterministicRisk,
-			Errors: []string{reviewErr.Error()}, ReviewedAt: time.Now().UTC(),
+			Status: "unavailable", Model: model, DeterministicRisk: deterministicRisk,
+			Errors: []string{message}, ReviewedAt: time.Now().UTC(),
 		}
 	}
 	if review.Status != "completed" && review.Status != "degraded" && review.Status != "unavailable" {
@@ -787,6 +903,13 @@ func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr 
 		}
 	}
 	return review
+}
+
+func effectiveSubagentTimeoutSeconds(timeoutSeconds int) int {
+	if timeoutSeconds < domain.MinSubagentTimeoutSeconds || timeoutSeconds > domain.MaxSubagentTimeoutSeconds {
+		return domain.DefaultSubagentTimeoutSeconds
+	}
+	return timeoutSeconds
 }
 
 func (s *Service) Approve(ctx context.Context, approvalID, challenge, reason, actor string) (domain.ExecResult, error) {
@@ -841,6 +964,9 @@ func (s *Service) ApproveWithScope(ctx context.Context, approvalID, challenge, r
 	_, digest, err := canonicalRequest(req)
 	if err != nil || digest != approval.RequestDigest {
 		return domain.ExecResult{}, fmt.Errorf("approved request digest no longer matches")
+	}
+	if scope == "session" && isHostWorkspaceShell(req) {
+		return domain.ExecResult{}, fmt.Errorf("host workspace shell requires a fresh one-time approval for every invocation")
 	}
 	run, err := s.store.GetRun(ctx, approval.RunID)
 	if err != nil {
@@ -933,7 +1059,9 @@ func (s *Service) awaitApproval(ctx context.Context, initial domain.ExecResult) 
 		switch approval.Status {
 		case "rejected", "expired":
 			logger.InfoContext(ctx, "agent tool approval wait finished", "status", approval.Status)
-			return execResultFromRun(run, approval.ID, approval.Reason), nil
+			result := execResultFromRun(run, approval.ID, approval.Reason)
+			notifyApproval(ctx, result)
+			return result, nil
 		case "approved":
 			if run.Status != "created" && run.Status != "approval_required" && run.Status != "running" {
 				logger.InfoContext(ctx, "agent tool approval wait finished", "status", run.Status)
@@ -994,7 +1122,21 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		return domain.ExecResult{}, err
 	}
 	defer release()
-	host, err = s.hydrateHostSecrets(host, req.Elevated)
+	var connection sshx.ConnectionSpec
+	if !isWorkspaceMode(req.Mode) {
+		latestHost, connectionErr := s.store.GetHost(ctx, host.ID)
+		if connectionErr == nil {
+			var currentDigest string
+			connection, currentDigest, connectionErr = s.resolveSSHConnection(ctx, latestHost)
+			if connectionErr == nil {
+				connectionErr = verifySSHRequestBinding(req, currentDigest)
+			}
+		}
+		if connectionErr == nil {
+			connection, connectionErr = s.hydrateSSHConnection(connection, req.Elevated)
+		}
+		err = connectionErr
+	}
 	if err != nil {
 		run.Status = "failed"
 		run.Error = err.Error()
@@ -1010,9 +1152,9 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	if isWorkspaceMode(req.Mode) {
 		raw, execErr = s.executeWorkspace(ctx, req)
 	} else if streaming, ok := s.transport.(sshx.StreamingTransport); ok && stream != nil {
-		raw, execErr = streaming.ExecStream(ctx, host, req, stream)
+		raw, execErr = streaming.ExecStream(ctx, connection, req, stream)
 	} else {
-		raw, execErr = s.transport.Exec(ctx, host, req)
+		raw, execErr = s.transport.Exec(ctx, connection, req)
 	}
 	run.ExitCode = raw.ExitCode
 	run.Truncated = raw.Truncated
@@ -1056,6 +1198,13 @@ func (s *Service) hydrateHostSecrets(host domain.Host, includeSudo bool) (domain
 		}
 		host.Password = string(plain)
 	}
+	if host.AuthType == "key" && host.PrivateKeyCipher != "" {
+		plain, err := s.encryptor.Decrypt(host.PrivateKeyCipher)
+		if err != nil {
+			return domain.Host{}, fmt.Errorf("decrypt SSH private key: %w", err)
+		}
+		host.PrivateKey = plain
+	}
 	if includeSudo && host.SudoMode == "password" {
 		plain, err := s.encryptor.Decrypt(host.SudoCipher)
 		if err != nil {
@@ -1093,6 +1242,15 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 }
 
 func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redactor *security.Redactor) error {
+	if req.Mode == domain.ExecWorkspaceShell {
+		switch req.WorkspaceShellBackend {
+		case domain.WorkspaceShellModeSandbox, domain.WorkspaceShellModeHost:
+		default:
+			return fmt.Errorf("workspace_shell_backend must be sandbox or host")
+		}
+	} else if req.WorkspaceShellBackend != "" {
+		return fmt.Errorf("workspace_shell_backend is only valid for workspace shell requests")
+	}
 	if len(req.Program) > 512 || len(req.Args) > 128 || len(req.Env) > 64 || len(req.Script) > 1<<20 {
 		return fmt.Errorf("execution request exceeds program, argument, environment, or 1 MiB script limits")
 	}
@@ -1101,10 +1259,16 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 			return fmt.Errorf("invalid command argument")
 		}
 	}
-	if req.Cwd != "" && (!filepath.IsAbs(req.Cwd) || filepath.Clean(req.Cwd) != req.Cwd || strings.ContainsAny(req.Cwd, "\x00\r\n")) {
-		return fmt.Errorf("cwd must be a clean absolute remote path")
+	if req.Cwd != "" {
+		if req.Mode == domain.ExecWorkspaceShell {
+			if filepath.IsAbs(req.Cwd) || filepath.Clean(req.Cwd) != req.Cwd || strings.ContainsAny(req.Cwd, "\x00\r\n") {
+				return fmt.Errorf("workspace shell cwd must be a clean relative path")
+			}
+		} else if !filepath.IsAbs(req.Cwd) || filepath.Clean(req.Cwd) != req.Cwd || strings.ContainsAny(req.Cwd, "\x00\r\n") {
+			return fmt.Errorf("cwd must be a clean absolute remote path")
+		}
 	}
-	if req.RemotePath != "" && (!filepath.IsAbs(req.RemotePath) || filepath.Clean(req.RemotePath) != req.RemotePath || strings.ContainsAny(req.RemotePath, "\x00\r\n")) {
+	if req.RemotePath != "" && (!path.IsAbs(req.RemotePath) || path.Clean(req.RemotePath) != req.RemotePath || strings.ContainsAny(req.RemotePath, "\x00\r\n")) {
 		return fmt.Errorf("remote_path must be a clean absolute path")
 	}
 	for key, value := range req.Env {
@@ -1153,6 +1317,10 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 	return nil
 }
 
+func isHostWorkspaceShell(req domain.ExecRequest) bool {
+	return req.Mode == domain.ExecWorkspaceShell && req.WorkspaceShellBackend == domain.WorkspaceShellModeHost
+}
+
 func packageMutation(args []string) bool {
 	for _, argument := range args {
 		switch strings.ToLower(argument) {
@@ -1189,6 +1357,7 @@ func (s *Service) StartTask(ctx context.Context, req domain.ExecRequest, actor s
 			result, submitErr := s.Submit(ctx, req, actor)
 			task.RunID = result.RunID
 			task.Status = result.Status
+			task.OperatorInstruction = result.OperatorInstruction
 			task.EndedAt = time.Now().UTC()
 			state := &taskState{task: task, result: result}
 			if submitErr != nil {
@@ -1413,7 +1582,8 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 
 	logger.InfoContext(ctx, "approval explanation retry started", "run_id", run.ID, "risk", approval.Risk)
 	started := time.Now()
-	explanationCtx, cancel := context.WithTimeout(ctx, approvalExplanationTimeout)
+	timeoutSeconds := effectiveSubagentTimeoutSeconds(settings.SubagentTimeoutSeconds)
+	explanationCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	var review domain.CommandReview
 	var reviewErr error
 	if freshExplainer, ok := explainer.(FreshCommandExplainer); ok {
@@ -1422,7 +1592,7 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 		review, reviewErr = explainer.Review(explanationCtx, input)
 	}
 	cancel()
-	review = s.normalizeCommandReview(review, reviewErr, approval.Risk)
+	review = s.normalizeCommandReview(review, reviewErr, approval.Risk, timeoutSeconds)
 	reviewJSON, err := json.Marshal(review)
 	if err != nil {
 		return domain.Approval{}, err

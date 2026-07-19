@@ -14,20 +14,21 @@ import (
 )
 
 type Config struct {
-	ListenAddress       string        `yaml:"listen_address"`
-	DataDir             string        `yaml:"data_dir"`
-	DatabasePath        string        `yaml:"database_path"`
-	Logging             Logging       `yaml:"logging"`
-	MasterKey           string        `yaml:"-"`
-	PolicyPath          string        `yaml:"policy_path"`
-	OpenSSH             OpenSSH       `yaml:"openssh"`
-	Model               Model         `yaml:"model"`
-	Limits              Limits        `yaml:"limits"`
-	AuditRetention      time.Duration `yaml:"-"`
-	WebAuth             WebAuth       `yaml:"web_auth"`
-	DefaultWorkspaceDir string        `yaml:"default_workspace_dir"`
-	Workspaces          []Workspace   `yaml:"workspaces"`
-	Validators          []Validator   `yaml:"validators"`
+	ListenAddress        string        `yaml:"listen_address"`
+	DataDir              string        `yaml:"data_dir"`
+	DatabasePath         string        `yaml:"database_path"`
+	Logging              Logging       `yaml:"logging"`
+	MasterKey            string        `yaml:"-"`
+	PolicyPath           string        `yaml:"policy_path"`
+	SSH                  SSH           `yaml:"ssh"`
+	Model                Model         `yaml:"model"`
+	Limits               Limits        `yaml:"limits"`
+	AuditRetention       time.Duration `yaml:"-"`
+	WebAuth              WebAuth       `yaml:"web_auth"`
+	DefaultWorkspaceDir  string        `yaml:"default_workspace_dir"`
+	WorkspaceSandboxPath string        `yaml:"workspace_sandbox_path"`
+	Workspaces           []Workspace   `yaml:"workspaces"`
+	Validators           []Validator   `yaml:"validators"`
 }
 
 type WebAuth struct {
@@ -62,11 +63,7 @@ type Logging struct {
 	RecentLimit int    `yaml:"recent_limit"`
 }
 
-type OpenSSH struct {
-	SSHPath           string `yaml:"ssh_path"`
-	SSHKeyscanPath    string `yaml:"ssh_keyscan_path"`
-	SSHKeygenPath     string `yaml:"ssh_keygen_path"`
-	SFTPPath          string `yaml:"sftp_path"`
+type SSH struct {
 	DefaultKnownHosts string `yaml:"default_known_hosts"`
 }
 
@@ -95,11 +92,7 @@ func Default() Config {
 			Level: "info", Format: "text", File: ".data/ops-agent.log",
 			MaxSizeMB: 20, MaxBackups: 3, RecentLimit: 2000,
 		},
-		OpenSSH: OpenSSH{
-			SSHPath:           "ssh",
-			SSHKeyscanPath:    "ssh-keyscan",
-			SSHKeygenPath:     "ssh-keygen",
-			SFTPPath:          "sftp",
+		SSH: SSH{
 			DefaultKnownHosts: ".data/known_hosts",
 		},
 		Model: Model{Name: "gpt-4o-mini"},
@@ -111,9 +104,10 @@ func Default() Config {
 			GlobalConcurrency:  8,
 			HostConcurrency:    2,
 		},
-		AuditRetention:      30 * 24 * time.Hour,
-		WebAuth:             WebAuth{SessionTTL: 12 * time.Hour},
-		DefaultWorkspaceDir: "workspace",
+		AuditRetention:       30 * 24 * time.Hour,
+		WebAuth:              WebAuth{SessionTTL: 12 * time.Hour},
+		DefaultWorkspaceDir:  "workspace",
+		WorkspaceSandboxPath: "bwrap",
 	}
 }
 
@@ -121,7 +115,7 @@ func Load(path string) (Config, error) {
 	cfg := Default()
 	defaultDataDir := cfg.DataDir
 	defaultDatabasePath := cfg.DatabasePath
-	defaultKnownHosts := cfg.OpenSSH.DefaultKnownHosts
+	defaultKnownHosts := cfg.SSH.DefaultKnownHosts
 	defaultLogFile := cfg.Logging.File
 	if path != "" {
 		data, err := os.ReadFile(path)
@@ -149,8 +143,8 @@ func Load(path string) (Config, error) {
 	if cfg.DatabasePath == "" || (cfg.DataDir != defaultDataDir && cfg.DatabasePath == defaultDatabasePath && os.Getenv("OPS_AGENT_DATABASE") == "") {
 		cfg.DatabasePath = filepath.Join(cfg.DataDir, "ops-agent.db")
 	}
-	if cfg.OpenSSH.DefaultKnownHosts == "" || (cfg.DataDir != defaultDataDir && cfg.OpenSSH.DefaultKnownHosts == defaultKnownHosts) {
-		cfg.OpenSSH.DefaultKnownHosts = filepath.Join(cfg.DataDir, "known_hosts")
+	if cfg.SSH.DefaultKnownHosts == "" || (cfg.DataDir != defaultDataDir && cfg.SSH.DefaultKnownHosts == defaultKnownHosts) {
+		cfg.SSH.DefaultKnownHosts = filepath.Join(cfg.DataDir, "known_hosts")
 	}
 	if cfg.Logging.File == "" || (cfg.DataDir != defaultDataDir && cfg.Logging.File == defaultLogFile && os.Getenv("OPS_AGENT_LOG_FILE") == "") {
 		cfg.Logging.File = filepath.Join(cfg.DataDir, "ops-agent.log")
@@ -233,6 +227,7 @@ func applyEnv(cfg *Config) {
 	setString(&cfg.WebAuth.BootstrapPassword, "OPS_AGENT_ADMIN_PASSWORD")
 	setBool(&cfg.WebAuth.SecureCookies, "OPS_AGENT_SECURE_COOKIES")
 	setString(&cfg.DefaultWorkspaceDir, "OPS_AGENT_DEFAULT_WORKSPACE")
+	setString(&cfg.WorkspaceSandboxPath, "OPS_AGENT_WORKSPACE_SANDBOX")
 	setString(&cfg.Model.APIKey, "OPENAI_API_KEY")
 	setString(&cfg.Model.BaseURL, "OPENAI_BASE_URL")
 	setString(&cfg.Model.Name, "OPENAI_MODEL")

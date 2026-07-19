@@ -43,7 +43,16 @@ VALUES(1,20,1,0,'2026-01-01T00:00:00Z')`); err != nil {
 	if settings.ApprovalExplanationsEnabled {
 		t.Fatalf("legacy disabled explanation was not preserved: %#v", settings)
 	}
+	if settings.WorkspaceShellMode != domain.WorkspaceShellModeSandbox {
+		t.Fatalf("legacy settings did not receive the fail-safe sandbox mode: %#v", settings)
+	}
+	if settings.SubagentTimeoutSeconds != domain.DefaultSubagentTimeoutSeconds || settings.SubagentModelProviderID != "" {
+		t.Fatalf("legacy settings did not receive subagent defaults: %#v", settings)
+	}
 	settings.ApprovalExplanationsEnabled = true
+	settings.SubagentModelProviderID = "model_fixture"
+	settings.SubagentTimeoutSeconds = 45
+	settings.WorkspaceShellMode = domain.WorkspaceShellModeDisabled
 	if _, err := st.SaveSystemSettings(ctx, settings); err != nil {
 		t.Fatal(err)
 	}
@@ -60,9 +69,8 @@ VALUES(1,20,1,0,'2026-01-01T00:00:00Z')`); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !settings.ApprovalExplanationsEnabled || settings.AgentMaxIterations != domain.DefaultAgentMaxIterations {
-		// The stored iteration value is 20, which is also the current default;
-		// checking both guards the legacy row and the new toggle on reopen.
+	if !settings.ApprovalExplanationsEnabled || settings.AgentMaxIterations != 20 || settings.SubagentModelProviderID != "model_fixture" || settings.SubagentTimeoutSeconds != 45 || settings.WorkspaceShellMode != domain.WorkspaceShellModeDisabled {
+		// Existing installations retain their explicitly stored iteration value.
 		t.Fatalf("migrated explanation setting did not persist: %#v", settings)
 	}
 }

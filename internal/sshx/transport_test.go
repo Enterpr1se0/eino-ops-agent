@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
 )
 
@@ -40,73 +39,6 @@ func TestManagedSudoPasswordUsesStdin(t *testing.T) {
 	data, _ := io.ReadAll(stdin)
 	if string(data) != "sudo-secret\necho ok\n" {
 		t.Fatalf("unexpected managed sudo stdin %q", data)
-	}
-}
-
-func TestPasswordAuthenticationUsesAskPassWithoutSecretInProcessMetadata(t *testing.T) {
-	host := domain.Host{AuthType: "password", Password: "ssh secret with spaces"}
-	cmd := exec.Command("/bin/sh", "-c", `"$SSH_ASKPASS"`)
-	cleanup, err := preparePasswordAuthentication(cmd, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	for _, value := range append(cmd.Args, cmd.Env...) {
-		if strings.Contains(value, host.Password) {
-			t.Fatalf("SSH password leaked into argv or environment: %q", value)
-		}
-	}
-	output, err := cmd.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(output) != host.Password {
-		t.Fatalf("askpass returned %q", output)
-	}
-}
-
-func TestPasswordSSHArgsDisableBatchModeWithoutLeakingPassword(t *testing.T) {
-	transport := NewOpenSSHTransport(config.OpenSSH{}, config.Limits{})
-	host := domain.Host{Address: "192.0.2.1", Port: 22, User: "ops", AuthType: "password", Password: "secret"}
-	args, err := transport.sshArgs(host, "id")
-	if err != nil {
-		t.Fatal(err)
-	}
-	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "BatchMode=no") || !strings.Contains(joined, "NumberOfPasswordPrompts=1") {
-		t.Fatalf("password authentication options missing: %s", joined)
-	}
-	if strings.Contains(joined, host.Password) {
-		t.Fatal("SSH password leaked into arguments")
-	}
-}
-
-func TestPasswordSFTPArgsOverrideImplicitBatchModeBeforeBatchFile(t *testing.T) {
-	transport := NewOpenSSHTransport(config.OpenSSH{}, config.Limits{})
-	host := domain.Host{Address: "192.0.2.1", Port: 22, User: "ops", AuthType: "password", Password: "secret"}
-	args, err := transport.sftpArgs(host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	batchOverride := -1
-	batchFile := -1
-	for index := range args {
-		if args[index] == "BatchMode=no" {
-			batchOverride = index
-		}
-		if args[index] == "-b" {
-			batchFile = index
-		}
-	}
-	if batchOverride < 0 || batchFile < 0 || batchOverride > batchFile {
-		t.Fatalf("password BatchMode override must precede -b because sftp injects BatchMode=yes: %q", args)
-	}
-	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "PreferredAuthentications=password,keyboard-interactive") || !strings.Contains(joined, "PubkeyAuthentication=no") {
-		t.Fatalf("password authentication constraints missing: %s", joined)
-	}
-	if strings.Contains(joined, host.Password) {
-		t.Fatal("SSH password leaked into SFTP arguments")
 	}
 }
 
@@ -145,12 +77,5 @@ func TestValidateHostRejectsOptionInjection(t *testing.T) {
 	err := validateHost(domain.Host{Address: "-oProxyCommand=evil", User: "root", Port: 22})
 	if err == nil {
 		t.Fatal("expected host validation error")
-	}
-}
-
-func TestSFTPQuote(t *testing.T) {
-	quoted := sftpQuote(`/tmp/a "quoted" file`)
-	if quoted != `"/tmp/a \"quoted\" file"` {
-		t.Fatalf("unexpected SFTP quoting: %q", quoted)
 	}
 }

@@ -17,7 +17,10 @@ import (
 	"eino-ops-agent/internal/domain"
 )
 
-var ErrModelProviderUpstream = errors.New("model provider request failed")
+var (
+	ErrModelProviderUpstream = errors.New("model provider request failed")
+	ErrModelProviderInUse    = errors.New("model provider is in use")
+)
 
 const maxModelCatalogBytes = 2 << 20
 

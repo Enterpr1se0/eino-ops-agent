@@ -24,7 +24,7 @@ Explain the exact normalized request in clear Simplified Chinese. Do not invent 
 Return exactly one JSON object with keys: summary, mechanism, effects, risks, beginner_tips, rollback_guide.
 effects, risks, beginner_tips must be JSON string arrays. Keep the response concise and practical.`
 
-const subagentRequestTimeout = 8 * time.Second
+const subagentTransportTimeoutGrace = 5 * time.Second
 
 type ExplanationCoordinator struct {
 	runner *adk.Runner
@@ -32,17 +32,20 @@ type ExplanationCoordinator struct {
 	cache  sync.Map
 }
 
-func buildExplanationCoordinator(ctx context.Context, cfg config.Model) (*ExplanationCoordinator, error) {
-	explainer, err := buildReadOnlySubagent(ctx, cfg, "command_explainer", "Explains an exact Linux operation and its risks for a beginner.", explainerInstruction)
+func buildExplanationCoordinator(ctx context.Context, cfg config.Model, requestTimeout time.Duration) (*ExplanationCoordinator, error) {
+	explainer, err := buildReadOnlySubagent(ctx, cfg, requestTimeout, "command_explainer", "Explains an exact Linux operation and its risks for a beginner.", explainerInstruction)
 	if err != nil {
 		return nil, fmt.Errorf("build command explainer subagent: %w", err)
 	}
 	return &ExplanationCoordinator{runner: explainer, model: cfg.Name}, nil
 }
 
-func buildReadOnlySubagent(ctx context.Context, cfg config.Model, name, description, instruction string) (*adk.Runner, error) {
+func buildReadOnlySubagent(ctx context.Context, cfg config.Model, requestTimeout time.Duration, name, description, instruction string) (*adk.Runner, error) {
+	if requestTimeout <= 0 {
+		requestTimeout = time.Duration(domain.DefaultSubagentTimeoutSeconds) * time.Second
+	}
 	chatModel, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, Timeout: subagentRequestTimeout,
+		APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, Timeout: requestTimeout + subagentTransportTimeoutGrace,
 	})
 	if err != nil {
 		return nil, err
@@ -67,25 +70,27 @@ func (c *ExplanationCoordinator) ReviewFresh(ctx context.Context, input domain.C
 }
 
 func (c *ExplanationCoordinator) review(ctx context.Context, input domain.CommandReviewInput, fresh bool) (domain.CommandReview, error) {
-	if c == nil || c.runner == nil {
-		return domain.CommandReview{}, fmt.Errorf("command explainer is unavailable")
+	review := domain.CommandReview{
+		DeterministicRisk: input.Policy.Risk, ReviewedAt: time.Now().UTC(),
 	}
+	if c == nil || c.runner == nil {
+		return review, fmt.Errorf("command explainer is unavailable")
+	}
+	review.Model = c.model
 	cacheKey := fmt.Sprintf("%s:%s:%s:%s:%s", input.RequestDigest, input.Policy.Risk, input.Policy.Action, input.Host.SudoMode, input.PlanStep)
 	if cached, ok := c.cache.Load(cacheKey); ok && !fresh {
 		return cached.(domain.CommandReview), nil
 	}
 	prompt, err := json.Marshal(maskExplanationInput(input))
 	if err != nil {
-		return domain.CommandReview{}, err
+		return review, err
 	}
 	text, err := runReadOnlySubagent(ctx, c.runner, string(prompt))
 	if err != nil {
-		return domain.CommandReview{}, err
+		return review, err
 	}
 
-	review := domain.CommandReview{
-		Status: "completed", Model: c.model, DeterministicRisk: input.Policy.Risk, ReviewedAt: time.Now().UTC(),
-	}
+	review.Status = "completed"
 	var value domain.CommandExplanation
 	if err := decodeJSONObject(text, &value); err != nil {
 		review.Status = "degraded"

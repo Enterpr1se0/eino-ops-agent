@@ -23,6 +23,7 @@ type ToolDescriptor struct {
 	Description string          `json:"description"`
 	Category    string          `json:"category"`
 	Guard       string          `json:"guard"`
+	Enabled     bool            `json:"enabled"`
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
@@ -35,6 +36,7 @@ type ToolCatalog struct {
 	Model         string           `json:"model,omitempty"`
 	LoadedAt      string           `json:"loaded_at,omitempty"`
 	Count         int              `json:"count"`
+	Total         int              `json:"total"`
 	Tools         []ToolDescriptor `json:"tools"`
 }
 
@@ -61,7 +63,7 @@ func DescribeTools(ctx context.Context, tools []tool.BaseTool) ([]ToolDescriptor
 			}
 		}
 		descriptors = append(descriptors, ToolDescriptor{
-			Name: info.Name, Description: info.Desc, Category: toolCategory(info.Name), Guard: toolGuard(info.Name), InputSchema: schemaJSON,
+			Name: info.Name, Description: info.Desc, Category: toolCategory(info.Name), Guard: toolGuard(info.Name), Enabled: true, InputSchema: schemaJSON,
 		})
 	}
 	return descriptors, nil
@@ -85,8 +87,6 @@ func toolCategory(name string) string {
 		return "remote_files"
 	case strings.HasPrefix(name, "ssh_history_"):
 		return "history"
-	case strings.HasPrefix(name, "ssh_approval_"):
-		return "approvals"
 	default:
 		return "execution"
 	}
@@ -98,7 +98,7 @@ func toolGuard(name string) string {
 		return "agent_state"
 	case "ssh_exec", "ssh_run_script", "ssh_task_start", "ssh_file_read", "ssh_file_search":
 		return "policy_checked"
-	case "ssh_file_write", "ssh_file_apply_patch", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_upload":
+	case "ssh_file_write", "ssh_file_apply_patch", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_upload", "workspace_shell":
 		return "approval_required"
 	case "ssh_task_cancel":
 		return "audited_control"
@@ -249,6 +249,17 @@ type WorkspaceUploadInput struct {
 	Rollback       string `json:"rollback" jsonschema:"how to remove or restore the remote destination"`
 }
 
+type WorkspaceShellInput struct {
+	WorkspaceID     string            `json:"workspace_id" jsonschema:"allowlisted workspace identifier"`
+	Script          string            `json:"script" jsonschema:"complete non-interactive script for the operator-selected Workspace Shell backend; Bash on Unix and PowerShell on Windows Host Shell"`
+	Cwd             string            `json:"cwd,omitempty" jsonschema:"clean directory relative to the workspace root; defaults to the root"`
+	Env             map[string]string `json:"env,omitempty" jsonschema:"non-secret environment variables passed to the selected Workspace Shell backend"`
+	TimeoutSeconds  int               `json:"timeout_seconds,omitempty" jsonschema:"timeout from 1 to 600 seconds"`
+	Reason          string            `json:"reason" jsonschema:"specific reason this local shell execution is necessary"`
+	ExpectedChanges string            `json:"expected_changes,omitempty" jsonschema:"workspace changes expected from the script"`
+	Rollback        string            `json:"rollback,omitempty" jsonschema:"how to undo workspace mutations"`
+}
+
 type HistorySearchInput struct {
 	Query  string `json:"query,omitempty" jsonschema:"text found in command or redacted output"`
 	HostID string `json:"host_id,omitempty" jsonschema:"optional registered host identifier"`
@@ -269,9 +280,10 @@ type TaskInput struct {
 
 type TaskOutput struct {
 	domain.ToolMeta
-	Task   domain.Task       `json:"task"`
-	Result domain.ExecResult `json:"result"`
-	Error  string            `json:"error,omitempty"`
+	Task                domain.Task       `json:"task"`
+	Result              domain.ExecResult `json:"result"`
+	OperatorInstruction string            `json:"operator_instruction,omitempty"`
+	Error               string            `json:"error,omitempty"`
 }
 
 type TaskListOutput struct {
@@ -279,16 +291,42 @@ type TaskListOutput struct {
 	Tasks []domain.Task `json:"tasks"`
 }
 
+const rejectedOperationNextAction = "stop this operation, do not resubmit it, and follow operator_instruction as the human's authoritative replacement instruction"
+
+func normalizeToolStatus(meta *domain.ToolMeta, status string) {
+	meta.ToolVersion = "1.1"
+	meta.Code = status
+	switch status {
+	case "completed", "running":
+		meta.OK = true
+	case "approval_required":
+		meta.OK = true
+		meta.NextAction = "wait for the human decision; do not resubmit or try to approve this operation"
+	case "rejected":
+		meta.Message = "the human operator rejected this operation"
+		meta.NextAction = rejectedOperationNextAction
+	case "failed":
+		meta.Message = "the operation failed; inspect stderr in this Tool result"
+		meta.Retryable = true
+		meta.NextAction = "use the returned stderr as evidence, correct the cause, and do not repeat unchanged input"
+	case "denied":
+		meta.Message = "the operation was denied by policy"
+		meta.NextAction = "respect the policy decision and choose a safer operation"
+	case "expired":
+		meta.Message = "the human approval expired"
+		meta.NextAction = "reassess whether the operation is still needed before proposing it again"
+	case "cancelled", "interrupted":
+		meta.Message = "the task did not complete"
+		meta.NextAction = "inspect the task result and current state before deciding whether further work is needed"
+	}
+}
+
 func NormalizeExecToolResult(result domain.ExecResult, err error) (domain.ExecResult, error) {
-	result.ToolVersion = "1.1"
 	if err == nil {
-		result.OK = result.Status == "completed" || result.Status == "running" || result.Status == "approval_required"
-		result.Code = result.Status
-		if result.Status == "approval_required" {
-			result.NextAction = "wait for the human decision; do not resubmit or try to approve this operation"
-		}
+		normalizeToolStatus(&result.ToolMeta, result.Status)
 		return result, nil
 	}
+	result.ToolVersion = "1.1"
 	if errors.Is(err, context.Canceled) {
 		return result, err
 	}
@@ -302,13 +340,12 @@ func NormalizeExecToolResult(result domain.ExecResult, err error) (domain.ExecRe
 }
 
 func TaskToolOutput(task domain.Task, result domain.ExecResult, taskErr string, err error) (TaskOutput, error) {
-	output := TaskOutput{Task: task, Result: result, Error: taskErr}
-	output.ToolVersion = "1.1"
+	output := TaskOutput{Task: task, Result: result, OperatorInstruction: result.OperatorInstruction, Error: taskErr}
 	if err == nil {
-		output.OK = true
-		output.Code = task.Status
+		normalizeToolStatus(&output.ToolMeta, task.Status)
 		return output, nil
 	}
+	output.ToolVersion = "1.1"
 	if errors.Is(err, context.Canceled) {
 		return output, err
 	}
@@ -318,19 +355,17 @@ func TaskToolOutput(task domain.Task, result domain.ExecResult, taskErr string, 
 	return output, nil
 }
 
-func NormalizeTaskStart(task domain.Task, err error) (domain.Task, error) {
-	task.ToolVersion = "1.1"
-	if err == nil {
-		task.OK, task.Code = true, task.Status
-		return task, nil
+func TaskStartToolOutput(svc *service.Service, task domain.Task, startErr error) (TaskOutput, error) {
+	if task.ID == "" {
+		return TaskToolOutput(task, domain.ExecResult{}, "", startErr)
 	}
-	if errors.Is(err, context.Canceled) {
-		return task, err
+	storedTask, result, taskErr, getErr := svc.GetTask(task.ID)
+	if getErr == nil {
+		task = storedTask
+	} else if startErr == nil {
+		startErr = getErr
 	}
-	task.OK = false
-	task.Message = err.Error()
-	task.Code, task.Retryable, task.NextAction = classifyToolError(err)
-	return task, nil
+	return TaskToolOutput(task, result, taskErr, startErr)
 }
 
 func classifyToolError(err error) (string, bool, string) {
@@ -349,14 +384,6 @@ func classifyToolError(err error) (string, bool, string) {
 	default:
 		return "remote_failed", true, "inspect stderr and gather narrower read-only evidence before retrying"
 	}
-}
-
-type ApprovalInput struct {
-	ApprovalID string `json:"approval_id" jsonschema:"approval identifier returned by an execution tool"`
-}
-
-type ApprovalOutput struct {
-	Approval domain.Approval `json:"approval"`
 }
 
 type SkillInput struct {
@@ -384,7 +411,7 @@ type PlanGetOutput struct {
 	Guidance string            `json:"guidance,omitempty"`
 }
 
-func BuildTools(svc *service.Service) ([]tool.BaseTool, error) {
+func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	var tools []tool.BaseTool
 	appendTool := func(created tool.InvokableTool, err error) error {
 		if err != nil {
@@ -443,9 +470,9 @@ func BuildTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_task_start", "Start a long-running remote command as a cancellable task. The same policy and approval controls apply.", func(ctx context.Context, input ExecInput) (domain.Task, error) {
+	if err := appendTool(toolutils.InferTool("ssh_task_start", "Start a long-running remote command as a cancellable task. Returns the current task plus its execution result, including bounded redacted stderr when it has already failed. If it returns running, use ssh_task_status or ssh_task_tail until a terminal status before claiming success. The same policy and approval controls apply.", func(ctx context.Context, input ExecInput) (TaskOutput, error) {
 		task, err := svc.StartTask(ctx, domain.ExecRequest{HostID: input.HostID, Mode: domain.ExecProgram, Program: input.Program, Args: input.Args, Cwd: input.Cwd, Env: input.Env, Elevated: input.Elevated, TimeoutSeconds: input.TimeoutSeconds, Reason: input.Reason, ExpectedChanges: input.ExpectedChanges, Rollback: input.Rollback}, "eino-agent")
-		return NormalizeTaskStart(task, err)
+		return TaskStartToolOutput(svc, task, err)
 	})); err != nil {
 		return nil, err
 	}
@@ -568,6 +595,12 @@ func BuildTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
+	if err := appendTool(toolutils.InferTool("workspace_shell", "Run one non-interactive script using the operator-selected Workspace Shell backend for archive extraction, builds, tests, and packaging. Sandbox mode uses network-disabled Bubblewrap on Linux. Host mode has full host filesystem and network authority, is limited to read_write Workspaces, and requires a fresh one-time human approval for every invocation. Disabled mode rejects the call.", func(ctx context.Context, input WorkspaceShellInput) (domain.ExecResult, error) {
+		result, err := svc.RunWorkspaceShell(ctx, input.WorkspaceID, input.Script, input.Cwd, input.Env, input.TimeoutSeconds, input.Reason, input.ExpectedChanges, input.Rollback, "eino-agent")
+		return NormalizeExecToolResult(result, err)
+	})); err != nil {
+		return nil, err
+	}
 	if err := appendTool(toolutils.InferTool("ssh_history_search", "Search prior commands and redacted results to reuse evidence and avoid repeating failed operations.", func(ctx context.Context, input HistorySearchInput) (HistorySearchOutput, error) {
 		runs, err := svc.SearchRuns(ctx, input.Query, input.HostID, input.Limit)
 		return HistorySearchOutput{Runs: runs}, err
@@ -576,12 +609,6 @@ func BuildTools(svc *service.Service) ([]tool.BaseTool, error) {
 	}
 	if err := appendTool(toolutils.InferTool("ssh_history_get", "Get one audited command and its redacted result. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistoryGetInput) (service.HistoryResult, error) {
 		return svc.GetRun(ctx, input.RunID, false)
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("ssh_approval_status", "Check whether a human has approved or rejected a pending SSH operation. This tool cannot approve operations.", func(ctx context.Context, input ApprovalInput) (ApprovalOutput, error) {
-		approval, err := svc.Store().GetApproval(ctx, input.ApprovalID)
-		return ApprovalOutput{Approval: approval}, err
 	})); err != nil {
 		return nil, err
 	}
@@ -598,4 +625,51 @@ func BuildTools(svc *service.Service) ([]tool.BaseTool, error) {
 	}
 	tools = append(tools, svc.MCPTools()...)
 	return tools, nil
+}
+
+func BuildTools(svc *service.Service) ([]tool.BaseTool, error) {
+	available, err := buildAvailableTools(svc)
+	if err != nil {
+		return nil, err
+	}
+	states, err := svc.AgentToolStates(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	enabled := make([]tool.BaseTool, 0, len(available))
+	for _, candidate := range available {
+		info, err := candidate.Info(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		if value, configured := states[info.Name]; !configured || value {
+			enabled = append(enabled, candidate)
+		}
+	}
+	return enabled, nil
+}
+
+func buildToolSet(ctx context.Context, svc *service.Service) ([]tool.BaseTool, []ToolDescriptor, error) {
+	available, err := buildAvailableTools(svc)
+	if err != nil {
+		return nil, nil, err
+	}
+	descriptors, err := DescribeTools(ctx, available)
+	if err != nil {
+		return nil, nil, err
+	}
+	states, err := svc.AgentToolStates(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	enabled := make([]tool.BaseTool, 0, len(available))
+	for index, candidate := range available {
+		if value, configured := states[descriptors[index].Name]; configured {
+			descriptors[index].Enabled = value
+		}
+		if descriptors[index].Enabled {
+			enabled = append(enabled, candidate)
+		}
+	}
+	return enabled, descriptors, nil
 }

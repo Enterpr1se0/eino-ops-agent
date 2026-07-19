@@ -67,6 +67,6 @@
 
 ## 8. Workspace 与持久长任务
 
-直接在 Agent 对话左侧的 Workspace 文件栏选择 `default`，上传一次性示例仓库文件或压缩包。展示文件浏览、子目录导航、文本预览、二进制元数据提示和可恢复删除；强调点击文件只会预览，不会自动给 LLM 发送任务。输入框上方仍保留一键上传，同时说明模型看不到宿主绝对路径、不能调用宿主 Shell。随后明确要求 Agent 读取 README、搜索启动入口并提交一个单文件 unified diff；patch 必须绑定 SHA256，且只允许配置中声明的 validator。
+直接在 Agent 对话左侧的 Workspace 文件栏选择 `default`，上传一次性示例仓库文件或压缩包。展示文件浏览、子目录导航、文本预览、二进制元数据提示和可恢复删除；强调点击文件只会预览，不会自动给 LLM 发送任务。在 System 设置中展示 Workspace Shell 三种模式，默认保留 Sandbox。要求 Agent 用 `workspace_shell` 解压压缩包，审批框应展示完整脚本、Workspace 和 Bubblewrap 后端，批准后展示产物，并说明沙箱断网、看不到宿主绝对路径且只能按 Workspace access 落盘。可另行切到 Host Shell 展示显著权限警告和被禁用的会话级授权按钮；Host 每次必须单独批准，且 `read_only` Workspace 不允许调用。随后要求 Agent 读取 README、搜索启动入口并提交一个单文件 unified diff；patch 必须绑定 SHA256，且只允许配置中声明的 validator。
 
 再启动一个短时后台诊断任务，刷新页面后用 `ssh_task_list` 和 `ssh_task_tail` 找回任务及输出。最后演示取消任务。说明服务重启后无法重新附着到旧 SSH 进程，数据库会把未完成任务明确标为 `interrupted`，不会假装仍在运行。

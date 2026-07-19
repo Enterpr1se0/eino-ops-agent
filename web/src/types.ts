@@ -1,6 +1,6 @@
 export type Risk = 'read_only' | 'change' | 'critical' | 'forbidden'
 
-export type HostAuthType = 'agent' | 'key' | 'password' | 'ssh_config'
+export type HostAuthType = 'agent' | 'key' | 'password'
 export type HostSudoMode = 'none' | 'nopasswd' | 'password'
 
 export interface Host {
@@ -10,10 +10,9 @@ export interface Host {
   port: number
   user: string
   auth_type: HostAuthType
-  config_alias?: string
-  identity_file?: string
+  has_private_key: boolean
   known_hosts_file?: string
-  proxy_jump?: string
+  proxy_jump_host_id?: string
   has_password: boolean
   sudo_mode: HostSudoMode
   has_sudo_password: boolean
@@ -28,10 +27,9 @@ export interface HostInput {
   port: number
   user: string
   auth_type: HostAuthType
-  config_alias: string
-  identity_file: string
+  private_key: string
   known_hosts_file: string
-  proxy_jump: string
+  proxy_jump_host_id: string
   password: string
   sudo_mode: HostSudoMode
   sudo_password: string
@@ -131,6 +129,7 @@ export interface ChatSession {
   title: string
   message_count: number
   updated_at: string
+  active: boolean
 }
 
 export interface ChatMessage {
@@ -206,6 +205,11 @@ export interface ModelCatalog {
 export interface ModelStatus {
   available: boolean
   explanation_agent_available: boolean
+  explanation_provider_id?: string
+  explanation_provider_name?: string
+  explanation_model?: string
+  explanation_timeout_seconds?: number
+  explanation_error?: string
   source: 'database' | 'environment' | 'none'
   provider_id?: string
   name?: string
@@ -231,12 +235,25 @@ export interface Health {
 export interface SystemSettings {
   agent_max_iterations: number
   approval_explanations_enabled: boolean
+  subagent_model_provider_id: string
+  subagent_timeout_seconds: number
+  workspace_shell_mode: WorkspaceShellMode
+  workspace_shell_platform: string
+  workspace_shell_backend?: 'sandbox' | 'host'
+  workspace_shell_name?: string
+  workspace_sandbox_available: boolean
+  workspace_host_shell_available: boolean
   updated_at: string
 }
+
+export type WorkspaceShellMode = 'sandbox' | 'host' | 'disabled'
 
 export interface SystemSettingsInput {
   agent_max_iterations: number
   approval_explanations_enabled?: boolean
+  subagent_model_provider_id?: string
+  subagent_timeout_seconds?: number
+  workspace_shell_mode?: WorkspaceShellMode
 }
 
 export interface AuthSession {
@@ -266,6 +283,9 @@ export interface FileMetadata {
 export interface WorkspaceCapability {
   id: string
   access: 'read_only' | 'read_write'
+	shell: boolean
+  shell_backend?: 'sandbox' | 'host'
+  shell_name?: string
   validators?: string[]
   root?: string
 }
@@ -303,8 +323,9 @@ export interface WorkspaceFilePreview {
 export interface WorkspaceDeleteResult {
   workspace_id: string
   path: string
-  size: number
-  sha256: string
+  type: 'file' | 'directory'
+  size?: number
+  sha256?: string
   trash_id: string
   recoverable: boolean
 }
@@ -320,6 +341,7 @@ export interface LLMToolDescriptor {
   description: string
   category: string
   guard: LLMToolGuard
+	enabled: boolean
   input_schema: Record<string, unknown>
 }
 
@@ -332,6 +354,7 @@ export interface LLMToolCatalog {
   model?: string
   loaded_at?: string
   count: number
+	total: number
   tools: LLMToolDescriptor[]
 }
 

@@ -14,6 +14,11 @@ web_auth:
 # OPS_AGENT_DEFAULT_WORKSPACE.
 default_workspace_dir: workspace
 
+# System settings choose Sandbox, Host Shell, or Disabled. Sandbox is the
+# fail-safe default and requires this Bubblewrap binary on Linux; it never
+# falls back to Host Shell. Override with OPS_AGENT_WORKSPACE_SANDBOX.
+workspace_sandbox_path: bwrap
+
 # Explicit absolute roots available to workspace_* tools. Defining one or more
 # entries replaces the automatic default. These cannot be changed in Web.
 workspaces: []
@@ -41,11 +46,7 @@ logging:
   max_backups: 3
   recent_limit: 2000 # in-memory entries available to the Web Logs page
 
-openssh:
-  ssh_path: ssh
-  ssh_keyscan_path: ssh-keyscan
-  ssh_keygen_path: ssh-keygen
-  sftp_path: sftp
+ssh:
   default_known_hosts: .data/known_hosts
 
 model:

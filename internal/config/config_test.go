@@ -28,6 +28,9 @@ func TestLoadAddsDefaultWorkspaceRelativeToStartupDirectory(t *testing.T) {
 	if workspace.ID != "default" || workspace.Access != "read_write" || workspace.Root != filepath.Join(root, "workspace") || !workspace.AutoCreate {
 		t.Fatalf("unexpected default workspace: %#v", workspace)
 	}
+	if cfg.WorkspaceSandboxPath != "bwrap" {
+		t.Fatalf("default workspace sandbox = %q", cfg.WorkspaceSandboxPath)
+	}
 }
 
 func TestLoadCanDisableDefaultWorkspace(t *testing.T) {

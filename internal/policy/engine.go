@@ -128,6 +128,17 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 			}
 		}
 	}
+	if req.Mode == domain.ExecWorkspaceShell {
+		// Arbitrary local scripts always require an exact human approval. Static
+		// command classification cannot prove that wrapper programs such as env,
+		// find, or an interpreter invocation are free of workspace mutations.
+		risk = maxRisk(risk, domain.RiskChange)
+		if req.WorkspaceShellBackend == domain.WorkspaceShellModeHost {
+			hits = append(hits, "workspace_host_shell")
+		} else {
+			hits = append(hits, "workspace_sandbox_shell")
+		}
+	}
 
 	sort.Strings(hits)
 	switch risk {
@@ -245,6 +256,11 @@ func shellSource(req domain.ExecRequest) (string, error) {
 	case domain.ExecScript:
 		if strings.TrimSpace(req.Script) == "" {
 			return "", fmt.Errorf("script is empty")
+		}
+		return req.Script, nil
+	case domain.ExecWorkspaceShell:
+		if req.WorkspaceID == "" || strings.TrimSpace(req.Script) == "" {
+			return "", fmt.Errorf("workspace shell requires a workspace and script")
 		}
 		return req.Script, nil
 	case domain.ExecWorkspaceRead:

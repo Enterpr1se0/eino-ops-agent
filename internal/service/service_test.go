@@ -2,8 +2,12 @@ package service
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +21,8 @@ import (
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/sshx"
 	"eino-ops-agent/internal/store"
+
+	"golang.org/x/crypto/ssh"
 )
 
 type fakeTransport struct {
@@ -62,10 +68,10 @@ func (r *blockingCommandExplainer) Review(ctx context.Context, _ domain.CommandR
 	}
 }
 
-func (f *fakeTransport) Exec(_ context.Context, host domain.Host, req domain.ExecRequest) (sshx.RawResult, error) {
+func (f *fakeTransport) Exec(_ context.Context, connection sshx.ConnectionSpec, req domain.ExecRequest) (sshx.RawResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
-	f.hosts = append(f.hosts, host)
+	f.hosts = append(f.hosts, connection.Target)
 	f.mu.Unlock()
 	return sshx.RawResult{ExitCode: 0, Stdout: []byte("password=secret-value\nok\n"), Duration: time.Millisecond}, nil
 }
@@ -112,6 +118,81 @@ func TestHostCredentialsAreEncryptedPreservedAndNeverSerialized(t *testing.T) {
 	if hydrated.Password != "ssh-super-secret" || hydrated.SudoPassword != "sudo-super-secret" {
 		t.Fatal("encrypted host credentials did not round-trip")
 	}
+}
+
+func TestUploadedPrivateKeyIsEncryptedPreservedAndNeverSerialized(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	privateKey := testSSHPrivateKey(t)
+	host, err := svc.SaveHost(ctx, domain.HostInput{
+		Name: "key-host", Address: "192.0.2.20", Port: 22, User: "ops", AuthType: "key",
+		PrivateKey: string(privateKey), SudoMode: "none",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !host.HasPrivateKey {
+		t.Fatalf("private key capability flag missing: %#v", host)
+	}
+	stored, err := svc.store.GetHost(ctx, host.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.PrivateKeyCipher == "" || strings.Contains(stored.PrivateKeyCipher, "PRIVATE KEY") {
+		t.Fatalf("private key was not encrypted: %#v", stored)
+	}
+	publicJSON, _ := json.Marshal(host)
+	if strings.Contains(string(publicJSON), "PRIVATE KEY") || strings.Contains(string(publicJSON), "private_key_cipher") || strings.Contains(string(publicJSON), "private_key_path") {
+		t.Fatalf("host JSON exposed private key material: %s", publicJSON)
+	}
+
+	updated, err := svc.SaveHost(ctx, domain.HostInput{
+		ID: host.ID, Name: host.Name, Address: host.Address, Port: host.Port, User: host.User,
+		AuthType: "key", SudoMode: "none",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.HasPrivateKey {
+		t.Fatal("blank edit erased the uploaded private key")
+	}
+	hydrated, err := svc.hydrateHostSecrets(updated, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(hydrated.PrivateKey) != string(privateKey) {
+		t.Fatal("encrypted private key did not round-trip")
+	}
+
+	withoutKey, err := svc.SaveHost(ctx, domain.HostInput{
+		ID: host.ID, Name: host.Name, Address: host.Address, Port: host.Port, User: host.User,
+		AuthType: "agent", SudoMode: "none",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutKey.HasPrivateKey || withoutKey.PrivateKeyCipher != "" {
+		t.Fatal("switching authentication away from key retained the private key")
+	}
+	if _, err := svc.SaveHost(ctx, domain.HostInput{
+		Name: "invalid-key", Address: "192.0.2.21", Port: 22, User: "ops", AuthType: "key",
+		PrivateKey: "not a private key", SudoMode: "none",
+	}, "test"); err == nil || !strings.Contains(err.Error(), "invalid SSH private key upload") {
+		t.Fatalf("invalid private key upload was accepted: %v", err)
+	}
+}
+
+func testSSHPrivateKey(t *testing.T) []byte {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKey(privateKey, "service-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(block)
 }
 
 func TestElevatedExecutionUsesManagedSecretAfterBreakGlass(t *testing.T) {
@@ -172,13 +253,85 @@ func TestInteractiveCommandsAndPackagePromptsAreRejected(t *testing.T) {
 		t.Fatal("rejected interactive commands reached transport")
 	}
 }
-func (f *fakeTransport) Probe(context.Context, domain.Host) (sshx.HostInfo, error) {
+
+func TestApprovedRequestRejectsChangedSSHConnection(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	result, err := svc.Submit(context.Background(), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "example.service"},
+		Reason: "restart the example service", ExpectedChanges: "service restarts", Rollback: "restart the previous service version",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "approval_required" {
+		t.Fatalf("expected an approval, got %#v", result)
+	}
+	_, err = svc.SaveHost(context.Background(), domain.HostInput{
+		ID: host.ID, Name: host.Name, Address: "127.0.0.2", Port: host.Port, User: host.User,
+		AuthType: host.AuthType, SudoMode: host.SudoMode,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := svc.Approve(context.Background(), result.ApprovalID, "", "connection reviewed", "operator")
+	if err == nil || !strings.Contains(err.Error(), "changed after submission") {
+		t.Fatalf("changed SSH connection was executed: result=%#v error=%v", approved, err)
+	}
+	if len(transport.calls) != 0 {
+		t.Fatal("changed SSH connection reached the transport")
+	}
+}
+
+func TestProxyJumpChainResolutionAndCycleDetection(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	outer, err := svc.SaveHost(ctx, domain.HostInput{
+		Name: "outer-jump", Address: "192.0.2.20", Port: 22, User: "ops",
+		AuthType: "agent", SudoMode: "none",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, err := svc.SaveHost(ctx, domain.HostInput{
+		Name: "inner-jump", Address: "192.0.2.21", Port: 22, User: "ops",
+		AuthType: "agent", ProxyJumpHostID: outer.ID, SudoMode: "none",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := svc.SaveHost(ctx, domain.HostInput{
+		Name: "jump-target", Address: "192.0.2.22", Port: 22, User: "ops",
+		AuthType: "agent", ProxyJumpHostID: inner.ID, SudoMode: "none",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, digest, err := svc.resolveSSHConnection(ctx, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest == "" || len(connection.Jumps) != 2 || connection.Jumps[0].ID != outer.ID || connection.Jumps[1].ID != inner.ID {
+		t.Fatalf("unexpected resolved jump chain: %#v digest=%q", connection, digest)
+	}
+	outer, err = svc.SaveHost(ctx, domain.HostInput{
+		ID: outer.ID, Name: outer.Name, Address: outer.Address, Port: outer.Port, User: outer.User,
+		AuthType: "agent", ProxyJumpHostID: target.ID, SudoMode: "none",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.resolveSSHConnection(ctx, target); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("ProxyJump cycle was not rejected: %v", err)
+	}
+}
+
+func (f *fakeTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
 	return sshx.HostInfo{Hostname: "fixture"}, nil
 }
-func (f *fakeTransport) ScanHostKey(context.Context, domain.Host) (sshx.HostKey, error) {
+func (f *fakeTransport) ScanHostKey(context.Context, sshx.ConnectionSpec) (sshx.HostKey, error) {
 	return sshx.HostKey{Fingerprint: "SHA256:test"}, nil
 }
-func (f *fakeTransport) TrustHostKey(context.Context, domain.Host, string) (sshx.HostKey, error) {
+func (f *fakeTransport) TrustHostKey(context.Context, sshx.ConnectionSpec, string) (sshx.HostKey, error) {
 	return sshx.HostKey{Fingerprint: "SHA256:test"}, nil
 }
 
@@ -232,28 +385,68 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || !settings.ApprovalExplanationsEnabled {
+	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || !settings.ApprovalExplanationsEnabled || settings.SubagentModelProviderID != "" || settings.SubagentTimeoutSeconds != domain.DefaultSubagentTimeoutSeconds || settings.WorkspaceShellMode != domain.WorkspaceShellModeSandbox {
 		t.Fatalf("unexpected default max iterations: %#v", settings)
 	}
 	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 4}, "test"); err == nil {
 		t.Fatal("expected lower-bound validation error")
 	}
-	explanationsEnabled := false
-	saved, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
-		AgentMaxIterations: 30, ApprovalExplanationsEnabled: &explanationsEnabled,
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: domain.MaxAgentMaxIterations + 1}, "test"); err == nil {
+		t.Fatal("expected upper-bound validation error")
+	}
+	tooShort := domain.MinSubagentTimeoutSeconds - 1
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 20, SubagentTimeoutSeconds: &tooShort}, "test"); err == nil {
+		t.Fatal("expected subagent timeout validation error")
+	}
+	missingProvider := "model_missing"
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 20, SubagentModelProviderID: &missingProvider}, "test"); err == nil {
+		t.Fatal("expected missing subagent provider validation error")
+	}
+	provider, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		Name: "subagent", Kind: "ollama", BaseURL: "http://127.0.0.1:11434/v1", Model: "small-model",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.AgentMaxIterations != 30 || saved.ApprovalExplanationsEnabled || saved.UpdatedAt.IsZero() {
+	explanationsEnabled := false
+	timeoutSeconds := 45
+	hostShell := domain.WorkspaceShellModeHost
+	saved, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
+		AgentMaxIterations: 30, ApprovalExplanationsEnabled: &explanationsEnabled,
+		SubagentModelProviderID: &provider.ID, SubagentTimeoutSeconds: &timeoutSeconds, WorkspaceShellMode: &hostShell,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.AgentMaxIterations != 30 || saved.ApprovalExplanationsEnabled || saved.SubagentModelProviderID != provider.ID || saved.SubagentTimeoutSeconds != timeoutSeconds || saved.WorkspaceShellMode != domain.WorkspaceShellModeHost || saved.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected saved settings: %#v", saved)
 	}
 	reloaded, err := svc.SystemSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.AgentMaxIterations != 30 || reloaded.ApprovalExplanationsEnabled {
+	if reloaded.AgentMaxIterations != 30 || reloaded.ApprovalExplanationsEnabled || reloaded.SubagentModelProviderID != provider.ID || reloaded.SubagentTimeoutSeconds != timeoutSeconds || reloaded.WorkspaceShellMode != domain.WorkspaceShellModeHost {
 		t.Fatalf("system settings were not persisted: %#v", reloaded)
+	}
+	if _, err := svc.DeleteModelProvider(ctx, provider.ID, "test"); !errors.Is(err, ErrModelProviderInUse) || !strings.Contains(err.Error(), "selected for the subagent") {
+		t.Fatalf("selected subagent provider deletion was not blocked: %v", err)
+	}
+	invalidMode := "automatic"
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 30, WorkspaceShellMode: &invalidMode}, "test"); err == nil {
+		t.Fatal("invalid workspace shell mode was accepted")
+	}
+}
+
+func TestCommandReviewDeadlineUsesReadableConfiguredTimeout(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	review := svc.normalizeCommandReview(
+		domain.CommandReview{Model: "small-model"},
+		fmt.Errorf("[NodeRunError] failed to create chat completion: %w", context.DeadlineExceeded),
+		domain.RiskChange,
+		45,
+	)
+	if review.Status != "unavailable" || review.Model != "small-model" || len(review.Errors) != 1 || review.Errors[0] != "command explanation model did not respond within 45 seconds" {
+		t.Fatalf("unexpected normalized deadline review: %#v", review)
 	}
 }
 
@@ -658,6 +851,14 @@ func TestBlockingApprovalReturnsRejectedOperatorInstructionToTool(t *testing.T) 
 	if result.err != nil || result.result.Status != "rejected" || result.result.OperatorInstruction != instruction {
 		t.Fatalf("rejection was not returned to the blocked Tool: %#v err=%v", result.result, result.err)
 	}
+	select {
+	case decision := <-notifications:
+		if decision.Status != "rejected" || decision.OperatorInstruction != instruction {
+			t.Fatalf("rejection decision notification lost operator context: %#v", decision)
+		}
+	default:
+		t.Fatal("rejection did not notify the active Agent stream")
+	}
 	if len(transport.calls) != 0 {
 		t.Fatalf("rejected operation executed %d times", len(transport.calls))
 	}
@@ -705,7 +906,7 @@ func TestBlockingApprovalAlsoSuspendsMutatingTaskStart(t *testing.T) {
 	case <-base.Done():
 		t.Fatal("timed out waiting for task_start to resume")
 	}
-	if result.err != nil || result.task.Status != "rejected" || result.task.RunID == "" {
+	if result.err != nil || result.task.Status != "rejected" || result.task.RunID == "" || result.task.OperatorInstruction != "inspect logs instead" {
 		t.Fatalf("unexpected task result after rejection: %#v err=%v", result.task, result.err)
 	}
 	_, execResult, _, err := svc.GetTask(result.task.ID)

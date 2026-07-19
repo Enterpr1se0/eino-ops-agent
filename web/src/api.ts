@@ -36,6 +36,7 @@ export const api = {
 	systemSettings: () => request<SystemSettings>('/api/v1/settings'),
 	capabilities: () => request<ToolCapabilities>('/api/v1/capabilities'),
 	llmTools: () => request<LLMToolCatalog>('/api/v1/agent/tools'),
+	setLLMToolEnabled: (name:string,enabled:boolean) => request<LLMToolCatalog>(`/api/v1/agent/tools/${encodeURIComponent(name)}/${enabled?'enable':'disable'}`,{method:'POST',body:'{}'}),
 	skills: () => requestList<ManagedSkill>('/api/v1/skills'),
 	skill: (name:string) => request<ManagedSkill>(`/api/v1/skills/${encodeURIComponent(name)}`),
 	uploadSkill: (name:string,file:File) => {const body=new FormData();body.set('name',name);body.set('file',file);return request<ManagedSkill>('/api/v1/skills',{method:'POST',body})},
@@ -53,7 +54,7 @@ export const api = {
 	workspaceFiles: (workspaceId:string,path='.') => request<WorkspaceFileList>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`),
 	previewWorkspaceFile: (workspaceId:string,path:string) => request<WorkspaceFilePreview>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/preview?path=${encodeURIComponent(path)}`),
 	uploadWorkspaceFile: (workspaceId:string,file:File,path:string) => {const body=new FormData();body.set('file',file);body.set('path',path);return request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files`,{method:'POST',body})},
-	deleteWorkspaceFile: (workspaceId:string,path:string) => request<WorkspaceDeleteResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`,{method:'DELETE'}),
+	deleteWorkspaceEntry: (workspaceId:string,path:string) => request<WorkspaceDeleteResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`,{method:'DELETE'}),
   saveSystemSettings: (settings: SystemSettingsInput) => request<SystemSettings>('/api/v1/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   modelProviders: () => requestList<ModelProvider>('/api/v1/model-providers'),
   discoverModels: (input: ModelDiscoveryInput) => request<ModelCatalog>('/api/v1/model-providers/discover', { method: 'POST', body: JSON.stringify(input) }),
@@ -65,7 +66,7 @@ export const api = {
   hosts: () => requestList<Host>('/api/v1/hosts'),
   saveHost: (host: HostInput) => request<Host>('/api/v1/hosts', { method: 'POST', body: JSON.stringify(host) }),
   deleteHost: (id: string) => request<void>(`/api/v1/hosts/${id}`, { method: 'DELETE' }),
-  scanKey: (id: string) => request<{ fingerprint: string }>(`/api/v1/hosts/${id}/scan-key`, { method: 'POST', body: '{}' }),
+  scanKey: (id: string) => request<{ fingerprint: string; algorithm?: string }>(`/api/v1/hosts/${id}/scan-key`, { method: 'POST', body: '{}' }),
   trustKey: (id: string, fingerprint: string) => request(`/api/v1/hosts/${id}/trust-key`, { method: 'POST', body: JSON.stringify({ fingerprint }) }),
   probe: (id: string) => request<Record<string, string>>(`/api/v1/hosts/${id}/probe`, { method: 'POST', body: '{}' }),
   approvals: () => requestList<Approval>('/api/v1/approvals?status=pending&limit=100'),
@@ -87,12 +88,13 @@ export const api = {
   deleteChatSession: (id: string) => request<void>(`/api/v1/chat/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
 
-export async function streamChat(sessionId: string, message: string, onEvent: (event: AgentEvent) => void) {
+export async function streamChat(sessionId: string, message: string, onEvent: (event: AgentEvent) => void, signal?: AbortSignal) {
   const response = await fetch('/api/v1/chat', {
     method: 'POST',
 	credentials:'same-origin',
 	headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
     body: JSON.stringify({ session_id: sessionId, message }),
+    signal,
   })
   if (!response.ok || !response.body) {
     const body = await response.json().catch(() => ({ error: response.statusText }))

@@ -29,6 +29,9 @@ func TestDefaultPolicy(t *testing.T) {
 		{"credential read", domain.ExecRequest{Mode: domain.ExecScript, Script: "cat ~/.ssh/id_ed25519"}, domain.RiskForbidden, domain.ActionDeny},
 		{"unparseable", domain.ExecRequest{Mode: domain.ExecScript, Script: "if then"}, domain.RiskCritical, domain.ActionBreakGlass},
 		{"workspace upload", domain.ExecRequest{Mode: domain.ExecWorkspaceUpload, WorkspaceID: "default", RelativePath: "app.yaml", ExpectedSHA256: strings.Repeat("a", 64), RemotePath: "/tmp/app.yaml"}, domain.RiskChange, domain.ActionApprove},
+		{"workspace shell read", domain.ExecRequest{Mode: domain.ExecWorkspaceShell, WorkspaceID: "default", WorkspaceShellBackend: domain.WorkspaceShellModeSandbox, Script: "pwd"}, domain.RiskChange, domain.ActionApprove},
+		{"workspace host shell read", domain.ExecRequest{Mode: domain.ExecWorkspaceShell, WorkspaceID: "default", WorkspaceShellBackend: domain.WorkspaceShellModeHost, Script: "pwd"}, domain.RiskChange, domain.ActionApprove},
+		{"workspace shell destructive", domain.ExecRequest{Mode: domain.ExecWorkspaceShell, WorkspaceID: "default", WorkspaceShellBackend: domain.WorkspaceShellModeSandbox, Script: "rm -rf build"}, domain.RiskCritical, domain.ActionBreakGlass},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -6,9 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
@@ -234,13 +236,102 @@ func TestQueryDoesNotRetryAfterToolActivityWithoutFinalAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 2 || messages[0].Status != "completed" || messages[1].Role != "tool" {
+	if len(messages) != 2 || messages[0].Status != "failed" || messages[1].Role != "tool" {
 		t.Fatalf("stored messages = %#v", messages)
 	}
 	for _, event := range emitted {
 		if event.Type == "done" {
 			t.Fatalf("incomplete query emitted done: %#v", emitted)
 		}
+	}
+}
+
+func TestNextQueryReceivesToolEvidenceFromFailedTurn(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{
+		{adk.EventFromMessage(schema.ToolMessage(`{"status":"completed","stdout":"disk is healthy"}`, "call-1", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec")},
+		{adk.EventFromMessage(schema.AssistantMessage("continued without repeating the check", nil), nil, schema.Assistant, "")},
+	}}
+	runtime := &Runtime{runner: runner, store: st}
+	if _, err := runtime.Query(ctx, "session_tool_context", "inspect disk", nil); !errors.Is(err, ErrEmptyResponse) {
+		t.Fatalf("first query error = %v", err)
+	}
+	answer, err := runtime.Query(ctx, "session_tool_context", "continue", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "continued without repeating the check" {
+		t.Fatalf("answer = %q", answer)
+	}
+	_, inputs := runner.snapshot()
+	if len(inputs) != 2 || len(inputs[1]) != 3 {
+		t.Fatalf("model inputs = %#v", inputs)
+	}
+	if inputs[1][0].Role != schema.User || inputs[1][0].Content != "inspect disk" {
+		t.Fatalf("failed turn user context = %#v", inputs[1][0])
+	}
+	if inputs[1][1].Role != schema.Assistant || !strings.Contains(inputs[1][1].Content, "Persisted operational tool evidence") || !strings.Contains(inputs[1][1].Content, "disk is healthy") {
+		t.Fatalf("failed turn tool context = %#v", inputs[1][1])
+	}
+	if inputs[1][2].Role != schema.User || inputs[1][2].Content != "continue" {
+		t.Fatalf("current query context = %#v", inputs[1][2])
+	}
+}
+
+func TestBuildModelContextPreservesTurnBoundaries(t *testing.T) {
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "install docker", Status: "completed"},
+		{Role: "tool", ToolName: "ssh_exec", Content: `{"status":"completed","stdout":"docker installed"}`, Status: "completed"},
+		{Role: "user", Content: "update mihomo", Status: "completed"},
+		{Role: "tool", ToolName: "ssh_exec", Content: `{"status":"completed","stdout":"mihomo updated"}`, Status: "completed"},
+		{Role: "user", Content: "hello", Status: "completed"},
+	}
+	messages, stats := buildModelContext(history, "what is the current state?")
+	if len(messages) != 7 {
+		t.Fatalf("model messages = %#v", messages)
+	}
+	wantRoles := []schema.RoleType{schema.User, schema.Assistant, schema.User, schema.Assistant, schema.User, schema.Assistant, schema.User}
+	for index, role := range wantRoles {
+		if messages[index].Role != role {
+			t.Fatalf("message %d role = %s, want %s", index, messages[index].Role, role)
+		}
+	}
+	if !strings.Contains(messages[1].Content, "docker installed") || !strings.Contains(messages[3].Content, "mihomo updated") {
+		t.Fatalf("tool evidence was not retained: %#v", messages)
+	}
+	if messages[5].Content != incompleteTurnContext {
+		t.Fatalf("incomplete turn marker = %q", messages[5].Content)
+	}
+	if stats.StoredTurns != 3 || stats.IncludedTurns != 3 || stats.ToolResults != 2 || stats.Truncated {
+		t.Fatalf("context stats = %#v", stats)
+	}
+}
+
+func TestBuildModelContextExcludesFailedTurnWithoutActivity(t *testing.T) {
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "request that never reached the model", Status: "failed"},
+		{Role: "user", Content: "successful request", Status: "completed"},
+		{Role: "assistant", Content: "successful response", Status: "completed"},
+	}
+	messages, _ := buildModelContext(history, "next")
+	if len(messages) != 3 || messages[0].Content != "successful request" || messages[1].Content != "successful response" || messages[2].Content != "next" {
+		t.Fatalf("model messages = %#v", messages)
+	}
+}
+
+func TestTruncateModelTextKeepsValidUTF8AndBothEnds(t *testing.T) {
+	value := strings.Repeat("开头", 100) + " middle " + strings.Repeat("结尾", 100)
+	truncated := truncateModelText(value, 180)
+	if !utf8.ValidString(truncated) || len(truncated) > 180 {
+		t.Fatalf("invalid truncation length=%d value=%q", len(truncated), truncated)
+	}
+	if !strings.HasPrefix(truncated, "开头") || !strings.HasSuffix(truncated, "结尾") || !strings.Contains(truncated, "truncated") {
+		t.Fatalf("truncation did not preserve both ends: %q", truncated)
 	}
 }
 
@@ -276,5 +367,9 @@ func TestToolHistoryIsEnrichedWithCompleteAuditedCommand(t *testing.T) {
 	args, _ := payload.Display.Request["args"].([]any)
 	if payload.Display.HostID != "host_display" || payload.Display.Request["program"] != "journalctl" || len(args) != 4 || args[1] != "demo service" {
 		t.Fatalf("complete command was not preserved in Tool display payload: %s", enriched)
+	}
+	nested := runtime.enrichToolContent(ctx, `{"task":{"id":"task_display","run_id":"run_display","status":"failed"},"result":{"run_id":"run_display","status":"failed","stderr":"command failed"}}`)
+	if !strings.Contains(nested, `"_display"`) || !strings.Contains(nested, `"stderr":"command failed"`) {
+		t.Fatalf("nested task result was not enriched without losing stderr: %s", nested)
 	}
 }
