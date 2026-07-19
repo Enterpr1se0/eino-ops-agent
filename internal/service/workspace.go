@@ -1297,15 +1297,6 @@ func replaceLocalFile(source, target string, mode os.FileMode) error {
 	return syncLocalDirectory(filepath.Dir(target))
 }
 
-func syncLocalDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
-}
-
 var hunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 
 func applyUnifiedPatch(original, patchContent string) (string, error) {
