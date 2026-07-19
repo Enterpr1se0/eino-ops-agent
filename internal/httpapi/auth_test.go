@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"eino-ops-agent/internal/security"
@@ -87,6 +88,29 @@ func TestUnknownAPIRouteReturnsJSONNotSPA(t *testing.T) {
 	}
 	if contentType := response.Header().Get("Content-Type"); contentType != "application/json" {
 		t.Fatalf("unknown API returned content type %q", contentType)
+	}
+}
+
+func TestSPAHandlerServesAssetsAndIndexFallback(t *testing.T) {
+	handler := spaHandler(fstest.MapFS{
+		"index.html":    {Data: []byte("<main>embedded app</main>")},
+		"assets/app.js": {Data: []byte("console.log('embedded')")},
+	})
+
+	for _, test := range []struct {
+		path string
+		body string
+	}{
+		{path: "/", body: "<main>embedded app</main>"},
+		{path: "/conversations/session", body: "<main>embedded app</main>"},
+		{path: "/assets/app.js", body: "console.log('embedded')"},
+	} {
+		request := httptest.NewRequest(http.MethodGet, test.path, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || response.Body.String() != test.body {
+			t.Fatalf("GET %s: status=%d body=%q", test.path, response.Code, response.Body.String())
+		}
 	}
 }
 

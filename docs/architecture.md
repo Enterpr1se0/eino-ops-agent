@@ -27,7 +27,7 @@ Web/API 位于单管理员认证边界之后。首次密码由环境变量初始
 - `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型/MCP 配置与 Eino checkpoints。
 - `internal/agent`：Eino ChatModelAgent、强类型 Tools、消息历史、事件流与并发安全的 Runner 热切换。
 - `internal/mcpserver`：官方 MCP Go SDK stdio 适配器。
-- `internal/httpapi`：本地 HTTP API、SSE 和 React 静态资源。
+- `internal/httpapi`：本地 HTTP API、SSE 和嵌入 Go 二进制的 React 静态资源。
 - `internal/observability`：`slog` 多路 Handler、字段脱敏、JSONL 文件轮转与 Web 内存日志缓冲。
 - `internal/skills`：可上传、永久删除和启停的无权限运维方法论注册表。
 

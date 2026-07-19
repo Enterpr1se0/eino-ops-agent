@@ -17,7 +17,6 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates bubblewrap && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=backend /out/ops-agent /usr/local/bin/ops-agent
-COPY --from=backend /src/web/dist ./web/dist
 COPY configs ./configs
 VOLUME ["/app/.data"]
 EXPOSE 8080

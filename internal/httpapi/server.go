@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,6 +26,7 @@ import (
 	"eino-ops-agent/internal/service"
 	"eino-ops-agent/internal/skills"
 	"eino-ops-agent/internal/store"
+	webui "eino-ops-agent/web"
 )
 
 type Server struct {
@@ -120,7 +123,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, _ *http.Request) {
 		writeErrorStatus(w, fmt.Errorf("API endpoint not found"), http.StatusNotFound)
 	})
-	s.mux.Handle("/", spaHandler("web/dist"))
+	s.mux.Handle("/", spaHandler(webui.Assets()))
 }
 
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
@@ -1189,27 +1192,27 @@ func requestLogMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func spaHandler(root string) http.Handler {
-	fileServer := http.FileServer(http.Dir(root))
+func spaHandler(root fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			http.NotFound(w, r)
 			return
 		}
-		clean := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
-		if clean == "." {
+		clean := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		if clean == "" || clean == "." {
 			clean = "index.html"
 		}
-		if _, err := os.Stat(filepath.Join(root, clean)); err == nil {
+		if info, err := fs.Stat(root, clean); err == nil && !info.IsDir() {
 			if clean == "index.html" {
 				w.Header().Set("Cache-Control", "no-cache, max-age=0")
 			}
 			fileServer.ServeHTTP(w, r)
 			return
 		}
-		index, err := os.Open(filepath.Join(root, "index.html"))
+		index, err := root.Open("index.html")
 		if err != nil {
-			http.Error(w, "web UI is not built; run npm --prefix web run build", http.StatusNotFound)
+			http.Error(w, "embedded web UI is unavailable", http.StatusNotFound)
 			return
 		}
 		defer index.Close()

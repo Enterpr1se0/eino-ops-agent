@@ -6,23 +6,22 @@ dev-api:
 dev-web:
 	npm --prefix web run dev
 
-build: build-web build-go
+build: build-go
 
 build-web:
 	npm --prefix web install
 	npm --prefix web run build
 
-build-go:
+build-go: build-web
 	mkdir -p bin
 	go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/ops-agent ./cmd/ops-agent
 
 test:
 	go test ./...
 
-test-web:
-	npm --prefix web run build
+test-web: build-web
 
-check: test test-web build-go
+check: test build-go
 
 clean:
-	rm -rf bin web/dist
+	rm -rf bin

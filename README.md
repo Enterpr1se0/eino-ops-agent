@@ -44,7 +44,7 @@ OPS_AGENT_ADMIN_PASSWORD='use-a-strong-password' \
   ./bin/ops-agent --config configs/config.local.yaml serve
 ```
 
-服务默认监听 `0.0.0.0:8080`。第一次启动必须通过 `OPS_AGENT_ADMIN_PASSWORD` 初始化管理员，明文不会落库；之后可从 System settings 修改密码，或用 `admin reset-password` 从 CLI 恢复。Web 使用 HttpOnly/SameSite Cookie 与 CSRF Token 保护所有敏感 API。局域网测试前仍应配置 HTTPS 反向代理并设置 `OPS_AGENT_SECURE_COOKIES=true`。
+`make build` 会先构建 Web，再将完整前端嵌入 `bin/ops-agent`；部署时不需要额外复制 `web/dist`。服务默认监听 `0.0.0.0:8080`。第一次启动必须通过 `OPS_AGENT_ADMIN_PASSWORD` 初始化管理员，明文不会落库；之后可从 System settings 修改密码，或用 `admin reset-password` 从 CLI 恢复。Web 使用 HttpOnly/SameSite Cookie 与 CSRF Token 保护所有敏感 API。局域网测试前仍应配置 HTTPS 反向代理并设置 `OPS_AGENT_SECURE_COOKIES=true`。
 
 也可以用环境变量作为无数据库配置时的兜底：
 
