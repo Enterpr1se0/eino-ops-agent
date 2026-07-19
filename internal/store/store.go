@@ -965,6 +965,27 @@ ORDER BY approvals.created_at DESC LIMIT ?`, status, status, limit)
 	return result, rows.Err()
 }
 
+func (s *Store) ListPendingApprovalsForSession(ctx context.Context, sessionID string) ([]domain.Approval, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
+approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.risk,approvals.status,
+approvals.challenge,approvals.reason,approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
+JOIN runs ON runs.id=approvals.run_id WHERE runs.session_id=? AND approvals.status='pending'
+ORDER BY approvals.created_at`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]domain.Approval, 0)
+	for rows.Next() {
+		approval, err := scanApproval(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, approval)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) DecideApproval(ctx context.Context, id, status, reason string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE approvals SET status=?,reason=?,decided_at=? WHERE id=? AND status='pending'`,
 		status, reason, formatTime(time.Now().UTC()), id)

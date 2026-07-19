@@ -31,6 +31,7 @@ var (
 )
 
 const emptyResponseMaxAttempts = 2
+const interruptedRunMessage = "Agent run stopped by the operator before completion."
 
 type agentRunner interface {
 	Run(context.Context, []*schema.Message, ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent]
@@ -62,7 +63,7 @@ type Runtime struct {
 	status   Status
 	tools    []ToolDescriptor
 	toolsAt  string
-	active   map[string]struct{}
+	active   map[string]context.CancelFunc
 }
 
 type Status struct {
@@ -108,7 +109,7 @@ Operating rules:
 16. Conclude with: plan progress, summary, evidence, likely cause or deployment state, actions taken, pending approvals, verification, and remaining uncertainty.`
 
 func New(ctx context.Context, cfg config.Model, svc *service.Service, st *store.Store) (*Runtime, error) {
-	runtime := &Runtime{baseCtx: ctx, store: st, service: svc, fallback: cfg, active: make(map[string]struct{})}
+	runtime := &Runtime{baseCtx: ctx, store: st, service: svc, fallback: cfg, active: make(map[string]context.CancelFunc)}
 	if err := runtime.Reload(ctx); err != nil {
 		return nil, err
 	}
@@ -296,23 +297,41 @@ func (r *Runtime) IsSessionActive(sessionID string) bool {
 	return active
 }
 
-func (r *Runtime) beginSession(sessionID string) bool {
+func (r *Runtime) beginSession(ctx context.Context, sessionID string) (context.Context, bool) {
 	r.activeMu.Lock()
 	defer r.activeMu.Unlock()
 	if r.active == nil {
-		r.active = make(map[string]struct{})
+		r.active = make(map[string]context.CancelFunc)
 	}
 	if _, exists := r.active[sessionID]; exists {
-		return false
+		return ctx, false
 	}
-	r.active[sessionID] = struct{}{}
-	return true
+	runCtx, cancel := context.WithCancel(ctx)
+	r.active[sessionID] = cancel
+	return runCtx, true
 }
 
 func (r *Runtime) endSession(sessionID string) {
 	r.activeMu.Lock()
+	cancel := r.active[sessionID]
 	delete(r.active, sessionID)
 	r.activeMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (r *Runtime) CancelSession(sessionID string) bool {
+	if r == nil || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	r.activeMu.RLock()
+	cancel, active := r.active[sessionID]
+	if active {
+		cancel()
+	}
+	r.activeMu.RUnlock()
+	return active
 }
 
 func (r *Runtime) TestProvider(ctx context.Context, cfg config.Model) (TestResult, error) {
@@ -362,7 +381,8 @@ func (r *Runtime) Query(ctx context.Context, sessionID, query string, emit func(
 	if sessionID == "" {
 		sessionID = ids.New("session")
 	}
-	if !r.beginSession(sessionID) {
+	ctx, sessionStarted := r.beginSession(ctx, sessionID)
+	if !sessionStarted {
 		return "", ErrSessionBusy
 	}
 	defer r.endSession(sessionID)
@@ -386,6 +406,11 @@ func (r *Runtime) Query(ctx context.Context, sessionID, query string, emit func(
 	if emit == nil {
 		emit = func(Event) {}
 	}
+	defer func() {
+		if errors.Is(queryErr, context.Canceled) {
+			emit(Event{Type: "interrupted", SessionID: sessionID, Content: interruptedRunMessage})
+		}
+	}()
 	history, recordLimitReached, err := r.store.ListChatContextMessages(ctx, sessionID, modelHistoryRecordLimit)
 	if err != nil {
 		return "", err
@@ -412,6 +437,11 @@ func (r *Runtime) Query(ctx context.Context, sessionID, query string, emit func(
 		defer cancel()
 		if err := r.store.SetChatMessageStatus(statusCtx, userMessageID, status); err != nil {
 			logger.ErrorContext(statusCtx, "update user chat message status failed", "message_id", userMessageID, "status", status, "error", err)
+		}
+		if errors.Is(queryErr, context.Canceled) {
+			if err := r.store.AppendChatMessage(statusCtx, sessionID, "assistant", interruptedRunMessage); err != nil {
+				logger.ErrorContext(statusCtx, "persist agent interruption failed", "error", err)
+			}
 		}
 	}()
 	emit(Event{Type: "session", SessionID: sessionID})
@@ -556,6 +586,9 @@ func (r *Runtime) Query(ctx context.Context, sessionID, query string, emit func(
 			}
 		}
 
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		answer = final.String()
 		if answer != "" || interrupted {
 			turnCompleted = true

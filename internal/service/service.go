@@ -1023,6 +1023,25 @@ func (s *Service) Reject(ctx context.Context, approvalID, reason, actor string) 
 	return nil
 }
 
+func (s *Service) RejectPendingApprovalsForSession(ctx context.Context, sessionID, reason, actor string) (int, error) {
+	approvals, err := s.store.ListPendingApprovalsForSession(ctx, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	rejected := 0
+	for _, approval := range approvals {
+		if err := s.Reject(ctx, approval.ID, reason, actor); err != nil {
+			current, getErr := s.store.GetApproval(ctx, approval.ID)
+			if getErr == nil && current.Status != "pending" {
+				continue
+			}
+			return rejected, err
+		}
+		rejected++
+	}
+	return rejected, nil
+}
+
 // awaitApproval keeps an Agent Tool call suspended until its exact approval is
 // decided and, when approved, until the approved execution finishes. Decisions
 // remain durable in SQLite; polling also makes this work when the approval HTTP

@@ -111,3 +111,14 @@ func TestAgentToolsEndpointReportsAnUnloadedRuntimeWithoutPanicking(t *testing.T
 		t.Fatalf("unexpected unloaded catalog: %#v", catalog)
 	}
 }
+
+func TestCancelChatSessionReportsUnavailableRuntime(t *testing.T) {
+	handler := New(nil, nil, nil).Handler()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/chat/session_test/cancel", bytes.NewBufferString(`{}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("cancel status=%d body=%s", response.Code, response.Body.String())
+	}
+}

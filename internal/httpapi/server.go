@@ -113,6 +113,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/logs", s.logs)
 	s.mux.HandleFunc("POST /api/v1/chat", s.chat)
 	s.mux.HandleFunc("GET /api/v1/chat/sessions", s.chatSessions)
+	s.mux.HandleFunc("POST /api/v1/chat/{id}/cancel", s.cancelChatSession)
 	s.mux.HandleFunc("DELETE /api/v1/chat/{id}", s.deleteChatSession)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/messages", s.chatMessages)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/state", s.chatState)
@@ -1008,6 +1009,29 @@ func (s *Server) chatSessions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) cancelChatSession(w http.ResponseWriter, r *http.Request) {
+	if s.agent == nil {
+		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
+		return
+	}
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	if sessionID == "" {
+		writeErrorStatus(w, fmt.Errorf("session id is required"), http.StatusBadRequest)
+		return
+	}
+	cancelled := s.agent.CancelSession(sessionID)
+	rejectedApprovals := 0
+	if s.service != nil {
+		var err error
+		rejectedApprovals, err = s.service.RejectPendingApprovalsForSession(r.Context(), sessionID, "Agent run stopped by the operator", actor(r))
+		if err != nil {
+			writeError(w, fmt.Errorf("cancel Agent session approvals: %w", err))
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cancelled": cancelled, "rejected_approvals": rejectedApprovals})
 }
 
 func (s *Server) deleteChatSession(w http.ResponseWriter, r *http.Request) {

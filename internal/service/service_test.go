@@ -1181,3 +1181,36 @@ func TestChatSessionsCanBeListedLoadedAndDeleted(t *testing.T) {
 		t.Fatalf("expected not found on second delete, got %v", err)
 	}
 }
+
+func TestRejectPendingApprovalsForSession(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	request := domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
+		Reason: "recover demo service", Rollback: "restart the previous version",
+	}
+	target, err := svc.Submit(WithSessionID(context.Background(), "session_stop"), request, "eino-agent")
+	if err != nil || target.ApprovalID == "" {
+		t.Fatalf("target approval = %#v err=%v", target, err)
+	}
+	request.Args = []string{"restart", "other"}
+	other, err := svc.Submit(WithSessionID(context.Background(), "session_other"), request, "eino-agent")
+	if err != nil || other.ApprovalID == "" {
+		t.Fatalf("other approval = %#v err=%v", other, err)
+	}
+
+	rejected, err := svc.RejectPendingApprovalsForSession(context.Background(), "session_stop", "Agent run stopped by the operator", "operator")
+	if err != nil || rejected != 1 {
+		t.Fatalf("rejected approvals = %d err=%v", rejected, err)
+	}
+	targetApproval, err := svc.store.GetApproval(context.Background(), target.ApprovalID)
+	if err != nil || targetApproval.Status != "rejected" {
+		t.Fatalf("target approval = %#v err=%v", targetApproval, err)
+	}
+	otherApproval, err := svc.store.GetApproval(context.Background(), other.ApprovalID)
+	if err != nil || otherApproval.Status != "pending" {
+		t.Fatalf("unrelated approval changed = %#v err=%v", otherApproval, err)
+	}
+	if len(transport.calls) != 0 {
+		t.Fatalf("rejected approval executed %d commands", len(transport.calls))
+	}
+}

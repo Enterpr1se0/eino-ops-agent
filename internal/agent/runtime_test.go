@@ -27,6 +27,20 @@ type scriptedAgentRunner struct {
 	inputs   [][]*schema.Message
 }
 
+type blockingAgentRunner struct {
+	started chan struct{}
+}
+
+func (r *blockingAgentRunner) Run(ctx context.Context, _ []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	go func() {
+		close(r.started)
+		<-ctx.Done()
+		generator.Close()
+	}()
+	return iterator
+}
+
 func (r *scriptedAgentRunner) Run(_ context.Context, messages []*schema.Message, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	r.mu.Lock()
 	index := r.calls
@@ -110,18 +124,80 @@ func TestProviderRejectsEmptyResponse(t *testing.T) {
 
 func TestRuntimeTracksOneActiveRunPerSession(t *testing.T) {
 	runtime := &Runtime{}
-	if !runtime.beginSession("session_test") {
+	runCtx, started := runtime.beginSession(context.Background(), "session_test")
+	if !started {
 		t.Fatal("first run was not registered")
 	}
 	if !runtime.IsSessionActive("session_test") {
 		t.Fatal("registered run is not active")
 	}
-	if runtime.beginSession("session_test") {
+	if _, duplicateStarted := runtime.beginSession(context.Background(), "session_test"); duplicateStarted {
 		t.Fatal("second concurrent run for the same session was accepted")
+	}
+	if !runtime.CancelSession("session_test") {
+		t.Fatal("active run was not cancelled")
+	}
+	select {
+	case <-runCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("registered run context was not cancelled")
 	}
 	runtime.endSession("session_test")
 	if runtime.IsSessionActive("session_test") {
 		t.Fatal("completed run remained active")
+	}
+	if runtime.CancelSession("session_test") {
+		t.Fatal("inactive session reported a cancellation")
+	}
+}
+
+func TestCancelSessionStopsQueryAndPersistsInterruption(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runner := &blockingAgentRunner{started: make(chan struct{})}
+	runtime := &Runtime{runner: runner, store: st}
+	events := make(chan Event, 8)
+	queryDone := make(chan error, 1)
+	go func() {
+		_, queryErr := runtime.Query(ctx, "session_cancel", "keep investigating", func(event Event) { events <- event })
+		queryDone <- queryErr
+	}()
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("Agent query did not start")
+	}
+	if !runtime.CancelSession("session_cancel") {
+		t.Fatal("active Agent query was not cancelled")
+	}
+	select {
+	case queryErr := <-queryDone:
+		if !errors.Is(queryErr, context.Canceled) {
+			t.Fatalf("query error = %v", queryErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled Agent query did not stop")
+	}
+	close(events)
+	interrupted := 0
+	for event := range events {
+		if event.Type == "interrupted" && event.Content == interruptedRunMessage {
+			interrupted++
+		}
+	}
+	if interrupted != 1 {
+		t.Fatalf("interrupted events = %d", interrupted)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_cancel", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[0].Role != "user" || messages[0].Status != "failed" || messages[1].Role != "assistant" || messages[1].Content != interruptedRunMessage {
+		t.Fatalf("stored interruption = %#v", messages)
 	}
 }
 

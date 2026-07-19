@@ -85,6 +85,7 @@ export const api = {
   chatSessions: () => requestList<ChatSession>('/api/v1/chat/sessions?limit=50'),
   chatMessages: (id: string) => requestList<ChatMessage>(`/api/v1/chat/${encodeURIComponent(id)}/messages?limit=200`),
   chatState: (id: string) => request<ChatState>(`/api/v1/chat/${encodeURIComponent(id)}/state`),
+	cancelChatSession: (id: string) => request<{cancelled:boolean;rejected_approvals:number}>(`/api/v1/chat/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
   deleteChatSession: (id: string) => request<void>(`/api/v1/chat/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
 
@@ -120,7 +121,7 @@ export async function streamChat(sessionId: string, message: string, onEvent: (e
     left.type === right.type && left.role === right.role && left.tool_name === right.tool_name &&
     left.segment_id === right.segment_id && left.session_id === right.session_id
   const dispatch = (event: AgentEvent) => {
-    if (event.type === 'done' || event.type === 'error') terminalEventReceived = true
+    if (event.type === 'done' || event.type === 'error' || event.type === 'interrupted') terminalEventReceived = true
     if (!isContentDelta(event)) {
       flushPending()
       onEvent(event)
