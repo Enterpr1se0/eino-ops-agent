@@ -167,7 +167,7 @@ const zh = {
     name: '名称', address: '地址', port: '端口', user: '用户', authentication: '认证方式', sshPassword: 'SSH 密码', privateKey: '私钥',
     keepPassword: '留空以保留已保存密码', required: '必填', chooseKey: '选择 OpenSSH 私钥', storedKey: '已保存私钥', choosePrivateKey: '选择私钥',
     readyEncrypt: '可加密保存', encryptedConfigured: '已配置加密私钥', keyLimit: 'OpenSSH 私钥 · 最大 1 MiB', keyRequired: '必须上传私钥。', keySizeError: '私钥大小必须在 1 字节到 1 MiB 之间。',
-    proxyJump: 'ProxyJump 主机', direct: '直连', knownHosts: 'Known hosts 文件', useDefault: '使用系统默认值', sudoPolicy: 'Sudo 策略', sudoPasswordLabel: 'Sudo 密码',
+    proxyJump: 'SSH 跳板机', direct: '直连', proxy: '网络代理', proxyURL: '代理地址', proxyUsername: '代理用户名', proxyPassword: '代理密码', knownHosts: 'Known hosts 文件', useDefault: '使用系统默认值', sudoPolicy: 'Sudo 策略', sudoPasswordLabel: 'Sudo 密码',
     credentialNote: '私钥和密码在本机加密保存；sudo 操作需要额外审批。',
     update: '更新主机', save: '保存主机', saved: '{{name}} 已{{action}}。', updated: '更新', registered: '注册',
     trustConfirm: '信任 {{name}}？', trusted: '已信任 {{fingerprint}}', state: '已注册', encrypted: '已加密', hostId: '主机 ID', probe: '探测', trustKey: '信任密钥', deleteConfirm: '删除 {{name}}？',

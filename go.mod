@@ -10,6 +10,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/pkg/sftp v1.13.11
 	golang.org/x/crypto v0.54.0
+	golang.org/x/net v0.56.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.54.0
 	mvdan.cc/sh/v3 v3.12.0

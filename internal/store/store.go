@@ -227,6 +227,9 @@ CREATE TABLE IF NOT EXISTS hosts (
 	private_key_cipher TEXT NOT NULL DEFAULT '',
   known_hosts_file TEXT NOT NULL DEFAULT '',
 	  proxy_jump_host_id TEXT NOT NULL DEFAULT '',
+	  proxy_url TEXT NOT NULL DEFAULT '',
+	  proxy_username TEXT NOT NULL DEFAULT '',
+	  proxy_password_cipher TEXT NOT NULL DEFAULT '',
 	  password_cipher TEXT NOT NULL DEFAULT '',
 	  sudo_mode TEXT NOT NULL DEFAULT 'none',
 	  sudo_password_cipher TEXT NOT NULL DEFAULT '',
@@ -421,6 +424,9 @@ CREATE TABLE IF NOT EXISTS agent_tool_settings (
 		`ALTER TABLE approvals ADD COLUMN request_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'agent'`,
 		`ALTER TABLE hosts ADD COLUMN proxy_jump_host_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE hosts ADD COLUMN proxy_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE hosts ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE hosts ADD COLUMN proxy_password_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN password_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE hosts ADD COLUMN sudo_mode TEXT NOT NULL DEFAULT 'none'`,
 		`ALTER TABLE hosts ADD COLUMN sudo_password_cipher TEXT NOT NULL DEFAULT ''`,
@@ -528,14 +534,16 @@ func (s *Store) UpsertHost(ctx context.Context, host domain.Host) (domain.Host, 
 	}
 	host.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO hosts(id,name,address,port,username,auth_type,private_key_cipher,known_hosts_file,proxy_jump_host_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO hosts(id,name,address,port,username,auth_type,private_key_cipher,known_hosts_file,proxy_jump_host_id,proxy_url,proxy_username,proxy_password_cipher,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,port=excluded.port,
 username=excluded.username,auth_type=excluded.auth_type,private_key_cipher=excluded.private_key_cipher,
-known_hosts_file=excluded.known_hosts_file,proxy_jump_host_id=excluded.proxy_jump_host_id,password_cipher=excluded.password_cipher,
+known_hosts_file=excluded.known_hosts_file,proxy_jump_host_id=excluded.proxy_jump_host_id,
+proxy_url=excluded.proxy_url,proxy_username=excluded.proxy_username,proxy_password_cipher=excluded.proxy_password_cipher,password_cipher=excluded.password_cipher,
 sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,updated_at=excluded.updated_at`,
 		host.ID, host.Name, host.Address, host.Port, host.User, host.AuthType, host.PrivateKeyCipher,
-		host.KnownHostsFile, host.ProxyJumpHostID, host.PasswordCipher, host.SudoMode, host.SudoCipher,
+		host.KnownHostsFile, host.ProxyJumpHostID, host.ProxyURL, host.ProxyUsername, host.ProxyPasswordCipher,
+		host.PasswordCipher, host.SudoMode, host.SudoCipher,
 		formatTime(host.CreatedAt), formatTime(host.UpdatedAt))
 	if err != nil {
 		return domain.Host{}, err
@@ -545,7 +553,8 @@ sudo_mode=excluded.sudo_mode,sudo_password_cipher=excluded.sudo_password_cipher,
 
 func (s *Store) GetHost(ctx context.Context, id string) (domain.Host, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id,name,address,port,username,auth_type,private_key_cipher,
-known_hosts_file,proxy_jump_host_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE id=? OR name=?`, id, id)
+known_hosts_file,proxy_jump_host_id,proxy_url,proxy_username,proxy_password_cipher,password_cipher,
+sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE id=? OR name=?`, id, id)
 	return scanHost(row)
 }
 
@@ -795,7 +804,8 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 
 func (s *Store) ListHosts(ctx context.Context) ([]domain.Host, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,name,address,port,username,auth_type,private_key_cipher,
-known_hosts_file,proxy_jump_host_id,password_cipher,sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE auth_type<>'workspace' ORDER BY name`)
+known_hosts_file,proxy_jump_host_id,proxy_url,proxy_username,proxy_password_cipher,password_cipher,
+sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE auth_type<>'workspace' ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -829,8 +839,8 @@ func scanHost(row scanner) (domain.Host, error) {
 	var host domain.Host
 	var created, updated string
 	err := row.Scan(&host.ID, &host.Name, &host.Address, &host.Port, &host.User, &host.AuthType,
-		&host.PrivateKeyCipher, &host.KnownHostsFile, &host.ProxyJumpHostID, &host.PasswordCipher, &host.SudoMode,
-		&host.SudoCipher, &created, &updated)
+		&host.PrivateKeyCipher, &host.KnownHostsFile, &host.ProxyJumpHostID, &host.ProxyURL, &host.ProxyUsername,
+		&host.ProxyPasswordCipher, &host.PasswordCipher, &host.SudoMode, &host.SudoCipher, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Host{}, ErrNotFound
 	}
@@ -839,6 +849,7 @@ func scanHost(row scanner) (domain.Host, error) {
 	host.HasPassword = host.PasswordCipher != ""
 	host.HasSudoPassword = host.SudoCipher != ""
 	host.HasPrivateKey = host.PrivateKeyCipher != ""
+	host.HasProxyPassword = host.ProxyPasswordCipher != ""
 	return host, err
 }
 

@@ -321,7 +321,7 @@ func (t *NativeSSHTransport) connect(ctx context.Context, connection ConnectionS
 		var raw net.Conn
 		var err error
 		if len(clients) == 0 {
-			raw, err = (&net.Dialer{}).DialContext(hopCtx, "tcp", address)
+			raw, err = dialFirstHop(hopCtx, address, connection.Target)
 		} else {
 			raw, err = dialSSHClientContext(hopCtx, clients[len(clients)-1], address)
 		}
@@ -434,6 +434,9 @@ func validateNativeConnection(connection ConnectionSpec) error {
 		if err := validateHost(host); err != nil {
 			return err
 		}
+	}
+	if _, err := NormalizeProxyURL(connection.Target.ProxyURL); err != nil {
+		return err
 	}
 	return nil
 }

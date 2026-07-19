@@ -387,7 +387,8 @@ func (s *Service) DeleteModelProvider(ctx context.Context, id, actor string) (bo
 func (s *Service) AddHost(ctx context.Context, host domain.Host, actor string) (domain.Host, error) {
 	return s.SaveHost(ctx, domain.HostInput{
 		ID: host.ID, Name: host.Name, Address: host.Address, Port: host.Port, User: host.User,
-		AuthType: host.AuthType, KnownHostsFile: host.KnownHostsFile, ProxyJumpHostID: host.ProxyJumpHostID, SudoMode: host.SudoMode,
+		AuthType: host.AuthType, KnownHostsFile: host.KnownHostsFile, ProxyJumpHostID: host.ProxyJumpHostID,
+		ProxyURL: host.ProxyURL, ProxyUsername: host.ProxyUsername, SudoMode: host.SudoMode,
 	}, actor)
 }
 
@@ -399,6 +400,7 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	input.AuthType = strings.TrimSpace(input.AuthType)
 	input.KnownHostsFile = strings.TrimSpace(input.KnownHostsFile)
 	input.ProxyJumpHostID = strings.TrimSpace(input.ProxyJumpHostID)
+	input.ProxyUsername = strings.TrimSpace(input.ProxyUsername)
 	input.SudoMode = strings.TrimSpace(input.SudoMode)
 	var existing domain.Host
 	hasExisting := false
@@ -428,6 +430,15 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	if input.Address == "" || input.User == "" {
 		return domain.Host{}, fmt.Errorf("address and user are required")
 	}
+	proxyURL, err := sshx.NormalizeProxyURL(input.ProxyURL)
+	if err != nil {
+		return domain.Host{}, err
+	}
+	input.ProxyURL = proxyURL
+	if input.ProxyURL == "" {
+		input.ProxyUsername = ""
+		input.ProxyPassword = ""
+	}
 	if input.AuthType == "key" && input.PrivateKey == "" && (!hasExisting || existing.PrivateKeyCipher == "") {
 		return domain.Host{}, fmt.Errorf("private_key upload is required for key authentication")
 	}
@@ -441,11 +452,14 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 	default:
 		return domain.Host{}, fmt.Errorf("invalid sudo mode %q", input.SudoMode)
 	}
-	if containsCredentialControl(input.Password) || containsCredentialControl(input.SudoPassword) {
-		return domain.Host{}, fmt.Errorf("passwords cannot contain NUL, carriage return, or newline characters")
+	if containsCredentialControl(input.Password) || containsCredentialControl(input.SudoPassword) || containsCredentialControl(input.ProxyUsername) || containsCredentialControl(input.ProxyPassword) {
+		return domain.Host{}, fmt.Errorf("credentials cannot contain NUL, carriage return, or newline characters")
 	}
 	if len(input.Password) > 1024 || len(input.SudoPassword) > 1024 {
 		return domain.Host{}, fmt.Errorf("password is too long")
+	}
+	if len(input.ProxyUsername) > 255 || len(input.ProxyPassword) > 255 {
+		return domain.Host{}, fmt.Errorf("proxy credentials are too long")
 	}
 	if input.AuthType != "key" {
 		input.PrivateKey = ""
@@ -453,13 +467,17 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 
 	host := domain.Host{
 		ID: input.ID, Name: input.Name, Address: input.Address, Port: input.Port, User: input.User,
-		AuthType: input.AuthType, KnownHostsFile: input.KnownHostsFile, ProxyJumpHostID: input.ProxyJumpHostID, SudoMode: input.SudoMode,
+		AuthType: input.AuthType, KnownHostsFile: input.KnownHostsFile, ProxyJumpHostID: input.ProxyJumpHostID,
+		ProxyURL: input.ProxyURL, ProxyUsername: input.ProxyUsername, SudoMode: input.SudoMode,
 	}
 	if hasExisting {
 		host.CreatedAt = existing.CreatedAt
 		host.PasswordCipher = existing.PasswordCipher
 		host.SudoCipher = existing.SudoCipher
 		host.PrivateKeyCipher = existing.PrivateKeyCipher
+		if input.ProxyURL == existing.ProxyURL && input.ProxyUsername == existing.ProxyUsername {
+			host.ProxyPasswordCipher = existing.ProxyPasswordCipher
+		}
 	}
 	if input.AuthType != "key" {
 		host.PrivateKeyCipher = ""
@@ -491,6 +509,15 @@ func (s *Service) SaveHost(ctx context.Context, input domain.HostInput, actor st
 			return domain.Host{}, fmt.Errorf("encrypt sudo password: %w", err)
 		}
 		host.SudoCipher = cipher
+	}
+	if input.ProxyURL == "" || input.ProxyUsername == "" {
+		host.ProxyPasswordCipher = ""
+	} else if input.ProxyPassword != "" {
+		cipher, err := s.encryptor.Encrypt([]byte(input.ProxyPassword))
+		if err != nil {
+			return domain.Host{}, fmt.Errorf("encrypt SSH proxy password: %w", err)
+		}
+		host.ProxyPasswordCipher = cipher
 	}
 	if input.AuthType == "password" && host.PasswordCipher == "" {
 		return domain.Host{}, fmt.Errorf("password is required for password authentication")
@@ -1223,6 +1250,13 @@ func (s *Service) hydrateHostSecrets(host domain.Host, includeSudo bool) (domain
 			return domain.Host{}, fmt.Errorf("decrypt SSH private key: %w", err)
 		}
 		host.PrivateKey = plain
+	}
+	if host.ProxyPasswordCipher != "" {
+		plain, err := s.encryptor.Decrypt(host.ProxyPasswordCipher)
+		if err != nil {
+			return domain.Host{}, fmt.Errorf("decrypt SSH proxy password: %w", err)
+		}
+		host.ProxyPassword = string(plain)
 	}
 	if includeSudo && host.SudoMode == "password" {
 		plain, err := s.encryptor.Decrypt(host.SudoCipher)

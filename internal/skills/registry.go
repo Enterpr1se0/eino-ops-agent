@@ -248,27 +248,6 @@ func (r *Registry) initializeRoot() error {
 			_ = os.RemoveAll(temporary)
 		}
 	}()
-	entries, err := content.ReadDir("content")
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
-			continue
-		}
-		data, err := content.ReadFile("content/" + entry.Name())
-		if err != nil {
-			return err
-		}
-		name := strings.TrimSuffix(entry.Name(), ".md")
-		directory := filepath.Join(temporary, name)
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(directory, "SKILL.md"), data, 0o600); err != nil {
-			return err
-		}
-	}
 	if err := os.Rename(temporary, r.root); err != nil {
 		if info, statErr := os.Lstat(r.root); statErr == nil && info.IsDir() {
 			return nil

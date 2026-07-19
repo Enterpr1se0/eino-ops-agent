@@ -13,6 +13,9 @@ export interface Host {
   has_private_key: boolean
   known_hosts_file?: string
   proxy_jump_host_id?: string
+  proxy_url?: string
+  proxy_username?: string
+  has_proxy_password: boolean
   has_password: boolean
   sudo_mode: HostSudoMode
   has_sudo_password: boolean
@@ -30,6 +33,9 @@ export interface HostInput {
   private_key: string
   known_hosts_file: string
   proxy_jump_host_id: string
+  proxy_url: string
+  proxy_username: string
+  proxy_password: string
   password: string
   sudo_mode: HostSudoMode
   sudo_password: string

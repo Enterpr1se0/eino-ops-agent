@@ -21,26 +21,31 @@ const (
 )
 
 type Host struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	Address          string    `json:"address"`
-	Port             int       `json:"port"`
-	User             string    `json:"user"`
-	AuthType         string    `json:"auth_type"`
-	PrivateKeyCipher string    `json:"-"`
-	HasPrivateKey    bool      `json:"has_private_key"`
-	KnownHostsFile   string    `json:"known_hosts_file,omitempty"`
-	ProxyJumpHostID  string    `json:"proxy_jump_host_id,omitempty"`
-	PasswordCipher   string    `json:"-"`
-	HasPassword      bool      `json:"has_password"`
-	SudoMode         string    `json:"sudo_mode"`
-	SudoCipher       string    `json:"-"`
-	HasSudoPassword  bool      `json:"has_sudo_password"`
-	Password         string    `json:"-"`
-	SudoPassword     string    `json:"-"`
-	PrivateKey       []byte    `json:"-"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	Address             string    `json:"address"`
+	Port                int       `json:"port"`
+	User                string    `json:"user"`
+	AuthType            string    `json:"auth_type"`
+	PrivateKeyCipher    string    `json:"-"`
+	HasPrivateKey       bool      `json:"has_private_key"`
+	KnownHostsFile      string    `json:"known_hosts_file,omitempty"`
+	ProxyJumpHostID     string    `json:"proxy_jump_host_id,omitempty"`
+	ProxyURL            string    `json:"proxy_url,omitempty"`
+	ProxyUsername       string    `json:"proxy_username,omitempty"`
+	ProxyPasswordCipher string    `json:"-"`
+	HasProxyPassword    bool      `json:"has_proxy_password"`
+	PasswordCipher      string    `json:"-"`
+	HasPassword         bool      `json:"has_password"`
+	SudoMode            string    `json:"sudo_mode"`
+	SudoCipher          string    `json:"-"`
+	HasSudoPassword     bool      `json:"has_sudo_password"`
+	Password            string    `json:"-"`
+	SudoPassword        string    `json:"-"`
+	PrivateKey          []byte    `json:"-"`
+	ProxyPassword       string    `json:"-"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 type HostInput struct {
@@ -53,6 +58,9 @@ type HostInput struct {
 	PrivateKey      string `json:"private_key,omitempty"`
 	KnownHostsFile  string `json:"known_hosts_file,omitempty"`
 	ProxyJumpHostID string `json:"proxy_jump_host_id,omitempty"`
+	ProxyURL        string `json:"proxy_url,omitempty"`
+	ProxyUsername   string `json:"proxy_username,omitempty"`
+	ProxyPassword   string `json:"proxy_password,omitempty"`
 	Password        string `json:"password,omitempty"`
 	SudoMode        string `json:"sudo_mode"`
 	SudoPassword    string `json:"sudo_password,omitempty"`

@@ -167,7 +167,7 @@ const en = {
     name: 'Name', address: 'Address', port: 'Port', user: 'User', authentication: 'Authentication', sshPassword: 'SSH password', privateKey: 'Private key',
     keepPassword: 'Leave blank to keep stored password', required: 'Required', chooseKey: 'Choose an OpenSSH private key', storedKey: 'Stored private key', choosePrivateKey: 'Choose private key',
     readyEncrypt: 'Ready to encrypt', encryptedConfigured: 'Encrypted key configured', keyLimit: 'OpenSSH key · max 1 MiB', keyRequired: 'A private key upload is required.', keySizeError: 'Private key must be between 1 byte and 1 MiB.',
-    proxyJump: 'ProxyJump host', direct: 'Direct connection', knownHosts: 'Known hosts file', useDefault: 'Use system default', sudoPolicy: 'Sudo policy', sudoPasswordLabel: 'Sudo password',
+    proxyJump: 'SSH jump host', direct: 'Direct connection', proxy: 'Network proxy', proxyURL: 'Proxy URL', proxyUsername: 'Proxy username', proxyPassword: 'Proxy password', knownHosts: 'Known hosts file', useDefault: 'Use system default', sudoPolicy: 'Sudo policy', sudoPasswordLabel: 'Sudo password',
     credentialNote: 'Keys and passwords are encrypted locally. Sudo operations require additional approval.',
     update: 'Update host', save: 'Save host', saved: '{{name}} {{action}}.', updated: 'updated', registered: 'registered',
     trustConfirm: 'Trust {{name}}?', trusted: 'Trusted {{fingerprint}}', state: 'REGISTERED', encrypted: 'encrypted', hostId: 'Host ID', probe: 'Probe', trustKey: 'Trust key', deleteConfirm: 'Delete {{name}}?',

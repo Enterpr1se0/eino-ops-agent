@@ -82,18 +82,19 @@ func TestHostCredentialsAreEncryptedPreservedAndNeverSerialized(t *testing.T) {
 	host, err := svc.SaveHost(ctx, domain.HostInput{
 		Name: "password-host", Address: "192.0.2.10", Port: 22, User: "ops", AuthType: "password",
 		Password: "ssh-super-secret", SudoMode: "password", SudoPassword: "sudo-super-secret",
+		ProxyURL: "SOCKS5://127.0.0.1:1080/", ProxyUsername: "proxy-user", ProxyPassword: "proxy-super-secret",
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !host.HasPassword || !host.HasSudoPassword {
+	if !host.HasPassword || !host.HasSudoPassword || !host.HasProxyPassword || host.ProxyURL != "socks5://127.0.0.1:1080" {
 		t.Fatalf("credential capability flags missing: %#v", host)
 	}
 	stored, err := svc.store.GetHost(ctx, host.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.PasswordCipher == "" || stored.SudoCipher == "" || strings.Contains(stored.PasswordCipher, "super-secret") || strings.Contains(stored.SudoCipher, "super-secret") {
+	if stored.PasswordCipher == "" || stored.SudoCipher == "" || stored.ProxyPasswordCipher == "" || strings.Contains(stored.PasswordCipher, "super-secret") || strings.Contains(stored.SudoCipher, "super-secret") || strings.Contains(stored.ProxyPasswordCipher, "super-secret") {
 		t.Fatalf("host credentials were not encrypted: %#v", stored)
 	}
 	publicJSON, _ := json.Marshal(host)
@@ -103,19 +104,19 @@ func TestHostCredentialsAreEncryptedPreservedAndNeverSerialized(t *testing.T) {
 
 	updated, err := svc.SaveHost(ctx, domain.HostInput{
 		ID: host.ID, Name: "password-host-renamed", Address: host.Address, Port: host.Port, User: host.User,
-		AuthType: "password", SudoMode: "password",
+		AuthType: "password", SudoMode: "password", ProxyURL: host.ProxyURL, ProxyUsername: host.ProxyUsername,
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !updated.HasPassword || !updated.HasSudoPassword {
+	if !updated.HasPassword || !updated.HasSudoPassword || !updated.HasProxyPassword {
 		t.Fatalf("blank edit erased stored credentials: %#v", updated)
 	}
 	hydrated, err := svc.hydrateHostSecrets(updated, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hydrated.Password != "ssh-super-secret" || hydrated.SudoPassword != "sudo-super-secret" {
+	if hydrated.Password != "ssh-super-secret" || hydrated.SudoPassword != "sudo-super-secret" || hydrated.ProxyPassword != "proxy-super-secret" {
 		t.Fatal("encrypted host credentials did not round-trip")
 	}
 }

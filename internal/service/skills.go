@@ -19,7 +19,7 @@ func (s *Service) InitializeSkills() error {
 
 func (s *Service) ListSkills() ([]skills.Skill, error) {
 	if s.skills == nil {
-		return skills.List()
+		return []skills.Skill{}, nil
 	}
 	return s.skills.List()
 }
@@ -40,7 +40,7 @@ func (s *Service) ListEnabledSkills() ([]skills.Skill, error) {
 
 func (s *Service) GetAdminSkill(name string) (skills.Skill, error) {
 	if s.skills == nil {
-		return skills.Get(name)
+		return skills.Skill{}, fmt.Errorf("%w: %s", skills.ErrNotFound, name)
 	}
 	return s.skills.Get(name)
 }

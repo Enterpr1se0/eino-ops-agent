@@ -27,6 +27,8 @@ type sshHostBinding struct {
 	AuthType        string `json:"auth_type"`
 	KnownHostsFile  string `json:"known_hosts_file,omitempty"`
 	ProxyJumpHostID string `json:"proxy_jump_host_id,omitempty"`
+	ProxyURL        string `json:"proxy_url,omitempty"`
+	ProxyUsername   string `json:"proxy_username,omitempty"`
 	UpdatedAt       string `json:"updated_at"`
 }
 
@@ -73,7 +75,7 @@ func bindSSHHost(host domain.Host) sshHostBinding {
 	}
 	return sshHostBinding{
 		ID: host.ID, Address: host.Address, Port: host.Port, User: host.User,
-		AuthType: host.AuthType, KnownHostsFile: host.KnownHostsFile,
+		AuthType: host.AuthType, KnownHostsFile: host.KnownHostsFile, ProxyURL: host.ProxyURL, ProxyUsername: host.ProxyUsername,
 		ProxyJumpHostID: host.ProxyJumpHostID, UpdatedAt: updated,
 	}
 }

@@ -9,20 +9,23 @@ import (
 	"testing"
 )
 
-func TestRegistryInitializesBuiltinsAndKeepsPermanentDeletion(t *testing.T) {
+func TestRegistryInitializesEmptyAndKeepsPermanentDeletion(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "skills")
 	registry := NewRegistry(root)
 	items, err := registry.List()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 3 {
-		t.Fatalf("initialized skills=%d, want 3", len(items))
+	if len(items) != 0 {
+		t.Fatalf("new registry contains default skills: %#v", items)
 	}
-	if err := registry.Delete("linux-diagnosis"); err != nil {
+	if _, err := registry.Save("temporary", "# Temporary\n\nDelete this workflow."); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.Get("linux-diagnosis"); !errors.Is(err, ErrNotFound) {
+	if err := registry.Delete("temporary"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Get("temporary"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted skill error=%v", err)
 	}
 
@@ -31,7 +34,7 @@ func TestRegistryInitializesBuiltinsAndKeepsPermanentDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 2 {
+	if len(items) != 0 {
 		t.Fatalf("permanently deleted skill reappeared: %#v", items)
 	}
 }
@@ -96,7 +99,10 @@ func TestRegistryRejectsZIPPathTraversal(t *testing.T) {
 func TestRegistryEnabledStatePersists(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "skills")
 	registry := NewRegistry(root)
-	disabled, err := registry.SetEnabled("linux-diagnosis", false)
+	if _, err := registry.Save("custom-diagnosis", "# Custom Diagnosis\n\nInspect the reported failure."); err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := registry.SetEnabled("custom-diagnosis", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,14 +111,14 @@ func TestRegistryEnabledStatePersists(t *testing.T) {
 	}
 
 	restarted := NewRegistry(root)
-	loaded, err := restarted.Get("linux-diagnosis")
+	loaded, err := restarted.Get("custom-diagnosis")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if loaded.Enabled {
 		t.Fatalf("disabled state did not persist: %#v", loaded)
 	}
-	enabled, err := restarted.SetEnabled("linux-diagnosis", true)
+	enabled, err := restarted.SetEnabled("custom-diagnosis", true)
 	if err != nil {
 		t.Fatal(err)
 	}
