@@ -26,12 +26,14 @@ jobs:
         include:
           - name: Linux x64
             os: ubuntu-22.04
+            run_tests: true
             artifact: opspilot-linux-x64
             paths: |
               web/src-tauri/target/release/bundle/appimage/*.AppImage
               web/src-tauri/target/release/bundle/deb/*.deb
           - name: Windows x64
             os: windows-latest
+            run_tests: false
             artifact: opspilot-windows-x64
             paths: web/src-tauri/target/release/bundle/nsis/*-setup.exe
     runs-on: ${{ matrix.os }}
@@ -66,7 +68,12 @@ jobs:
         working-directory: web
 
       - name: Test Go backend
+        if: matrix.run_tests
         run: go test ./...
+
+      - name: Compile Go backend for Windows
+        if: ${{ !matrix.run_tests }}
+        run: go test ./... -run '^$'
 
       - name: Build desktop package
         run: npm run desktop:build

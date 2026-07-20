@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
+	posixpath "path"
 	"regexp"
 	"sort"
 	"strings"
@@ -276,7 +276,7 @@ func shellSource(req domain.ExecRequest) (string, error) {
 	case domain.ExecWorkspacePatch:
 		return "patch " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
 	case domain.ExecWorkspaceUpload:
-		if req.WorkspaceID == "" || req.RelativePath == "" || req.ExpectedSHA256 == "" || !filepath.IsAbs(req.RemotePath) {
+		if req.WorkspaceID == "" || req.RelativePath == "" || req.ExpectedSHA256 == "" || !posixpath.IsAbs(req.RemotePath) {
 			return "", fmt.Errorf("workspace upload requires a workspace file, expected SHA256, and absolute remote path")
 		}
 		return "sftp put " + shellQuote(req.WorkspaceID+"/"+req.RelativePath) + " " + shellQuote(req.RemotePath), nil
@@ -322,7 +322,7 @@ func ruleMatches(rule Rule, host domain.Host, source string, req domain.ExecRequ
 	if len(rule.Paths) > 0 {
 		matched := false
 		for _, path := range rule.Paths {
-			if strings.HasPrefix(filepath.Clean(req.Cwd), filepath.Clean(path)) || strings.Contains(source, path) {
+			if strings.HasPrefix(posixpath.Clean(req.Cwd), posixpath.Clean(path)) || strings.Contains(source, path) {
 				matched = true
 				break
 			}
@@ -348,7 +348,7 @@ func maxRisk(left, right domain.RiskLevel) domain.RiskLevel {
 
 func baseProgram(value string) string {
 	value = strings.Trim(value, "'\"")
-	return filepath.Base(value)
+	return posixpath.Base(value)
 }
 
 func printNode(node syntax.Node) string {

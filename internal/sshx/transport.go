@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
+	posixpath "path"
 	"regexp"
 	"strings"
 	"sync"
@@ -158,7 +158,7 @@ func applyElevation(host domain.Host, req domain.ExecRequest, command string, st
 func remotePrefix(cwd string, env map[string]string) (string, error) {
 	var parts []string
 	if cwd != "" {
-		if !filepath.IsAbs(cwd) {
+		if !posixpath.IsAbs(cwd) {
 			return "", fmt.Errorf("cwd must be an absolute path")
 		}
 		parts = append(parts, "cd -- "+shellQuote(cwd)+" &&")

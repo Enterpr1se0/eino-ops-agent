@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path"
+	posixpath "path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -1415,14 +1415,14 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 			if filepath.IsAbs(req.Cwd) || filepath.Clean(req.Cwd) != req.Cwd || strings.ContainsAny(req.Cwd, "\x00\r\n") {
 				return fmt.Errorf("workspace shell cwd must be a clean relative path")
 			}
-		} else if !filepath.IsAbs(req.Cwd) || filepath.Clean(req.Cwd) != req.Cwd || strings.ContainsAny(req.Cwd, "\x00\r\n") {
+		} else if !posixpath.IsAbs(req.Cwd) || posixpath.Clean(req.Cwd) != req.Cwd || strings.ContainsAny(req.Cwd, "\x00\r\n") {
 			return fmt.Errorf("cwd must be a clean absolute remote path")
 		}
 	}
-	if req.RemotePath != "" && (!path.IsAbs(req.RemotePath) || path.Clean(req.RemotePath) != req.RemotePath || strings.ContainsAny(req.RemotePath, "\x00\r\n")) {
+	if req.RemotePath != "" && (!posixpath.IsAbs(req.RemotePath) || posixpath.Clean(req.RemotePath) != req.RemotePath || strings.ContainsAny(req.RemotePath, "\x00\r\n")) {
 		return fmt.Errorf("remote_path must be a clean absolute path")
 	}
-	if req.SourcePath != "" && (!path.IsAbs(req.SourcePath) || path.Clean(req.SourcePath) != req.SourcePath || strings.ContainsAny(req.SourcePath, "\x00\r\n")) {
+	if req.SourcePath != "" && (!posixpath.IsAbs(req.SourcePath) || posixpath.Clean(req.SourcePath) != req.SourcePath || strings.ContainsAny(req.SourcePath, "\x00\r\n")) {
 		return fmt.Errorf("source_path must be a clean absolute path")
 	}
 	for key, value := range req.Env {
@@ -1436,7 +1436,7 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 	if req.Mode != domain.ExecProgram {
 		return nil
 	}
-	program := strings.ToLower(filepath.Base(req.Program))
+	program := strings.ToLower(posixpath.Base(req.Program))
 	interactive := map[string]bool{"bash": true, "sh": true, "zsh": true, "fish": true, "su": true, "vi": true, "vim": true, "nano": true, "emacs": true, "less": true, "more": true, "man": true}
 	if interactive[program] {
 		return fmt.Errorf("interactive program %q is unsupported because SSH tools do not allocate a PTY; use a non-interactive command or ssh_run_script", program)
@@ -1612,7 +1612,7 @@ func (s *Service) ReadFile(ctx context.Context, hostID, path string, maxBytes in
 }
 
 func (s *Service) ListFiles(ctx context.Context, hostID, path string, actor string) (domain.ExecResult, error) {
-	if !filepath.IsAbs(path) {
+	if !posixpath.IsAbs(path) {
 		return domain.ExecResult{}, fmt.Errorf("remote directory path must be absolute")
 	}
 	return s.Submit(ctx, domain.ExecRequest{HostID: hostID, Mode: domain.ExecProgram, Program: "ls", Args: []string{"-la", "--", path}, Reason: "list a remote directory for diagnosis"}, actor)

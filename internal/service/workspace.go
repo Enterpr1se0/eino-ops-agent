@@ -899,6 +899,11 @@ func (s *Service) workspaceSandboxExecutable() (string, error) {
 	return filepath.Abs(path)
 }
 
+func workspaceSandboxSupportsDisableUserns(sandbox string) bool {
+	output, err := exec.Command(sandbox, "--help").CombinedOutput()
+	return err == nil && bytes.Contains(output, []byte("--disable-userns"))
+}
+
 func workspaceHostShellExecutable() (string, string, error) {
 	candidates := []string{"bash"}
 	if runtime.GOOS == "windows" {
@@ -1018,13 +1023,17 @@ func (s *Service) executeWorkspaceSandboxShell(ctx context.Context, workspace co
 		mountMode = "--ro-bind"
 	}
 	args := []string{
-		"--die-with-parent", "--new-session", "--unshare-all", "--unshare-user", "--disable-userns", "--cap-drop", "ALL",
+		"--die-with-parent", "--new-session", "--unshare-all", "--unshare-user", "--cap-drop", "ALL",
 		"--ro-bind", "/usr", "/usr",
 		"--ro-bind-try", "/lib", "/lib",
 		"--ro-bind-try", "/lib64", "/lib64",
 		"--symlink", "usr/bin", "/bin", "--symlink", "usr/sbin", "/sbin",
 		"--dir", "/etc", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
 		"--dir", "/workspace", mountMode, root, "/workspace",
+	}
+	if workspaceSandboxSupportsDisableUserns(sandbox) {
+		// Older distribution bubblewrap releases reject this optional hardening flag.
+		args = append([]string{"--disable-userns"}, args...)
 	}
 	for _, mask := range masks {
 		if mask.directory {

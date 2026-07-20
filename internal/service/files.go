@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	posixpath "path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -116,10 +116,10 @@ func (s *Service) ApplyRemoteConfig(ctx context.Context, hostID, path, content, 
 		return domain.ExecResult{}, err
 	}
 	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
-	directory := filepath.Dir(path)
-	base := filepath.Base(path)
-	backupPath := filepath.Join(directory, ".opspilot-"+base+"-"+suffix+".bak")
-	tempPath := filepath.Join(directory, ".opspilot-"+base+"-"+suffix+".tmp")
+	directory := posixpath.Dir(path)
+	base := posixpath.Base(path)
+	backupPath := posixpath.Join(directory, ".opspilot-"+base+"-"+suffix+".bak")
+	tempPath := posixpath.Join(directory, ".opspilot-"+base+"-"+suffix+".tmp")
 	tempValidatorCommand, err := s.validatorCommandFor(validatorID, "remote", path, tempPath)
 	if err != nil {
 		return domain.ExecResult{}, err
@@ -206,7 +206,7 @@ func (s *Service) RestoreRemoteConfig(ctx context.Context, operationID string, e
 		"cmp -s -- "+shellQuote(operation.Path)+" "+shellQuote(preRestorePath)+" || exit 73",
 		"mv -f -- "+shellQuote(tempPath)+" "+shellQuote(operation.Path),
 		"sync -f -- "+shellQuote(operation.Path),
-		"sync -f -- "+shellQuote(filepath.Dir(operation.Path)),
+		"sync -f -- "+shellQuote(posixpath.Dir(operation.Path)),
 	)
 	if validatorCommand != "" {
 		lines = append(lines,
@@ -215,7 +215,7 @@ func (s *Service) RestoreRemoteConfig(ctx context.Context, operationID string, e
 			"  sync -f -- "+shellQuote(tempPath),
 			"  mv -f -- "+shellQuote(tempPath)+" "+shellQuote(operation.Path),
 			"  sync -f -- "+shellQuote(operation.Path),
-			"  sync -f -- "+shellQuote(filepath.Dir(operation.Path)),
+			"  sync -f -- "+shellQuote(posixpath.Dir(operation.Path)),
 			"  unlink -- "+shellQuote(preRestorePath),
 			"  exit 74",
 			"fi",
@@ -273,7 +273,7 @@ func buildConfigTransactionScript(path, tempPath, backupPath, content, patchCont
 		"mv -f -- "+tempQ+" "+pathQ,
 		"trap - EXIT",
 		"sync -f -- "+pathQ,
-		"sync -f -- "+shellQuote(filepath.Dir(path)),
+		"sync -f -- "+shellQuote(posixpath.Dir(path)),
 	)
 	if validatorCommand != "" {
 		lines = append(lines,
@@ -286,7 +286,7 @@ func buildConfigTransactionScript(path, tempPath, backupPath, content, patchCont
 			"  else",
 			"    unlink -- "+pathQ,
 			"  fi",
-			"  sync -f -- "+shellQuote(filepath.Dir(path)),
+			"  sync -f -- "+shellQuote(posixpath.Dir(path)),
 			"  exit 74",
 			"fi",
 			"printf '"+fileValidationMarker+"\\n'",
@@ -334,15 +334,15 @@ func validatorAllowsPath(validator config.Validator, path string) bool {
 	if len(validator.PathPatterns) == 0 {
 		return false
 	}
-	clean := filepath.Clean(path)
+	clean := posixpath.Clean(path)
 	for _, pattern := range validator.PathPatterns {
-		pattern = filepath.Clean(pattern)
-		if strings.HasSuffix(pattern, string(filepath.Separator)+"**") {
-			root := strings.TrimSuffix(pattern, string(filepath.Separator)+"**")
-			if clean == root || strings.HasPrefix(clean, root+string(filepath.Separator)) {
+		pattern = posixpath.Clean(pattern)
+		if strings.HasSuffix(pattern, "/**") {
+			root := strings.TrimSuffix(pattern, "/**")
+			if clean == root || strings.HasPrefix(clean, root+"/") {
 				return true
 			}
-		} else if matched, _ := filepath.Match(pattern, clean); matched {
+		} else if matched, _ := posixpath.Match(pattern, clean); matched {
 			return true
 		}
 	}
@@ -350,7 +350,7 @@ func validatorAllowsPath(validator config.Validator, path string) bool {
 }
 
 func validateRemoteFilePath(path string) error {
-	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\x00\r\n") || filepath.Clean(path) != path {
+	if !posixpath.IsAbs(path) || strings.ContainsAny(path, "\x00\r\n") || posixpath.Clean(path) != path {
 		return fmt.Errorf("remote file path must be a clean absolute path")
 	}
 	return nil
@@ -410,7 +410,7 @@ func parseConfigTransactionOutput(path, validatorID, output string) domain.FileM
 }
 
 func singlePatchTarget(cwd, patchContent string) (string, error) {
-	if !filepath.IsAbs(cwd) || filepath.Clean(cwd) != cwd {
+	if !posixpath.IsAbs(cwd) || posixpath.Clean(cwd) != cwd {
 		return "", fmt.Errorf("remote working directory must be a clean absolute path")
 	}
 	targets := make(map[string]struct{})
@@ -428,7 +428,7 @@ func singlePatchTarget(cwd, patchContent string) (string, error) {
 		}
 		value = strings.TrimPrefix(value, "b/")
 		value = strings.TrimPrefix(value, "a/")
-		if filepath.IsAbs(value) || value == ".." || strings.HasPrefix(value, "../") {
+		if posixpath.IsAbs(value) || value == ".." || strings.HasPrefix(value, "../") {
 			return "", fmt.Errorf("patch target escapes the working directory")
 		}
 		targets[value] = struct{}{}
@@ -440,8 +440,8 @@ func singlePatchTarget(cwd, patchContent string) (string, error) {
 	for value := range targets {
 		relative = value
 	}
-	target := filepath.Clean(filepath.Join(cwd, relative))
-	if target != cwd && !strings.HasPrefix(target, cwd+string(filepath.Separator)) {
+	target := posixpath.Clean(posixpath.Join(cwd, relative))
+	if target != cwd && !strings.HasPrefix(target, cwd+"/") {
 		return "", fmt.Errorf("patch target escapes the working directory")
 	}
 	return target, nil
