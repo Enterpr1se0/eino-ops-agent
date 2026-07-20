@@ -9,9 +9,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -39,6 +43,13 @@ type application struct {
 	agent   *agent.Runtime
 }
 
+type serveOptions struct {
+	QuickStart        bool
+	ConfigPath        string
+	ConfigCreated     bool
+	GeneratedPassword string
+}
+
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
 		slog.Error("command failed", "error", err)
@@ -47,10 +58,22 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
+	quickStart := len(args) == 0
 	configPath := os.Getenv("OPS_AGENT_CONFIG")
 	if len(args) >= 2 && args[0] == "--config" {
 		configPath = args[1]
 		args = args[2:]
+	}
+	configCreated := false
+	if quickStart {
+		args = []string{"serve"}
+		if configPath == "" {
+			var err error
+			configPath, configCreated, err = prepareQuickStart()
+			if err != nil {
+				return err
+			}
+		}
 	}
 	if len(args) == 0 {
 		usage()
@@ -74,10 +97,24 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer app.store.Close()
 	defer app.service.CloseMCPServers()
+	generatedPassword := ""
+	if quickStart && app.config.WebAuth.BootstrapPassword == "" {
+		if _, err := app.store.AdminPasswordHash(ctx); errors.Is(err, store.ErrNotFound) {
+			generatedPassword, err = security.GenerateAdminPassword()
+			if err != nil {
+				return fmt.Errorf("generate initial administrator password: %w", err)
+			}
+			app.config.WebAuth.BootstrapPassword = generatedPassword
+		} else if err != nil {
+			return fmt.Errorf("read administrator password state: %w", err)
+		}
+	}
 
 	switch args[0] {
 	case "serve":
-		return serve(ctx, app)
+		return serve(ctx, app, serveOptions{
+			QuickStart: quickStart, ConfigPath: configPath, ConfigCreated: configCreated, GeneratedPassword: generatedPassword,
+		})
 	case "mcp":
 		return mcpserver.New(app.service, version).Run(ctx)
 	case "host":
@@ -137,10 +174,43 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 	return &application{config: cfg, store: st, service: svc, agent: runtime}, nil
 }
 
-func serve(ctx context.Context, app *application) error {
+func prepareQuickStart() (string, bool, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", false, fmt.Errorf("locate executable: %w", err)
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve executable path: %w", err)
+	}
+	return prepareQuickStartIn(filepath.Dir(executable))
+}
+
+func prepareQuickStartIn(appDir string) (string, bool, error) {
+	appDir, err := filepath.Abs(appDir)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve application directory: %w", err)
+	}
+	if err := os.Chdir(appDir); err != nil {
+		return "", false, fmt.Errorf("use executable directory %q: %w", appDir, err)
+	}
+	configPath := filepath.Join(appDir, config.DefaultFileName)
+	created, err := config.EnsureDefaultFile(configPath)
+	if err != nil {
+		return "", false, err
+	}
+	return configPath, created, nil
+}
+
+func serve(ctx context.Context, app *application, options serveOptions) error {
 	if err := app.service.RecoverInterruptedTasks(ctx); err != nil {
 		return fmt.Errorf("recover persisted tasks: %w", err)
 	}
+	listener, err := net.Listen("tcp", app.config.ListenAddress)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", app.config.ListenAddress, err)
+	}
+	defer listener.Close()
 	webAuth := security.NewWebAuth(app.store, app.config.WebAuth.SessionTTL)
 	if err := webAuth.Initialize(ctx, app.config.WebAuth.BootstrapPassword); err != nil {
 		return fmt.Errorf("initialize web authentication: %w", err)
@@ -158,13 +228,60 @@ func serve(ctx context.Context, app *application) error {
 		defer cancel()
 		_ = server.Shutdown(graceCtx)
 	}()
-	slog.Info("Ops Agent listening", "component", "server", "address", app.config.ListenAddress, "agent_available", app.agent.Available())
-	err := server.ListenAndServe()
+	address := listener.Addr().String()
+	slog.Info("Ops Agent listening", "component", "server", "address", address, "agent_available", app.agent.Available())
+	if options.QuickStart {
+		url := localWebURL(listener.Addr())
+		printQuickStart(options, url)
+		if err := openQuickStartBrowser(url); err != nil {
+			slog.Debug("could not open browser", "component", "server", "error", err)
+		}
+	}
+	err = server.Serve(listener)
 	if errors.Is(err, http.ErrServerClosed) {
 		slog.Info("server stopped", "component", "server")
 		return nil
 	}
 	return err
+}
+
+func localWebURL(address net.Addr) string {
+	host, port, err := net.SplitHostPort(address.String())
+	if err != nil {
+		return "http://127.0.0.1:8080"
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+func printQuickStart(options serveOptions, url string) {
+	fmt.Println()
+	if options.ConfigCreated {
+		fmt.Println("Created configuration:", options.ConfigPath)
+	} else {
+		fmt.Println("Configuration:", options.ConfigPath)
+	}
+	if options.GeneratedPassword != "" {
+		fmt.Println("Initial administrator password:", options.GeneratedPassword)
+		fmt.Println("Change this password after signing in. It will not be shown again.")
+	}
+	fmt.Println("Open:", url)
+	fmt.Println("Press Ctrl+C to stop OpsPilot.")
+	fmt.Println()
+}
+
+func openQuickStartBrowser(url string) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	command := exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", url)
+	if err := command.Start(); err != nil {
+		return err
+	}
+	go func() { _ = command.Wait() }()
+	return nil
 }
 
 func adminCommand(ctx context.Context, app *application, args []string) error {
@@ -402,6 +519,7 @@ func usage() {
 	fmt.Println(`Ops Agent ` + version + `
 
 Usage:
+  ops-agent                         Create/load config.yaml and start the Web UI
   ops-agent [--config FILE] serve
   ops-agent [--config FILE] chat
   ops-agent [--config FILE] mcp

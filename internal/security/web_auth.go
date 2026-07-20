@@ -20,6 +20,11 @@ import (
 
 const SessionCookieName = "opspilot_session"
 
+// GenerateAdminPassword returns a random password suitable for first startup.
+func GenerateAdminPassword() (string, error) {
+	return randomToken(18)
+}
+
 type WebAuth struct {
 	store      *store.Store
 	sessionTTL time.Duration

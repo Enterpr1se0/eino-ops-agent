@@ -21,7 +21,7 @@ const en = {
   },
   auth: {
     subtitle: 'OPSPILOT', title: 'Administrator sign in',
-    password: 'Administrator password', authenticating: 'Signing in...', enter: 'Sign in', initialPassword: 'Password environment variable:',
+    password: 'Administrator password', authenticating: 'Signing in...', enter: 'Sign in', initialPassword: 'The initial password is shown in the startup window on first launch',
   },
   config: {
     tabs: { models: 'Model providers', hosts: 'SSH hosts', system: 'System settings' },

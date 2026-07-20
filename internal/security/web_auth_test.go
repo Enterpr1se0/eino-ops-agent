@@ -52,3 +52,20 @@ func TestWebAuthInitializeLoginLogoutAndReset(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGenerateAdminPassword(t *testing.T) {
+	first, err := GenerateAdminPassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := GenerateAdminPassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAdminPassword(first); err != nil {
+		t.Fatalf("generated password is invalid: %v", err)
+	}
+	if first == second {
+		t.Fatal("generated passwords unexpectedly match")
+	}
+}

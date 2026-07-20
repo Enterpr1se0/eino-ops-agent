@@ -3,8 +3,56 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestEnsureDefaultFileCreatesLoadableConfigWithoutOverwriting(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, DefaultFileName)
+	created, err := EnsureDefaultFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("default configuration was not created")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "listen_address: 0.0.0.0:8080") || strings.Contains(string(data), "password:") {
+		t.Fatalf("unexpected generated configuration:\n%s", data)
+	}
+	var loaded Config
+	if err := yaml.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("parse generated configuration: %v", err)
+	}
+	if loaded.ListenAddress != Default().ListenAddress || loaded.DatabasePath != Default().DatabasePath {
+		t.Fatalf("generated defaults were not preserved: %#v", loaded)
+	}
+
+	const replacement = "listen_address: 127.0.0.1:9090\n"
+	if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err = EnsureDefaultFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("existing configuration was reported as created")
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != replacement {
+		t.Fatalf("existing configuration was overwritten: %q", data)
+	}
+}
 
 func TestLoadResolvesWorkspaceDirectoryRelativeToStartupDirectory(t *testing.T) {
 	root := t.TempDir()

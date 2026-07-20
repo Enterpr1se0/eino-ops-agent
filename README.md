@@ -45,11 +45,11 @@ Linux / macOS 的快捷构建命令还需要 `make`。内置 SSH 不依赖系统
 ```bash
 git clone https://github.com/Enterpr1se0/eino-ops-agent.git
 cd eino-ops-agent
-cp configs/config.example.yaml configs/config.local.yaml
 make build
-OPS_AGENT_ADMIN_PASSWORD='use-a-strong-password' \
-  ./bin/ops-agent --config configs/config.local.yaml serve
+./bin/ops-agent
 ```
+
+无参数启动会在可执行文件同目录创建 `config.yaml` 并直接启动 Web 服务，已有配置不会被覆盖。
 
 ### Windows PowerShell
 
@@ -63,27 +63,33 @@ npm --prefix web install
 npm --prefix web run build
 New-Item -ItemType Directory -Force bin | Out-Null
 go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/ops-agent.exe ./cmd/ops-agent
-
-$env:OPS_AGENT_ADMIN_PASSWORD = 'use-a-strong-password'
-.\bin\ops-agent.exe --config configs/config.local.yaml serve
+.\bin\ops-agent.exe
 ```
 
-构建会把 Web 前端嵌入可执行文件，运行时不需要单独复制 `web/dist`。
+也可以直接双击 `ops-agent.exe`。首次运行会在 EXE 旁创建 `config.yaml`、启动服务并打开浏览器。构建会把 Web 前端嵌入可执行文件，运行时不需要单独复制 `web/dist`。
 
 ### 首次登录
 
-1. 在服务所在电脑打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)；从其他设备访问时将 `127.0.0.1` 换成服务器 IP。
-2. 使用 `OPS_AGENT_ADMIN_PASSWORD` 中的密码登录。密码至少需要 12 个字符，并且只在数据库首次初始化时使用。
+1. Windows 快捷启动会自动打开页面；其他系统在服务所在电脑打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)。
+2. 使用启动窗口中显示的初始密码登录，然后在配置页面修改密码。配置文件不会保存明文密码。
 3. 打开 **配置 → 模型提供商**，添加模型的 Base URL、Model ID 和 API Key。
 4. 先点击 **测试**，保存后点击 **使用此模型**。
 5. 如需管理远程主机，打开 **配置 → SSH 主机** 添加主机，然后扫描并核对 Host Key 指纹。
 6. 回到 **Agent**，新建会话即可开始使用。
 
-数据、加密主密钥、日志和 SQLite 数据库默认写入 `.data/`，Workspace 文件写入 `workspace/`。这两个目录都不会提交到 Git。
+快捷启动生成的 `config.yaml` 修改后需重启生效。数据、加密主密钥、日志和 SQLite 数据库默认写入 EXE 同目录的 `.data/`，Workspace 文件写入同目录的 `workspace/`。
+
+自动启动之外仍可显式指定配置和初始密码：
+
+```bash
+cp configs/config.example.yaml configs/config.local.yaml
+OPS_AGENT_ADMIN_PASSWORD='use-a-strong-password' \
+  ./bin/ops-agent --config configs/config.local.yaml serve
+```
 
 ### 修改监听地址
 
-默认监听 `0.0.0.0:8080`。可以修改 `configs/config.local.yaml` 中的 `listen_address`，也可以在启动时覆盖：
+默认监听 `0.0.0.0:8080`。快捷启动可以修改 EXE 同目录的 `config.yaml`，也可以在启动时覆盖：
 
 ```bash
 OPS_AGENT_LISTEN='127.0.0.1:9090' ./bin/ops-agent --config configs/config.local.yaml serve

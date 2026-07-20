@@ -21,7 +21,7 @@ const zh = {
   },
   auth: {
     subtitle: 'OPSPILOT', title: '管理员登录',
-    password: '管理员密码', authenticating: '验证中...', enter: '登录', initialPassword: '密码环境变量：',
+    password: '管理员密码', authenticating: '验证中...', enter: '登录', initialPassword: '首次启动时，初始密码显示在启动窗口中',
   },
   config: {
     tabs: { models: '模型提供商', hosts: 'SSH 主机', system: '系统设置' },
