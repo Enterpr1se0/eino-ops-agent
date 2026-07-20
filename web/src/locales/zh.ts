@@ -169,7 +169,7 @@ const zh = {
     waiting: '等待审批，Agent 已暂停。', detached: 'Agent 连接已结束；本次决定仍会执行并记录。',
   },
   hosts: {
-    authAgent: 'SSH Agent', authKey: '已上传私钥', authPassword: '账户密码', sudoNone: '禁用', sudoNopasswd: 'sudo -n（NOPASSWD）', sudoPassword: '托管 sudo 密码',
+    authAgent: 'SSH Agent', authKey: '使用私钥', authPassword: '账户密码', sudoNone: '禁用', sudoNopasswd: 'sudo -n（NOPASSWD）', sudoPassword: '托管 sudo 密码',
     title: 'SSH 主机', subtitle: '凭据在本机加密保存。', add: '添加主机',
     editTitle: '编辑主机', createTitle: '添加 SSH 主机', editHelp: '密码留空则保留原值。', createHelp: '选择认证和 sudo 方式。',
     name: '名称', address: '地址', port: '端口', user: '用户', authentication: '认证方式', sshPassword: 'SSH 密码', privateKey: '私钥',

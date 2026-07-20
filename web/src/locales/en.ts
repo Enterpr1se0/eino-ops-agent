@@ -169,7 +169,7 @@ const en = {
     waiting: 'Waiting for approval. The Agent is paused.', detached: 'The Agent connection ended. This decision will still run and be recorded.',
   },
   hosts: {
-    authAgent: 'SSH agent', authKey: 'Uploaded private key', authPassword: 'Account password', sudoNone: 'Disabled', sudoNopasswd: 'sudo -n (NOPASSWD)', sudoPassword: 'Managed sudo password',
+    authAgent: 'SSH agent', authKey: 'Use private key', authPassword: 'Account password', sudoNone: 'Disabled', sudoNopasswd: 'sudo -n (NOPASSWD)', sudoPassword: 'Managed sudo password',
     title: 'SSH hosts', subtitle: 'Credentials are encrypted locally.', add: 'Add host',
     editTitle: 'Edit host', createTitle: 'Add SSH host', editHelp: 'Leave passwords blank to keep current values.', createHelp: 'Choose authentication and sudo settings.',
     name: 'Name', address: 'Address', port: 'Port', user: 'User', authentication: 'Authentication', sshPassword: 'SSH password', privateKey: 'Private key',
