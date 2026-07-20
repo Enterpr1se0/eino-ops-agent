@@ -131,7 +131,10 @@ func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st
 	agentInstance, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name: "ops-pilot", Description: "Diagnoses and operates registered Linux servers through audited SSH tools.",
 		Instruction: systemPrompt, Model: chatModel, MaxIterations: maxIterations,
-		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools, ExecuteSequentially: true}},
+		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
+			Tools: tools, ExecuteSequentially: true, UnknownToolsHandler: unknownToolResult,
+			ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}},
+		}},
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("create Eino agent: %w", err)

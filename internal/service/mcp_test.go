@@ -78,6 +78,60 @@ func TestManagedMCPServerInjectsNamespacedToolAndCanBeDisabled(t *testing.T) {
 	}
 }
 
+func TestMCPToolErrorReturnsStructuredEnvelope(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	t.Cleanup(svc.CloseMCPServers)
+	remote := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1.0.0"}, nil)
+	mcp.AddTool(remote, &mcp.Tool{Name: "always_fail", Description: "Return a tool-level error."},
+		func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{Text: "fixture provider failure"}},
+			}, nil, nil
+		})
+	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return remote }, nil)
+	httpServer := httptest.NewServer(streamable)
+	defer httpServer.Close()
+
+	server, err := svc.SaveMCPServer(context.Background(), domain.MCPServerInput{
+		Name: "Failing MCP", Transport: domain.MCPTransportStreamableHTTP, URL: httpServer.URL, Enabled: true,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := svc.MCPTools()
+	if server.Status != "ready" || len(tools) != 1 {
+		t.Fatalf("unexpected MCP runtime: server=%#v tools=%d", server, len(tools))
+	}
+	invokable, ok := tools[0].(tool.InvokableTool)
+	if !ok {
+		t.Fatalf("MCP tool is not invokable: %T", tools[0])
+	}
+	output, err := invokable.InvokableRun(context.Background(), `{}`)
+	if err != nil {
+		t.Fatalf("MCP tool-level error escaped as a Go error: %v", err)
+	}
+	var envelope struct {
+		ToolVersion        string             `json:"tool_version"`
+		OK                 bool               `json:"ok"`
+		Status             string             `json:"status"`
+		Code               string             `json:"code"`
+		Message            string             `json:"message"`
+		NextAction         string             `json:"next_action"`
+		ContentIsUntrusted bool               `json:"content_is_untrusted"`
+		Result             mcp.CallToolResult `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.ToolVersion != "1.1" || envelope.OK || envelope.Status != "failed" || envelope.Code != "provider_failed" || !envelope.ContentIsUntrusted {
+		t.Fatalf("unexpected MCP failure envelope: %#v", envelope)
+	}
+	if envelope.Message == "" || envelope.NextAction == "" || !envelope.Result.IsError || len(envelope.Result.Content) != 1 {
+		t.Fatalf("MCP failure evidence was not preserved: %#v", envelope)
+	}
+}
+
 func TestMCPServerEditPreservesEncryptedSecretsWhenOmitted(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	created, err := svc.SaveMCPServer(context.Background(), domain.MCPServerInput{

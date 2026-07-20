@@ -28,6 +28,7 @@
       <p id="error"></p>
     </main>
     <script>
+      document.addEventListener('contextmenu', function (event) { event.preventDefault() })
       if (!navigator.language.toLowerCase().startsWith('zh')) document.getElementById('status').textContent = 'Starting local service...'
       window.desktopStartupError = function (message) {
         document.getElementById('status').style.display = 'none'

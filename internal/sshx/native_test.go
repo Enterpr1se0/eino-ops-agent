@@ -217,11 +217,25 @@ func TestNativeSSHTrustExecAndExitStatus(t *testing.T) {
 	if key.Fingerprint == "" || key.Algorithm != ssh.KeyAlgoED25519 {
 		t.Fatalf("unexpected scanned key: %#v", key)
 	}
+	if key.Trusted {
+		t.Fatal("unrecorded host key was reported as trusted")
+	}
 	if _, err := transport.TrustHostKey(context.Background(), connection, "SHA256:not-the-key"); err == nil {
 		t.Fatal("mismatched host key fingerprint was trusted")
 	}
-	if _, err := transport.TrustHostKey(context.Background(), connection, key.Fingerprint); err != nil {
+	trustedKey, err := transport.TrustHostKey(context.Background(), connection, key.Fingerprint)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !trustedKey.Trusted {
+		t.Fatal("trusted host key was not marked trusted")
+	}
+	rescannedKey, err := transport.ScanHostKey(context.Background(), connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rescannedKey.Trusted {
+		t.Fatal("recorded host key was not detected on rescan")
 	}
 
 	var streamed strings.Builder

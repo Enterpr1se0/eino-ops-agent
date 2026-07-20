@@ -43,16 +43,29 @@ type Service struct {
 	validators           map[string]config.Validator
 	skills               *skills.Registry
 
-	globalSem   chan struct{}
-	semMu       sync.Mutex
-	hostSems    map[string]chan struct{}
-	taskMu      sync.RWMutex
-	tasks       map[string]*taskState
-	explainerMu sync.RWMutex
-	explainer   CommandExplainer
-	explainWG   sync.WaitGroup
-	mcpMu       sync.RWMutex
-	mcpRuntime  map[string]*mcpRuntimeState
+	globalSem         chan struct{}
+	semMu             sync.Mutex
+	hostSems          map[string]chan struct{}
+	taskMu            sync.RWMutex
+	tasks             map[string]*taskState
+	explainerMu       sync.RWMutex
+	explainer         CommandExplainer
+	explainWG         sync.WaitGroup
+	explanationMu     sync.Mutex
+	explanationActive map[string]*approvalExplanationTask
+	explanationSem    chan struct{}
+	explanationSlots  chan struct{}
+	mcpMu             sync.RWMutex
+	mcpRuntime        map[string]*mcpRuntimeState
+}
+
+const (
+	maxConcurrentApprovalExplanations = 2
+	maxQueuedApprovalExplanations     = 4
+)
+
+type approvalExplanationTask struct {
+	cancel context.CancelFunc
 }
 
 type CommandExplainer interface {
@@ -85,6 +98,7 @@ func New(st *store.Store, engine *policy.Engine, transport sshx.Transport, encry
 		store: st, policy: engine, transport: transport, encryptor: encryptor, redactor: redactor, limits: limits,
 		workspaceSandboxPath: config.Default().WorkspaceSandboxPath,
 		globalSem:            make(chan struct{}, global), hostSems: make(map[string]chan struct{}), tasks: make(map[string]*taskState), workspaces: make(map[string]config.Workspace), validators: make(map[string]config.Validator), mcpRuntime: make(map[string]*mcpRuntimeState),
+		explanationActive: make(map[string]*approvalExplanationTask), explanationSem: make(chan struct{}, maxConcurrentApprovalExplanations), explanationSlots: make(chan struct{}, maxQueuedApprovalExplanations),
 	}
 	if len(runtimeConfig) > 0 {
 		result.dataDir = runtimeConfig[0].DataDir
@@ -391,6 +405,41 @@ func (s *Service) commandExplainer() CommandExplainer {
 	s.explainerMu.RLock()
 	defer s.explainerMu.RUnlock()
 	return s.explainer
+}
+
+func (s *Service) registerApprovalExplanation(approvalID string, task *approvalExplanationTask) {
+	s.explanationMu.Lock()
+	previous := s.explanationActive[approvalID]
+	s.explanationActive[approvalID] = task
+	s.explanationMu.Unlock()
+	if previous != nil {
+		previous.cancel()
+	}
+}
+
+func (s *Service) clearApprovalExplanation(approvalID string, task *approvalExplanationTask) {
+	s.explanationMu.Lock()
+	if s.explanationActive[approvalID] == task {
+		delete(s.explanationActive, approvalID)
+	}
+	s.explanationMu.Unlock()
+}
+
+func (s *Service) cancelApprovalExplanation(ctx context.Context, approvalID, runID string) bool {
+	s.explanationMu.Lock()
+	task := s.explanationActive[approvalID]
+	if task != nil {
+		delete(s.explanationActive, approvalID)
+	}
+	s.explanationMu.Unlock()
+	if task == nil {
+		return false
+	}
+	task.cancel()
+	if runID != "" {
+		_ = s.store.UpdateRunAIReview(ctx, runID, "")
+	}
+	return true
 }
 
 func (s *Service) ModelProviderConfig(ctx context.Context, id string) (config.Model, domain.ModelProvider, error) {
@@ -927,71 +976,107 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 }
 
 // startPendingApprovalExplanation keeps model latency outside the human
-// approval critical path. The deterministic policy remains the sole owner of
-// risk and approval requirements; this Agent only adds educational context.
+// approval critical path. Explanation work is bounded globally and canceled as
+// soon as its approval is no longer pending.
 func (s *Service) startPendingApprovalExplanation(parent context.Context, approval domain.Approval, input domain.CommandReviewInput, explainer CommandExplainer, timeoutSeconds int) {
 	baseCtx := context.WithoutCancel(parent)
 	timeoutSeconds = effectiveSubagentTimeoutSeconds(timeoutSeconds)
 	logger := observability.FromContext(baseCtx).With(
 		"component", "approval", "approval_id", approval.ID, "run_id", approval.RunID,
 	)
+	select {
+	case s.explanationSlots <- struct{}{}:
+	default:
+		review := domain.CommandReview{
+			Status: "unavailable", DeterministicRisk: input.Policy.Risk,
+			Errors: []string{"command explanation skipped because the local queue is full"}, ReviewedAt: time.Now().UTC(),
+		}
+		persistCtx, cancelPersist := context.WithTimeout(baseCtx, 3*time.Second)
+		err := s.persistPendingApprovalExplanation(persistCtx, approval, input.Policy.Risk, review, 0)
+		cancelPersist()
+		if err != nil {
+			logger.ErrorContext(baseCtx, "persist skipped approval explanation failed", "error", err)
+		} else {
+			logger.WarnContext(baseCtx, "approval explanation skipped", "reason", "queue_full")
+		}
+		return
+	}
+
+	queuedAt := time.Now()
+	explanationCtx, cancelExplanation := context.WithTimeout(baseCtx, time.Duration(timeoutSeconds)*time.Second)
+	task := &approvalExplanationTask{cancel: cancelExplanation}
+	s.registerApprovalExplanation(approval.ID, task)
 	s.explainWG.Add(1)
 	go func() {
 		defer s.explainWG.Done()
+		defer func() { <-s.explanationSlots }()
+		defer cancelExplanation()
+		defer s.clearApprovalExplanation(approval.ID, task)
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				logger.ErrorContext(baseCtx, "approval explanation Agent panicked", "panic", fmt.Sprint(recovered))
 			}
 		}()
 
-		started := time.Now()
-		logger.InfoContext(baseCtx, "approval explanation started", "risk", approval.Risk)
-		explanationCtx, cancelExplanation := context.WithTimeout(baseCtx, time.Duration(timeoutSeconds)*time.Second)
-		review, reviewErr := explainer.Review(explanationCtx, input)
-		cancelExplanation()
-		review = s.normalizeCommandReview(review, reviewErr, input.Policy.Risk, timeoutSeconds)
-		reviewJSON, err := json.Marshal(review)
-		if err != nil {
-			logger.ErrorContext(baseCtx, "encode approval explanation failed", "error", err)
+		select {
+		case s.explanationSem <- struct{}{}:
+			defer func() { <-s.explanationSem }()
+		case <-explanationCtx.Done():
+			if errors.Is(explanationCtx.Err(), context.Canceled) {
+				logger.InfoContext(baseCtx, "approval explanation canceled while queued", "queue_ms", time.Since(queuedAt).Milliseconds())
+				return
+			}
+			review := s.normalizeCommandReview(domain.CommandReview{}, explanationCtx.Err(), input.Policy.Risk, timeoutSeconds)
+			persistCtx, cancelPersist := context.WithTimeout(baseCtx, 3*time.Second)
+			err := s.persistPendingApprovalExplanation(persistCtx, approval, input.Policy.Risk, review, time.Since(queuedAt))
+			cancelPersist()
+			if err != nil {
+				logger.ErrorContext(baseCtx, "persist queued approval explanation timeout failed", "error", err)
+			}
 			return
 		}
 
+		started := time.Now()
+		logger.InfoContext(baseCtx, "approval explanation started", "risk", approval.Risk, "queue_ms", started.Sub(queuedAt).Milliseconds())
+		review, reviewErr := explainer.Review(explanationCtx, input)
+		if errors.Is(explanationCtx.Err(), context.Canceled) {
+			logger.InfoContext(baseCtx, "approval explanation canceled", "duration_ms", time.Since(started).Milliseconds())
+			return
+		}
+		review = s.normalizeCommandReview(review, reviewErr, input.Policy.Risk, timeoutSeconds)
 		persistCtx, cancelPersist := context.WithTimeout(baseCtx, 3*time.Second)
-		defer cancelPersist()
-		if err := s.store.UpdatePendingApprovalExplanation(persistCtx, approval.ID, approval.RunID, string(reviewJSON)); err != nil {
-			current, getErr := s.store.GetApproval(persistCtx, approval.ID)
+		err := s.persistPendingApprovalExplanation(persistCtx, approval, input.Policy.Risk, review, time.Since(started))
+		cancelPersist()
+		if err != nil {
+			current, getErr := s.store.GetApproval(baseCtx, approval.ID)
 			if getErr == nil && current.Status != "pending" {
-				if review.Status == "completed" {
-					review.Status = "degraded"
-				}
-				review.Errors = append(review.Errors, "explanation completed after the operator decision and did not alter execution")
-				if len(review.Errors) > 5 {
-					review.Errors = append(review.Errors[:4], review.Errors[len(review.Errors)-1])
-				}
-				if lateJSON, marshalErr := json.Marshal(review); marshalErr == nil {
-					if updateErr := s.store.UpdateRunAIReview(persistCtx, approval.RunID, string(lateJSON)); updateErr != nil {
-						logger.ErrorContext(baseCtx, "persist late approval explanation failed", "error", updateErr)
-					}
-				}
-				s.audit(persistCtx, approval.RunID, "command_ai_explanation_completed_after_decision", "command-explainer-agent", map[string]any{
-					"approval_id": approval.ID, "status": current.Status, "model": review.Model, "duration_ms": time.Since(started).Milliseconds(),
-				})
-				logger.InfoContext(baseCtx, "approval explanation stored after decision", "status", current.Status, "duration_ms", time.Since(started).Milliseconds())
+				logger.InfoContext(baseCtx, "approval explanation discarded after decision", "status", current.Status, "duration_ms", time.Since(started).Milliseconds())
 				return
 			}
 			logger.ErrorContext(baseCtx, "persist approval explanation failed", "error", err, "duration_ms", time.Since(started).Milliseconds())
 			return
 		}
-		s.audit(persistCtx, approval.RunID, "command_ai_explained", "command-explainer-agent", map[string]any{
-			"approval_id": approval.ID, "status": review.Status, "deterministic_risk": input.Policy.Risk,
-			"model": review.Model, "duration_ms": time.Since(started).Milliseconds(),
-		})
 		logger.InfoContext(baseCtx, "approval explanation completed", "status", review.Status, "duration_ms", time.Since(started).Milliseconds())
-		notifyApproval(baseCtx, domain.ExecResult{
-			RunID: approval.RunID, Status: "approval_required", Risk: approval.Risk,
-			ApprovalID: approval.ID,
-		})
 	}()
+}
+
+func (s *Service) persistPendingApprovalExplanation(ctx context.Context, approval domain.Approval, risk domain.RiskLevel, review domain.CommandReview, duration time.Duration) error {
+	reviewJSON, err := json.Marshal(review)
+	if err != nil {
+		return fmt.Errorf("encode approval explanation: %w", err)
+	}
+	if err := s.store.UpdatePendingApprovalExplanation(ctx, approval.ID, approval.RunID, string(reviewJSON)); err != nil {
+		return err
+	}
+	s.audit(ctx, approval.RunID, "command_ai_explained", "command-explainer-agent", map[string]any{
+		"approval_id": approval.ID, "status": review.Status, "deterministic_risk": risk,
+		"model": review.Model, "duration_ms": duration.Milliseconds(),
+	})
+	notifyApproval(ctx, domain.ExecResult{
+		RunID: approval.RunID, Status: "approval_required", Risk: approval.Risk,
+		ApprovalID: approval.ID,
+	})
+	return nil
 }
 
 func (s *Service) normalizeCommandReview(review domain.CommandReview, reviewErr error, deterministicRisk domain.RiskLevel, timeoutSeconds int) domain.CommandReview {
@@ -1055,6 +1140,7 @@ func (s *Service) ApproveWithScope(ctx context.Context, approvalID, reason, scop
 	}
 	if time.Now().UTC().After(approval.ExpiresAt) {
 		_ = s.store.DecideApproval(ctx, approval.ID, "expired", "approval expired")
+		s.cancelApprovalExplanation(ctx, approval.ID, approval.RunID)
 		logger.WarnContext(ctx, "approval expired before decision", "run_id", approval.RunID)
 		return domain.ExecResult{}, fmt.Errorf("approval expired")
 	}
@@ -1106,6 +1192,7 @@ func (s *Service) ApproveWithScope(ctx context.Context, approvalID, reason, scop
 	} else if err := s.store.ApprovePending(ctx, approval.ID, reason, approval.Risk); err != nil {
 		return domain.ExecResult{}, err
 	}
+	s.cancelApprovalExplanation(ctx, approval.ID, approval.RunID)
 	run.Status = "running"
 	if err := s.store.UpdateRun(ctx, run); err != nil {
 		return domain.ExecResult{}, err
@@ -1124,6 +1211,7 @@ func (s *Service) Reject(ctx context.Context, approvalID, reason, actor string) 
 	if err := s.store.DecideApproval(ctx, approval.ID, "rejected", reason); err != nil {
 		return err
 	}
+	s.cancelApprovalExplanation(ctx, approval.ID, approval.RunID)
 	run, err := s.store.GetRun(ctx, approval.RunID)
 	if err != nil {
 		return err
@@ -1182,6 +1270,7 @@ func (s *Service) awaitApproval(ctx context.Context, initial domain.ExecResult) 
 
 		if approval.Status == "pending" && time.Now().UTC().After(approval.ExpiresAt) {
 			if err := s.store.DecideApproval(ctx, approval.ID, "expired", "approval expired"); err == nil {
+				s.cancelApprovalExplanation(ctx, approval.ID, approval.RunID)
 				run.Status = "expired"
 				run.Error = "approval expired"
 				run.CompletedAt = time.Now().UTC()
@@ -1730,10 +1819,35 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 		PlanStep: planStep, RequestDigest: digest,
 	}
 
+	retryCtx, cancelRetry := context.WithCancel(ctx)
+	task := &approvalExplanationTask{cancel: cancelRetry}
+	s.registerApprovalExplanation(approval.ID, task)
+	defer cancelRetry()
+	defer s.clearApprovalExplanation(approval.ID, task)
+
+	// Close the decision race between the initial read and task registration.
+	current, err := s.store.GetApproval(retryCtx, approval.ID)
+	if err != nil {
+		return domain.Approval{}, err
+	}
+	if current.Status != "pending" {
+		return domain.Approval{}, fmt.Errorf("approval is %s", current.Status)
+	}
+	if err := s.store.UpdateRunAIReview(retryCtx, run.ID, ""); err != nil {
+		return domain.Approval{}, err
+	}
+
 	logger.InfoContext(ctx, "approval explanation retry started", "run_id", run.ID, "risk", approval.Risk)
 	started := time.Now()
 	timeoutSeconds := effectiveSubagentTimeoutSeconds(settings.SubagentTimeoutSeconds)
-	explanationCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	explanationCtx, cancel := context.WithTimeout(retryCtx, time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+	select {
+	case s.explanationSem <- struct{}{}:
+		defer func() { <-s.explanationSem }()
+	case <-explanationCtx.Done():
+		return domain.Approval{}, explanationCtx.Err()
+	}
 	var review domain.CommandReview
 	var reviewErr error
 	if freshExplainer, ok := explainer.(FreshCommandExplainer); ok {
@@ -1742,12 +1856,15 @@ func (s *Service) RetryApprovalExplanation(ctx context.Context, approvalID, acto
 		review, reviewErr = explainer.Review(explanationCtx, input)
 	}
 	cancel()
+	if retryCtx.Err() != nil {
+		return domain.Approval{}, retryCtx.Err()
+	}
 	review = s.normalizeCommandReview(review, reviewErr, approval.Risk, timeoutSeconds)
 	reviewJSON, err := json.Marshal(review)
 	if err != nil {
 		return domain.Approval{}, err
 	}
-	if err := s.store.UpdatePendingApprovalExplanation(ctx, approval.ID, run.ID, string(reviewJSON)); err != nil {
+	if err := s.store.UpdatePendingApprovalExplanation(retryCtx, approval.ID, run.ID, string(reviewJSON)); err != nil {
 		return domain.Approval{}, err
 	}
 	s.audit(ctx, run.ID, "command_ai_explanation_retried", actor, map[string]any{

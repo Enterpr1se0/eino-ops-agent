@@ -522,12 +522,13 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 		return nil
 	}
 
-	if err := appendTool(toolutils.InferTool("ops_plan_create", "Create or replace the persistent step-by-step plan for a complex task. Provide 2-8 ordered, independently verifiable steps. Step 1 starts automatically and only one step can be in progress.", func(ctx context.Context, input PlanCreateInput) (domain.AgentPlan, error) {
-		return svc.CreateAgentPlan(ctx, input.Goal, input.Steps, "eino-agent")
+	if err := appendTool(toolutils.InferTool("ops_plan_create", "Create or replace the persistent step-by-step plan for a complex task. Provide 2-8 ordered, independently verifiable steps. Step 1 starts automatically and only one step can be in progress.", func(ctx context.Context, input PlanCreateInput) (any, error) {
+		plan, err := svc.CreateAgentPlan(ctx, input.Goal, input.Steps, "eino-agent")
+		return normalizePlanToolResult(ctx, svc, "ops_plan_create", plan, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ops_plan_get", "Read the persistent plan for the current conversation before resuming a complex task or reporting progress. A conversation without a plan returns found=false; do not retry, and create a plan only when the current request is complex.", func(ctx context.Context, _ struct{}) (PlanGetOutput, error) {
+	if err := appendTool(toolutils.InferTool("ops_plan_get", "Read the persistent plan for the current conversation before resuming a complex task or reporting progress. A conversation without a plan returns found=false; do not retry, and create a plan only when the current request is complex.", func(ctx context.Context, _ struct{}) (any, error) {
 		plan, err := svc.GetAgentPlan(ctx, "")
 		if errors.Is(err, store.ErrNotFound) {
 			return PlanGetOutput{
@@ -535,27 +536,26 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 				Guidance: "This conversation has no persistent plan. Do not retry ops_plan_get. Create one only if the current request is a complex operational task; otherwise continue without a plan.",
 			}, nil
 		}
-		if err != nil {
-			return PlanGetOutput{}, err
-		}
-		return PlanGetOutput{Found: true, Plan: &plan}, nil
+		return normalizeValueToolResult(ctx, "ops_plan_get", PlanGetOutput{Found: true, Plan: &plan}, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ops_plan_step_update", "Finish the current plan step with observed evidence, or mark it blocked with the exact blocker. A completed step automatically starts the next pending step; steps cannot be skipped or completed out of order.", func(ctx context.Context, input PlanStepUpdateInput) (domain.AgentPlan, error) {
-		return svc.UpdateAgentPlanStep(ctx, input.StepNumber, input.Status, input.Evidence, "eino-agent")
+	if err := appendTool(toolutils.InferTool("ops_plan_step_update", "Finish the current plan step with observed evidence, or mark it blocked with the exact blocker. A completed step automatically starts the next pending step; steps cannot be skipped or completed out of order.", func(ctx context.Context, input PlanStepUpdateInput) (any, error) {
+		plan, err := svc.UpdateAgentPlanStep(ctx, input.StepNumber, input.Status, input.Evidence, "eino-agent")
+		return normalizePlanToolResult(ctx, svc, "ops_plan_step_update", plan, err)
 	})); err != nil {
 		return nil, err
 	}
 
 	if err := appendTool(toolutils.InferTool("ssh_host_inspect", "Inspect a registered SSH host and return hostname, kernel, architecture, user, and uptime. This is read-only.", func(ctx context.Context, input HostInput) (any, error) {
-		return svc.ProbeHost(ctx, input.HostID)
+		capability, err := svc.ProbeHost(ctx, input.HostID)
+		return normalizeValueToolResult(ctx, "ssh_host_inspect", capability, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_host_list", "List registered host IDs, display names, authentication types, and managed sudo modes. Connection details and credentials are excluded.", func(ctx context.Context, _ struct{}) (HostListOutput, error) {
+	if err := appendTool(toolutils.InferTool("ssh_host_list", "List registered host IDs, display names, authentication types, and managed sudo modes. Connection details and credentials are excluded.", func(ctx context.Context, _ struct{}) (any, error) {
 		hosts, err := svc.ListHostCapabilities(ctx)
-		return HostListOutput{Hosts: hosts}, err
+		return normalizeValueToolResult(ctx, "ssh_host_list", HostListOutput{Hosts: hosts}, err)
 	})); err != nil {
 		return nil, err
 	}
@@ -709,25 +709,27 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_history_search", "Search prior commands and redacted results to reuse evidence and avoid repeating failed operations.", func(ctx context.Context, input HistorySearchInput) (HistorySearchOutput, error) {
+	if err := appendTool(toolutils.InferTool("ssh_history_search", "Search prior commands and redacted results to reuse evidence and avoid repeating failed operations.", func(ctx context.Context, input HistorySearchInput) (any, error) {
 		runs, err := svc.SearchRuns(ctx, input.Query, input.HostID, input.Limit)
-		return HistorySearchOutput{Runs: runs}, err
+		return normalizeValueToolResult(ctx, "ssh_history_search", HistorySearchOutput{Runs: runs}, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_history_get", "Get one audited command and its redacted result. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistoryGetInput) (service.HistoryResult, error) {
-		return svc.GetRun(ctx, input.RunID, false)
+	if err := appendTool(toolutils.InferTool("ssh_history_get", "Get one audited command and its redacted result. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistoryGetInput) (any, error) {
+		run, err := svc.GetRun(ctx, input.RunID, false)
+		return normalizeValueToolResult(ctx, "ssh_history_get", run, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ops_skill_list", "List administrator-managed operational skills for diagnosis, deployment, and recovery. Skills provide methodology but no extra permissions.", func(_ context.Context, _ struct{}) (SkillListOutput, error) {
+	if err := appendTool(toolutils.InferTool("ops_skill_list", "List administrator-managed operational skills for diagnosis, deployment, and recovery. Skills provide methodology but no extra permissions.", func(ctx context.Context, _ struct{}) (any, error) {
 		items, err := svc.ListEnabledSkills()
-		return SkillListOutput{Skills: items}, err
+		return normalizeValueToolResult(ctx, "ops_skill_list", SkillListOutput{Skills: items}, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ops_skill_get", "Load one administrator-managed operational skill before handling a matching complex workflow.", func(ctx context.Context, input SkillInput) (skills.Skill, error) {
-		return svc.LoadSkill(ctx, input.Name, "eino-agent")
+	if err := appendTool(toolutils.InferTool("ops_skill_get", "Load one administrator-managed operational skill before handling a matching complex workflow.", func(ctx context.Context, input SkillInput) (any, error) {
+		skill, err := svc.LoadSkill(ctx, input.Name, "eino-agent")
+		return normalizeValueToolResult(ctx, "ops_skill_get", skill, err)
 	})); err != nil {
 		return nil, err
 	}

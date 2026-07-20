@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -15,12 +18,45 @@ import (
 	"eino-ops-agent/internal/sshx"
 	"eino-ops-agent/internal/store"
 
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
+	toolutils "github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 type backgroundToolTransport struct {
 	started chan domain.ExecRequest
 	release chan struct{}
+}
+
+type toolFailureLoopModel struct {
+	calls  int
+	inputs [][]*schema.Message
+}
+
+func (m *toolFailureLoopModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.calls++
+	m.inputs = append(m.inputs, append([]*schema.Message(nil), input...))
+	if m.calls == 1 {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "call-invalid", Function: schema.FunctionCall{Name: "raw_failure", Arguments: `{"value":"x"}`},
+		}}), nil
+	}
+	return schema.AssistantMessage("handled the tool failure", nil), nil
+}
+
+func (m *toolFailureLoopModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (m *toolFailureLoopModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
 }
 
 func (t *backgroundToolTransport) Exec(ctx context.Context, _ sshx.ConnectionSpec, request domain.ExecRequest) (sshx.RawResult, error) {
@@ -406,8 +442,16 @@ func TestSkillToolsReadTheLiveAdministratorRegistry(t *testing.T) {
 	if _, err := svc.SetAdminSkillEnabled(ctx, "custom-diagnosis", false, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := getTool.InvokableRun(ctx, `{"name":"custom-diagnosis"}`); err == nil || !strings.Contains(err.Error(), "disabled") {
-		t.Fatalf("disabled skill remained loadable: %v", err)
+	disabledJSON, err := getTool.InvokableRun(ctx, `{"name":"custom-diagnosis"}`)
+	if err != nil {
+		t.Fatalf("disabled skill aborted the ToolNode: %v", err)
+	}
+	var disabled domain.ToolFailure
+	if err := json.Unmarshal([]byte(disabledJSON), &disabled); err != nil {
+		t.Fatal(err)
+	}
+	if disabled.OK || disabled.Status != "failed" || disabled.Code != "configuration_required" || !strings.Contains(disabled.Message, "disabled") {
+		t.Fatalf("disabled skill did not return a structured failure: %#v", disabled)
 	}
 	listed, err := listTool.InvokableRun(ctx, `{}`)
 	if err != nil {
@@ -480,6 +524,215 @@ func TestPlanGetToolTreatsMissingPlanAsRecoverableState(t *testing.T) {
 	}
 	if !found.Found || found.Plan == nil || found.Plan.SessionID != created.SessionID || len(found.Plan.Steps) != 2 {
 		t.Fatalf("existing plan was not returned: %#v", found)
+	}
+}
+
+func TestPlanStepUpdateReturnsCurrentPlanWithoutAbortingToolNode(t *testing.T) {
+	ctx := service.WithSessionID(context.Background(), "session_plan_transition")
+	st, err := store.Open(ctx, t.TempDir()+"/tools.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	if _, err := svc.CreateAgentPlan(ctx, "Repair the service", []string{"Inspect", "Repair"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	tools, err := BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updateTool tool.InvokableTool
+	for _, candidate := range tools {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "ops_plan_step_update" {
+			updateTool = candidate.(tool.InvokableTool)
+			break
+		}
+	}
+	if updateTool == nil {
+		t.Fatal("ops_plan_step_update tool was not registered")
+	}
+	resultJSON, err := updateTool.InvokableRun(ctx, `{"step_number":2,"status":"completed","evidence":"skipped step one"}`)
+	if err != nil {
+		t.Fatalf("invalid plan transition aborted the ToolNode: %v", err)
+	}
+	var result planToolResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.Status != "failed" || result.Code != "invalid_state" || result.Plan == nil {
+		t.Fatalf("unexpected plan transition failure: %#v", result)
+	}
+	if result.Plan.Steps[0].Status != "in_progress" || result.Plan.Steps[1].Status != "pending" || !strings.Contains(result.NextAction, "step 1") {
+		t.Fatalf("current plan state was not returned: %#v", result.Plan)
+	}
+}
+
+func TestToolErrorMiddlewareKeepsRecoverableFailuresInsideToolNode(t *testing.T) {
+	type input struct {
+		Value string `json:"value"`
+	}
+	rawFailure, err := toolutils.InferTool("raw_failure", "fails for testing", func(context.Context, input) (string, error) {
+		return "", fmt.Errorf("invalid widget")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := compose.NewToolNode(context.Background(), &compose.ToolsNodeConfig{
+		Tools:               []tool.BaseTool{rawFailure},
+		ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}},
+		UnknownToolsHandler: unknownToolResult,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name      string
+		toolName  string
+		arguments string
+		wantCode  string
+	}{
+		{name: "business failure", toolName: "raw_failure", arguments: `{"value":"x"}`, wantCode: "validation_failed"},
+		{name: "malformed arguments", toolName: "raw_failure", arguments: `{"value":`, wantCode: "validation_failed"},
+		{name: "unknown tool", toolName: "missing_tool", arguments: `{}`, wantCode: "unknown_tool"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			messages, invokeErr := node.Invoke(context.Background(), schema.AssistantMessage("", []schema.ToolCall{{
+				ID: "call-test", Function: schema.FunctionCall{Name: test.toolName, Arguments: test.arguments},
+			}}))
+			if invokeErr != nil {
+				t.Fatalf("recoverable tool failure aborted the ToolNode: %v", invokeErr)
+			}
+			if len(messages) != 1 {
+				t.Fatalf("tool messages = %d", len(messages))
+			}
+			var failure domain.ToolFailure
+			if err := json.Unmarshal([]byte(messages[0].Content), &failure); err != nil {
+				t.Fatal(err)
+			}
+			if failure.OK || failure.Status != "failed" || failure.Code != test.wantCode {
+				t.Fatalf("unexpected ToolNode failure: %#v", failure)
+			}
+		})
+	}
+
+	stream, err := node.Stream(context.Background(), schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "call-stream", Function: schema.FunctionCall{Name: "raw_failure", Arguments: `{"value":"x"}`},
+	}}))
+	if err != nil {
+		t.Fatalf("streaming ToolNode rejected a recoverable failure: %v", err)
+	}
+	var streamedFailure domain.ToolFailure
+	for {
+		messages, recvErr := stream.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			t.Fatalf("streaming ToolNode aborted while returning failure: %v", recvErr)
+		}
+		for _, message := range messages {
+			if err := json.Unmarshal([]byte(message.Content), &streamedFailure); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if streamedFailure.OK || streamedFailure.Status != "failed" || streamedFailure.Code != "validation_failed" {
+		t.Fatalf("streaming ToolNode did not return the structured failure: %#v", streamedFailure)
+	}
+}
+
+func TestToolErrorMiddlewarePreservesCancellation(t *testing.T) {
+	cancelTool, err := toolutils.InferTool("cancel_tool", "cancels for testing", func(context.Context, struct{}) (string, error) {
+		return "", context.Canceled
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := compose.NewToolNode(context.Background(), &compose.ToolsNodeConfig{
+		Tools:               []tool.BaseTool{cancelTool},
+		ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = node.Invoke(context.Background(), schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "call-cancel", Function: schema.FunctionCall{Name: "cancel_tool", Arguments: `{}`},
+	}}))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation was converted into a tool result: %v", err)
+	}
+}
+
+func TestAgentLoopReturnsToolFailureToModelAndContinues(t *testing.T) {
+	type input struct {
+		Value string `json:"value"`
+	}
+	rawFailure, err := toolutils.InferTool("raw_failure", "fails for testing", func(context.Context, input) (string, error) {
+		return "", fmt.Errorf("invalid widget")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatModel := &toolFailureLoopModel{}
+	agentInstance, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "tool-failure-test", Description: "tool failure regression", Model: chatModel, MaxIterations: 3,
+		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
+			Tools: []tool.BaseTool{rawFailure}, ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{Agent: agentInstance})
+	iterator := runner.Run(context.Background(), []*schema.Message{schema.UserMessage("run the failing tool")})
+	finalAnswer := ""
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			t.Fatalf("recoverable tool failure aborted the Agent loop: %v", event.Err)
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.Message != nil {
+			message := event.Output.MessageOutput.Message
+			if message.Role == schema.Assistant && message.Content != "" {
+				finalAnswer = message.Content
+			}
+		}
+	}
+	if finalAnswer != "handled the tool failure" || chatModel.calls != 2 {
+		t.Fatalf("Agent did not recover after the tool failure: calls=%d answer=%q", chatModel.calls, finalAnswer)
+	}
+	if len(chatModel.inputs) != 2 {
+		t.Fatalf("model inputs=%d", len(chatModel.inputs))
+	}
+	foundFailure := false
+	for _, message := range chatModel.inputs[1] {
+		if message.Role != schema.Tool || message.ToolCallID != "call-invalid" {
+			continue
+		}
+		var failure domain.ToolFailure
+		if err := json.Unmarshal([]byte(message.Content), &failure); err != nil {
+			t.Fatalf("tool result was not structured JSON: %v", err)
+		}
+		if !failure.OK && failure.Status == "failed" && failure.Code == "validation_failed" {
+			foundFailure = true
+		}
+	}
+	if !foundFailure {
+		t.Fatalf("second model request did not contain the structured tool failure: %#v", chatModel.inputs[1])
 	}
 }
 

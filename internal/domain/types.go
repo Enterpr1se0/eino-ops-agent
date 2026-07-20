@@ -439,6 +439,11 @@ type ToolMeta struct {
 	NextAction  string `json:"next_action,omitempty"`
 }
 
+type ToolFailure struct {
+	ToolMeta
+	Status string `json:"status"`
+}
+
 type ExecResult struct {
 	ToolMeta
 	RunID               string        `json:"run_id"`

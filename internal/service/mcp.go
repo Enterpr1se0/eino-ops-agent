@@ -327,18 +327,35 @@ func (s *Service) callMCPTool(ctx context.Context, serverID, toolName string, ar
 	if err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(result)
+	resultPayload, err := json.Marshal(result)
 	if err != nil {
 		return "", err
 	}
-	if len(payload) > mcpMaxResultBytes {
-		payload, err = json.Marshal(map[string]any{
+	var exposedResult any = result
+	if len(resultPayload) > mcpMaxResultBytes {
+		previewLimit := mcpMaxResultBytes - 2048
+		exposedResult = map[string]any{
 			"_opspilot_truncated": true,
-			"preview":             strings.ToValidUTF8(string(payload[:mcpMaxResultBytes]), "�"),
-		})
-		if err != nil {
-			return "", err
+			"preview":             strings.ToValidUTF8(string(resultPayload[:previewLimit]), "�"),
 		}
+	}
+	envelope := map[string]any{
+		"tool_version":         "1.1",
+		"ok":                   !result.IsError,
+		"status":               "completed",
+		"code":                 "completed",
+		"content_is_untrusted": true,
+		"result":               exposedResult,
+	}
+	if result.IsError {
+		envelope["status"] = "failed"
+		envelope["code"] = "provider_failed"
+		envelope["message"] = "the external MCP function tool returned an error"
+		envelope["next_action"] = "inspect the returned error and external state; do not repeat the same call unchanged"
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
 	}
 	return string(payload), nil
 }

@@ -17,7 +17,23 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound              = errors.New("not found")
+	ErrInvalidPlanTransition = errors.New("invalid plan transition")
+)
+
+type PlanTransitionError struct {
+	StepNumber int
+	Status     string
+}
+
+func (e *PlanTransitionError) Error() string {
+	return fmt.Sprintf("invalid plan transition: step %d is %s, not in_progress", e.StepNumber, e.Status)
+}
+
+func (e *PlanTransitionError) Unwrap() error {
+	return ErrInvalidPlanTransition
+}
 
 type Store struct {
 	db *sql.DB
@@ -1519,7 +1535,7 @@ func (s *Store) AdvanceAgentPlan(ctx context.Context, sessionID string, stepNumb
 		return domain.AgentPlan{}, err
 	}
 	if currentStatus != "in_progress" {
-		return domain.AgentPlan{}, fmt.Errorf("invalid plan transition: step %d is %s, not in_progress", stepNumber, currentStatus)
+		return domain.AgentPlan{}, &PlanTransitionError{StepNumber: stepNumber, Status: currentStatus}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE agent_plan_steps SET status=?,evidence=?,updated_at=? WHERE session_id=? AND step_number=?`,
 		status, evidence, formatTime(now), sessionID, stepNumber); err != nil {

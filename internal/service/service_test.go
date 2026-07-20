@@ -69,6 +69,36 @@ func (r *blockingCommandExplainer) Review(ctx context.Context, _ domain.CommandR
 	}
 }
 
+type trackingCommandExplainer struct {
+	started chan struct{}
+	mu      sync.Mutex
+	active  int
+	maximum int
+}
+
+func (r *trackingCommandExplainer) Review(ctx context.Context, _ domain.CommandReviewInput) (domain.CommandReview, error) {
+	r.mu.Lock()
+	r.active++
+	if r.active > r.maximum {
+		r.maximum = r.active
+	}
+	r.mu.Unlock()
+	r.started <- struct{}{}
+	defer func() {
+		r.mu.Lock()
+		r.active--
+		r.mu.Unlock()
+	}()
+	<-ctx.Done()
+	return domain.CommandReview{}, ctx.Err()
+}
+
+func (r *trackingCommandExplainer) maxActive() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.maximum
+}
+
 func (f *fakeTransport) Exec(_ context.Context, connection sshx.ConnectionSpec, req domain.ExecRequest) (sshx.RawResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
@@ -561,7 +591,7 @@ func TestApprovalIsCreatedWithoutWaitingForCommandExplanation(t *testing.T) {
 	}
 }
 
-func TestLateCommandExplanationCannotOverrideAnApprovalDecision(t *testing.T) {
+func TestApprovalDecisionCancelsCommandExplanation(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	explainer := &blockingCommandExplainer{
 		started: make(chan struct{}), release: make(chan struct{}),
@@ -580,14 +610,11 @@ func TestLateCommandExplanationCannotOverrideAnApprovalDecision(t *testing.T) {
 	select {
 	case <-explainer.started:
 	case <-time.After(time.Second):
-		close(explainer.release)
 		t.Fatal("background explanation did not start")
 	}
 	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "deterministic policy reviewed", "operator"); err != nil {
-		close(explainer.release)
 		t.Fatal(err)
 	}
-	close(explainer.release)
 	svc.explainWG.Wait()
 
 	approval, err := svc.store.GetApproval(context.Background(), pending.ApprovalID)
@@ -601,12 +628,98 @@ func TestLateCommandExplanationCannotOverrideAnApprovalDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.AIReview == nil || run.AIReview.Status != "degraded" || len(run.AIReview.Errors) == 0 || !strings.Contains(run.AIReview.Errors[len(run.AIReview.Errors)-1], "after the operator decision") {
-		t.Fatalf("late advisory result was not recorded without applying it: %#v", run.AIReview)
+	if run.AIReview != nil || run.AIReviewJSON != "" {
+		t.Fatalf("canceled explanation remained attached to the decided run: %#v", run.AIReview)
 	}
 	if len(transport.calls) != 1 {
 		t.Fatalf("operation was not executed exactly once: %#v", transport.calls)
 	}
+}
+
+func TestCommandExplanationConcurrencyIsBounded(t *testing.T) {
+	svc, _, host := newTestService(t)
+	explainer := &trackingCommandExplainer{started: make(chan struct{}, 4)}
+	svc.SetCommandExplainer(explainer)
+	results := make([]domain.ExecResult, 0, 3)
+	for index := 0; index < 3; index++ {
+		result, err := svc.Submit(context.Background(), domain.ExecRequest{
+			HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", fmt.Sprintf("demo-%d", index)},
+			Reason: "recover demo", Rollback: "restart the previous release",
+		}, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		results = append(results, result)
+	}
+	for index := 0; index < maxConcurrentApprovalExplanations; index++ {
+		select {
+		case <-explainer.started:
+		case <-time.After(time.Second):
+			t.Fatal("expected explanation did not start")
+		}
+	}
+	select {
+	case <-explainer.started:
+		t.Fatal("explanation concurrency limit was exceeded")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := svc.Reject(context.Background(), results[0].ApprovalID, "not approved", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-explainer.started:
+	case <-time.After(time.Second):
+		t.Fatal("queued explanation did not start after a slot was released")
+	}
+	for _, result := range results[1:] {
+		if err := svc.Reject(context.Background(), result.ApprovalID, "not approved", "operator"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc.explainWG.Wait()
+	if maximum := explainer.maxActive(); maximum != maxConcurrentApprovalExplanations {
+		t.Fatalf("maximum concurrent explanations = %d", maximum)
+	}
+}
+
+func TestCommandExplanationQueueIsBounded(t *testing.T) {
+	svc, _, host := newTestService(t)
+	svc.explanationSem = make(chan struct{}, 1)
+	svc.explanationSlots = make(chan struct{}, 1)
+	explainer := &trackingCommandExplainer{started: make(chan struct{}, 2)}
+	svc.SetCommandExplainer(explainer)
+	first, err := svc.Submit(context.Background(), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo-one"},
+		Reason: "recover demo", Rollback: "restart the previous release",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-explainer.started:
+	case <-time.After(time.Second):
+		t.Fatal("first explanation did not start")
+	}
+	second, err := svc.Submit(context.Background(), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo-two"},
+		Reason: "recover demo", Rollback: "restart the previous release",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	skipped := waitForApproval(t, svc, second.ApprovalID, func(approval domain.Approval) bool {
+		return approval.AIReview != nil && approval.AIReview.Status == "unavailable"
+	})
+	if len(skipped.AIReview.Errors) != 1 || !strings.Contains(skipped.AIReview.Errors[0], "queue is full") {
+		t.Fatalf("queue overflow was not reported clearly: %#v", skipped.AIReview)
+	}
+	if err := svc.Reject(context.Background(), first.ApprovalID, "not approved", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Reject(context.Background(), second.ApprovalID, "not approved", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	svc.explainWG.Wait()
 }
 
 func TestRetryApprovalExplanationKeepsPolicyRiskAndDoesNotExecute(t *testing.T) {
@@ -682,6 +795,46 @@ func TestRetryApprovalExplanationPersistsDegradedResultAndKeepsPending(t *testin
 	}
 }
 
+func TestApprovalDecisionCancelsRetriedCommandExplanation(t *testing.T) {
+	svc, _, host := newTestService(t)
+	explainer := &trackingCommandExplainer{started: make(chan struct{}, 2)}
+	svc.SetCommandExplainer(explainer)
+	pending, err := svc.Submit(context.Background(), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "demo"},
+		Reason: "recover demo", Rollback: "restart the previous release",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-explainer.started:
+	case <-time.After(time.Second):
+		t.Fatal("automatic explanation did not start")
+	}
+
+	retryDone := make(chan error, 1)
+	go func() {
+		_, retryErr := svc.RetryApprovalExplanation(context.Background(), pending.ApprovalID, "operator")
+		retryDone <- retryErr
+	}()
+	select {
+	case <-explainer.started:
+	case <-time.After(time.Second):
+		t.Fatal("retried explanation did not start")
+	}
+	if err := svc.Reject(context.Background(), pending.ApprovalID, "not approved", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case retryErr := <-retryDone:
+		if !errors.Is(retryErr, context.Canceled) {
+			t.Fatalf("retry error = %v", retryErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("retried explanation continued after approval rejection")
+	}
+}
+
 func TestAgentPlanAdvancesStrictlyOneStepAtATime(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	ctx := WithSessionID(context.Background(), "session_plan_test")
@@ -696,6 +849,11 @@ func TestAgentPlanAdvancesStrictlyOneStepAtATime(t *testing.T) {
 	}
 	if _, err := svc.UpdateAgentPlanStep(ctx, 2, "completed", "not actually current", "test"); err == nil {
 		t.Fatal("expected out-of-order step completion to fail")
+	} else {
+		var transition *store.PlanTransitionError
+		if !errors.As(err, &transition) || transition.StepNumber != 2 || transition.Status != "pending" {
+			t.Fatalf("out-of-order update did not return a typed transition error: %v", err)
+		}
 	}
 	plan, err = svc.UpdateAgentPlanStep(ctx, 1, "completed", "Inspected README and host facts", "test")
 	if err != nil {

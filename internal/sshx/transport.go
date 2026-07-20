@@ -34,6 +34,7 @@ type HostKey struct {
 	Lines       string `json:"lines"`
 	Fingerprint string `json:"fingerprint"`
 	Algorithm   string `json:"algorithm,omitempty"`
+	Trusted     bool   `json:"trusted"`
 }
 
 // ConnectionSpec is resolved by the control plane. Jumps are ordered from the
