@@ -72,8 +72,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 30 {
-		t.Fatalf("built-in catalog size=%d, want 30", len(descriptors))
+	if len(descriptors) != 31 {
+		t.Fatalf("built-in catalog size=%d, want 31", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -110,6 +110,9 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		if descriptor.Name == "workspace_shell" && descriptor.Guard != "approval_required" {
 			t.Fatalf("workspace_shell must be approval-gated: %#v", descriptor)
 		}
+		if descriptor.Name == "ssh_file_transfer" && (descriptor.Guard != "approval_required" || !strings.Contains(string(descriptor.InputSchema), `"source_host_id"`) || !strings.Contains(string(descriptor.InputSchema), `"destination_host_id"`)) {
+			t.Fatalf("ssh_file_transfer metadata does not reflect its runtime schema: %#v", descriptor)
+		}
 		if descriptor.Name == "web_extract" && (descriptor.Guard != "read_only" || descriptor.Category != "web" || !strings.Contains(string(descriptor.InputSchema), `"urls"`)) {
 			t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
 		}
@@ -119,7 +122,7 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("removed %s tool remains in the Agent catalog", retired)
 		}
 	}
-	if !seen["ops_plan_get"] || !seen["ssh_config_apply"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task_get"] || !seen["ssh_task_cancel"] {
+	if !seen["ops_plan_get"] || !seen["ssh_config_apply"] || !seen["ssh_file_transfer"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task_get"] || !seen["ssh_task_cancel"] {
 		t.Fatalf("representative functions missing: %#v", seen)
 	}
 }

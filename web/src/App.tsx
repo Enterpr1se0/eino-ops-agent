@@ -748,9 +748,13 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const requestMode=request?textValue(request.mode):''
 	const workspaceShellBackend=request?textValue(request.workspace_shell_backend):''
 	const workspaceTransfer=requestMode==='workspace_upload'
+	const sshTransfer=requestMode==='ssh_file_transfer'
+	const sourceHostID=request?textValue(request.source_host_id):''
+	const sourcePath=request?textValue(request.source_path):''
+	const sourceHostName=hosts.find(host=>host.id===sourceHostID||host.name===sourceHostID)?.name||sourceHostID
 	const file=jsonRecord(payload.file)||jsonRecord(resultPayload?.file)
 	const filePath=textValue(file?.path)||remotePath||relativePath
-	const transferSummary=workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:''
+	const transferSummary=workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:''
   const planSteps=Array.isArray(payload.steps)?payload.steps.map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
   const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
 	const operation=filePath||(script?t('tool.bashScript'):program||toolLabel(entry.tool||'')||t('tool.result'))
@@ -771,13 +775,13 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
 		  <div className="tool-command-head"><span>{filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
-		  <div className="tool-command-block">{workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
+			  <div className="tool-command-block">{workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
 		  {filePath&&script&&<details className="tool-raw"><summary>{t('tool.fullTransaction')}</summary><pre>{script}</pre></details>}
 		  {program&&<CompactTable title={t('tool.originalArgs')} columns={['INDEX','VALUE']} rows={[[0,textValue(request.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>}
 		  {env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={['KEY','VALUE']} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
         </section>
         <aside className="tool-context-pane">
-		  <dl className="tool-context-grid"><div><dt>{workspaceTransfer?t('tool.targetHost'):workspaceID?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceTransfer?hostName:workspaceID||hostName}</dd></div><div><dt>{workspaceTransfer?t('tool.sourceFile'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{workspaceTransfer?`${workspaceID}:${relativePath}`:filePath||textValue(request.cwd)||t('tool.defaultDirectory')}</dd></div><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?'managed sudo':t('tool.normalUser')}</dd></div><div><dt>{t('common.risk')}</dt><dd>{risk?t(`riskLabels.${risk}`,{defaultValue:risk}):'—'}</dd></div><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${status}`,{defaultValue:status})}</dd></div><div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div><div><dt>{t('tool.duration')}</dt><dd>{formatDuration(payload.duration??resultPayload?.duration,run)}</dd></div><div><dt>Run ID</dt><dd>{runID||'—'}</dd></div></dl>
+			  <dl className="tool-context-grid"><div><dt>{workspaceTransfer||sshTransfer?t('tool.targetHost'):workspaceID?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceTransfer||sshTransfer?hostName:workspaceID||hostName}</dd></div><div><dt>{workspaceTransfer||sshTransfer?t('tool.sourceFile'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{workspaceTransfer?`${workspaceID}:${relativePath}`:sshTransfer?`${sourceHostName}:${sourcePath}`:filePath||textValue(request.cwd)||t('tool.defaultDirectory')}</dd></div><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?'managed sudo':t('tool.normalUser')}</dd></div><div><dt>{t('common.risk')}</dt><dd>{risk?t(`riskLabels.${risk}`,{defaultValue:risk}):'—'}</dd></div><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${status}`,{defaultValue:status})}</dd></div><div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div><div><dt>{t('tool.duration')}</dt><dd>{formatDuration(payload.duration??resultPayload?.duration,run)}</dd></div><div><dt>Run ID</dt><dd>{runID||'—'}</dd></div></dl>
 		  {textValue(request.reason)&&<div className="tool-reason"><span>{t('tool.reason')}</span><p>{textValue(request.reason)}</p></div>}
 		  {textValue(request.expected_changes)&&<div className="tool-reason change"><span>{t('tool.expectedChanges')}</span><p>{textValue(request.expected_changes)}</p></div>}
 		  {textValue(request.rollback)&&<div className="tool-reason rollback"><span>{t('tool.rollback')}</span><p>{textValue(request.rollback)}</p></div>}
@@ -891,6 +895,9 @@ function ApprovalDialog({
   const hostWorkspaceShell =
     requestMode === "workspace_shell" && workspaceShellBackend === "host";
   const workspaceTransfer = requestMode === "workspace_upload";
+  const sshTransfer = requestMode === "ssh_file_transfer";
+  const sourceHostID = textValue(request.source_host_id);
+  const sourcePath = textValue(request.source_path);
   const elevated = request.elevated === true;
   const actionKind = script
     ? t("approval.actionScript")
@@ -899,15 +906,19 @@ function ApprovalDialog({
     ? filePath
       ? t("approval.sudoFileTitle")
       : t("approval.sudoTitle", { kind: actionKind })
-    : workspaceTransfer
-      ? t("approval.uploadTitle")
+    : sshTransfer
+      ? t("approval.transferTitle")
+      : workspaceTransfer
+        ? t("approval.uploadTitle")
       : hostWorkspaceShell
         ? t("approval.hostShellTitle")
         : filePath
           ? t("approval.fileTitle")
           : t("approval.executeTitle", { kind: actionKind });
-  const commandLabel = workspaceTransfer
-    ? t("approval.uploadLabel")
+  const commandLabel = sshTransfer
+    ? t("approval.transferLabel")
+    : workspaceTransfer
+      ? t("approval.uploadLabel")
     : elevated
       ? filePath
         ? t("approval.rootFileLabel")
@@ -915,15 +926,19 @@ function ApprovalDialog({
       : filePath
         ? t("approval.fileLabel")
         : t("approval.commandLabel", { kind: actionKind });
-  const operation = workspaceTransfer
-    ? `${workspaceID}:${relativePath} → ${remotePath}`
+  const target = hosts.find((host) => host.id === approval.host_id);
+  const targetHost = target?.name || approval.host_id;
+  const source = hosts.find((host) => host.id === sourceHostID);
+  const sourceHost = source?.name || sourceHostID;
+  const operation = sshTransfer
+    ? `${sourceHost}:${sourcePath} → ${targetHost}:${remotePath}`
+    : workspaceTransfer
+      ? `${workspaceID}:${relativePath} → ${remotePath}`
     : fullProgram(request) ||
       script ||
       `${requestMode} ${filePath}`.trim() ||
       t("approval.pendingOperation");
-  const target = hosts.find((host) => host.id === approval.host_id);
-  const targetHost = target?.name || approval.host_id;
-  const hostName = workspaceTransfer
+  const hostName = workspaceTransfer || sshTransfer
     ? targetHost
     : workspaceID
       ? `Workspace / ${workspaceID}`
@@ -932,6 +947,7 @@ function ApprovalDialog({
     ? t("approval.rootViaSudo")
     : target?.user || t("approval.serviceUser");
   const expectedSHA = textValue(request.expected_sha256),
+    expectedDestinationSHA = textValue(request.expected_destination_sha256),
     validator = textValue(request.validator);
   const explanationPending = approval.ai_review?.status === "pending";
   const decide = async (scope: "once" | "session") => {
@@ -1050,12 +1066,16 @@ function ApprovalDialog({
                 <b>
                   {workspaceTransfer
                     ? `${workspaceID}:${relativePath} -> ${remotePath}`
-                    : filePath}
+                    : sshTransfer
+                      ? `${sourceHost}:${sourcePath} -> ${targetHost}:${remotePath}`
+                      : filePath}
                 </b>
                 <span>
-                  {expectedSHA
-                    ? `Expected SHA256 · ${expectedSHA}`
-                    : t("approval.unboundVersion")}
+                  {sshTransfer && expectedSHA
+                    ? `${t("approval.sourceSHA")} · ${expectedSHA}${expectedDestinationSHA ? ` · ${t("approval.destinationSHA")} · ${expectedDestinationSHA}` : ""}`
+                    : expectedSHA
+                      ? `Expected SHA256 · ${expectedSHA}`
+                      : t("approval.unboundVersion")}
                   {validator ? ` · Validator ${validator}` : ""}
                 </span>
               </div>
@@ -1067,7 +1087,7 @@ function ApprovalDialog({
           <dl>
             <div>
               <dt>
-                {workspaceTransfer
+                {workspaceTransfer || sshTransfer
                   ? t("approval.targetHost")
                   : workspaceID
                     ? t("common.workspace")
@@ -1075,6 +1095,12 @@ function ApprovalDialog({
               </dt>
               <dd>{hostName}</dd>
             </div>
+            {sshTransfer && (
+              <div>
+                <dt>{t("approval.sourceHost")}</dt>
+                <dd>{sourceHost}</dd>
+              </div>
+            )}
             <div>
               <dt>{t("approval.identity")}</dt>
               <dd>{executionIdentity}</dd>

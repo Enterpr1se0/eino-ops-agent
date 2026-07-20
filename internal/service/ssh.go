@@ -100,9 +100,20 @@ func bindSSHRequest(req *domain.ExecRequest, digest string) {
 	req.SSHConnectionDigest = digest
 }
 
+func bindSSHTransferSource(req *domain.ExecRequest, digest string) {
+	req.SourceConnectionDigest = digest
+}
+
 func verifySSHRequestBinding(req domain.ExecRequest, digest string) error {
 	if req.SSHConnectionDigest != digest {
 		return fmt.Errorf("approved SSH connection changed after submission")
+	}
+	return nil
+}
+
+func verifySSHTransferSourceBinding(req domain.ExecRequest, digest string) error {
+	if req.SourceConnectionDigest != digest {
+		return fmt.Errorf("approved source SSH connection changed after submission")
 	}
 	return nil
 }

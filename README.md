@@ -141,6 +141,8 @@ Host Shell 直接拥有当前服务账户可用的宿主机文件系统与网络
 
 Agent 向远端发送 Workspace 文件只使用 `workspace_file_upload`：源相对路径、读取所得 SHA256、目标主机和远端路径进入同一个审批摘要，批准执行前会再次校验源版本。托管根目录仅在服务内部使用，不写入数据库、API、审计或模型上下文。可通过 `workspace_dir` 或 `OPS_AGENT_WORKSPACE_DIR` 修改统一根目录。
 
+SSH 主机间迁移单个普通文件使用 `ssh_file_transfer`。OpsPilot 分别连接源主机和目标主机，通过内置 SFTP 在内存中中继数据，因此两台主机无需彼此可达，也不会调用远端 `scp`。调用前先用 `ssh_file_stat` 获取源文件 SHA256；覆盖目标文件时还必须绑定目标文件当前 SHA256。两端连接配置、路径、版本、覆盖标记和超时进入同一次人工审批。目标端先写同目录临时文件，源 SHA256 匹配后再原子改名；版本冲突、取消或超时不会留下半文件。
+
 配置文件 Tool 会额外展示 before/after SHA256、权限属主、validator、备份和 file operation ID。`ssh_config_apply` 必须携带读取时得到的版本；审批期间文件发生变化会返回可恢复的 `conflict`，而不是覆盖。Tool 的不存在资源、参数错误、超时和远端失败统一返回 `code/message/retryable/next_action`，不会用普通运行错误中断 Eino ToolNode。
 
 ## 日志
@@ -235,7 +237,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsPilot 作为
 - `ssh_exec` / `ssh_run_script`（可选 `background: true` 启动后台任务，默认同步执行）
 - `ssh_task_get` / `ssh_task_cancel`
 - `ssh_file_read` / `ssh_file_search` / `ssh_file_list` / `ssh_file_stat`
-- `ssh_file_write` / `ssh_file_apply_patch` / `ssh_config_apply` / `ssh_config_restore`
+- `ssh_file_write` / `ssh_file_apply_patch` / `ssh_file_transfer` / `ssh_config_apply` / `ssh_config_restore`
 - `workspace_list` / `workspace_file_list` / `workspace_file_read` / `workspace_file_search` / `workspace_file_apply_patch` / `workspace_file_upload` / `workspace_shell`
 - `ssh_history_search` / `ssh_history_get`
 - `ops_skill_list` / `ops_skill_get`

@@ -54,6 +54,10 @@ type StreamingTransport interface {
 	ExecStream(context.Context, ConnectionSpec, domain.ExecRequest, func(stream string, data []byte)) (RawResult, error)
 }
 
+type HostFileTransferTransport interface {
+	TransferFile(context.Context, ConnectionSpec, ConnectionSpec, domain.ExecRequest) (RawResult, error)
+}
+
 const probeScript = `probe_hostname=""
 if command -v hostname >/dev/null 2>&1; then probe_hostname=$(hostname 2>/dev/null) || probe_hostname=""; fi
 if [ -z "$probe_hostname" ]; then IFS= read -r probe_hostname </proc/sys/kernel/hostname || probe_hostname="unknown"; fi

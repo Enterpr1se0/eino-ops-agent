@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -290,6 +291,110 @@ func TestNativeSFTPUpload(t *testing.T) {
 	}
 	if string(data) != "native sftp payload" {
 		t.Fatalf("unexpected uploaded data %q", data)
+	}
+}
+
+func TestNativeSFTPTransfersFileBetweenHostsAtomically(t *testing.T) {
+	sourceServer := startTestSSHServer(t, "source-password")
+	destinationServer := startTestSSHServer(t, "destination-password")
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	transport := NewNativeSSHTransport(config.SSH{DefaultKnownHosts: knownHosts}, config.Default().Limits)
+	source := ConnectionSpec{Target: sourceServer.host()}
+	source.Target.ID = "source_host"
+	source.Target.Name = "source"
+	destination := ConnectionSpec{Target: destinationServer.host()}
+	destination.Target.ID = "destination_host"
+	destination.Target.Name = "destination"
+	for _, connection := range []ConnectionSpec{source, destination} {
+		key, err := transport.ScanHostKey(context.Background(), connection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := transport.TrustHostKey(context.Background(), connection, key.Fingerprint); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	content := []byte("host-to-host transfer payload\n")
+	sourcePath := filepath.Join(sourceServer.root, "release.bin")
+	if err := os.WriteFile(sourcePath, content, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	destinationPath := filepath.Join(destinationServer.root, "release.bin")
+	digest := fmt.Sprintf("%x", sha256.Sum256(content))
+	result, err := transport.TransferFile(context.Background(), source, destination, domain.ExecRequest{
+		Mode: domain.ExecSSHFileTransfer, SourceHostID: source.Target.ID, SourcePath: filepath.ToSlash(sourcePath),
+		HostID: destination.Target.ID, RemotePath: filepath.ToSlash(destinationPath), ExpectedSHA256: digest, TimeoutSeconds: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || !strings.Contains(string(result.Stdout), digest) {
+		t.Fatalf("unexpected transfer result: %#v", result)
+	}
+	transferred, err := os.ReadFile(destinationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(transferred, content) {
+		t.Fatalf("destination content mismatch: %q", transferred)
+	}
+	info, err := os.Stat(destinationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("destination mode=%o, want 640", info.Mode().Perm())
+	}
+}
+
+func TestNativeSFTPTransferConflictLeavesDestinationUntouched(t *testing.T) {
+	sourceServer := startTestSSHServer(t, "source-conflict-password")
+	destinationServer := startTestSSHServer(t, "destination-conflict-password")
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	transport := NewNativeSSHTransport(config.SSH{DefaultKnownHosts: knownHosts}, config.Default().Limits)
+	source := ConnectionSpec{Target: sourceServer.host()}
+	source.Target.ID = "source_conflict_host"
+	destination := ConnectionSpec{Target: destinationServer.host()}
+	destination.Target.ID = "destination_conflict_host"
+	for _, connection := range []ConnectionSpec{source, destination} {
+		key, err := transport.ScanHostKey(context.Background(), connection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := transport.TrustHostKey(context.Background(), connection, key.Fingerprint); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sourcePath := filepath.Join(sourceServer.root, "source.bin")
+	destinationPath := filepath.Join(destinationServer.root, "destination.bin")
+	if err := os.WriteFile(sourcePath, []byte("changed source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("keep destination")
+	if err := os.WriteFile(destinationPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	destinationDigest := fmt.Sprintf("%x", sha256.Sum256(original))
+	_, err := transport.TransferFile(context.Background(), source, destination, domain.ExecRequest{
+		Mode: domain.ExecSSHFileTransfer, SourceHostID: source.Target.ID, SourcePath: filepath.ToSlash(sourcePath),
+		HostID: destination.Target.ID, RemotePath: filepath.ToSlash(destinationPath), ExpectedSHA256: strings.Repeat("0", 64),
+		Overwrite: true, ExpectedDestinationSHA256: destinationDigest, TimeoutSeconds: 5,
+	})
+	if err == nil || !strings.Contains(err.Error(), "source file version conflict") {
+		t.Fatalf("source version conflict was not reported: %v", err)
+	}
+	current, readErr := os.ReadFile(destinationPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(current, original) {
+		t.Fatalf("destination changed after source conflict: %q", current)
+	}
+	matches, err := filepath.Glob(filepath.Join(destinationServer.root, ".opspilot-transfer-*.tmp"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("temporary files were not cleaned up: matches=%v err=%v", matches, err)
 	}
 }
 

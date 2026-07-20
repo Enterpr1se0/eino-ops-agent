@@ -139,6 +139,10 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 			hits = append(hits, "workspace_sandbox_shell")
 		}
 	}
+	if req.Mode == domain.ExecSSHFileTransfer {
+		risk = maxRisk(risk, domain.RiskChange)
+		hits = append(hits, "ssh_host_file_transfer")
+	}
 
 	sort.Strings(hits)
 	switch risk {
@@ -276,6 +280,11 @@ func shellSource(req domain.ExecRequest) (string, error) {
 			return "", fmt.Errorf("workspace upload requires a workspace file, expected SHA256, and absolute remote path")
 		}
 		return "sftp put " + shellQuote(req.WorkspaceID+"/"+req.RelativePath) + " " + shellQuote(req.RemotePath), nil
+	case domain.ExecSSHFileTransfer:
+		if req.SourceHostID == "" || req.SourcePath == "" || req.HostID == "" || req.RemotePath == "" || req.ExpectedSHA256 == "" {
+			return "", fmt.Errorf("SSH file transfer requires source and destination hosts, paths, and source SHA256")
+		}
+		return "sftp get " + shellQuote(req.SourceHostID+":"+req.SourcePath) + " && sftp put " + shellQuote(req.HostID+":"+req.RemotePath), nil
 	default:
 		return "", fmt.Errorf("unsupported execution mode %q", req.Mode)
 	}

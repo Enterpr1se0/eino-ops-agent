@@ -77,6 +77,14 @@ func (f *fakeTransport) Exec(_ context.Context, connection sshx.ConnectionSpec, 
 	return sshx.RawResult{ExitCode: 0, Stdout: []byte("password=secret-value\nok\n"), Duration: time.Millisecond}, nil
 }
 
+func (f *fakeTransport) TransferFile(_ context.Context, source, destination sshx.ConnectionSpec, req domain.ExecRequest) (sshx.RawResult, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, req)
+	f.hosts = append(f.hosts, source.Target, destination.Target)
+	f.mu.Unlock()
+	return sshx.RawResult{ExitCode: 0, Stdout: []byte(`{"bytes":12,"sha256":"transfer-digest"}` + "\n"), Duration: time.Millisecond}, nil
+}
+
 func TestHostCredentialsAreEncryptedPreservedAndNeverSerialized(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	ctx := context.Background()

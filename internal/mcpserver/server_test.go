@@ -32,6 +32,7 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	}
 	workspaceShellFound := false
 	taskGetFound := false
+	fileTransferFound := false
 	backgroundInputs := map[string]bool{"ssh_exec": false, "ssh_run_script": false}
 	for _, registered := range result.Tools {
 		for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list"} {
@@ -44,6 +45,13 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 		}
 		if registered.Name == "ssh_task_get" {
 			taskGetFound = true
+		}
+		if registered.Name == "ssh_file_transfer" {
+			schemaJSON, marshalErr := json.Marshal(registered.InputSchema)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			fileTransferFound = strings.Contains(string(schemaJSON), `"source_host_id"`) && strings.Contains(string(schemaJSON), `"destination_host_id"`)
 		}
 		if _, tracked := backgroundInputs[registered.Name]; tracked {
 			schemaJSON, marshalErr := json.Marshal(registered.InputSchema)
@@ -58,5 +66,8 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	}
 	if !taskGetFound || !backgroundInputs["ssh_exec"] || !backgroundInputs["ssh_run_script"] {
 		t.Fatalf("merged background task interface is incomplete: task_get=%v inputs=%#v", taskGetFound, backgroundInputs)
+	}
+	if !fileTransferFound {
+		t.Fatal("ssh_file_transfer is missing or has an incomplete MCP schema")
 	}
 }

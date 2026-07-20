@@ -86,6 +86,12 @@ func New(svc *service.Service, version string) *Server {
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_transfer", Description: "Transfer one SHA256-bound regular file between two registered SSH hosts through the control plane after human approval."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHFileTransferInput) (*mcp.CallToolResult, domain.ExecResult, error) {
+			output, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, input.Rollback, "mcp-client")
+			output, err = agent.NormalizeExecToolResult(output, err)
+			return nil, output, err
+		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_apply_patch", Description: "Apply an exact unified diff after human approval."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FilePatchInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := svc.ApplyPatchChecked(ctx, input.HostID, input.Cwd, input.Patch, input.ExpectedSHA256, input.Validator, input.Elevated, input.Reason, input.Rollback, "mcp-client")

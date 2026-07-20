@@ -100,7 +100,7 @@ func toolGuard(name string) string {
 		return "agent_state"
 	case "ssh_exec", "ssh_run_script", "ssh_file_read", "ssh_file_search":
 		return "policy_checked"
-	case "ssh_file_write", "ssh_file_apply_patch", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_upload", "workspace_shell":
+	case "ssh_file_write", "ssh_file_apply_patch", "ssh_file_transfer", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_upload", "workspace_shell":
 		return "approval_required"
 	case "ssh_task_cancel":
 		return "audited_control"
@@ -208,6 +208,19 @@ type FileRestoreInput struct {
 	OperationID string `json:"operation_id" jsonschema:"audited file operation identifier returned by ssh_config_apply"`
 	Reason      string `json:"reason" jsonschema:"why restoration is required"`
 	Elevated    bool   `json:"elevated,omitempty" jsonschema:"restore through managed sudo when required"`
+}
+
+type SSHFileTransferInput struct {
+	SourceHostID              string `json:"source_host_id" jsonschema:"registered source SSH host identifier"`
+	SourcePath                string `json:"source_path" jsonschema:"absolute source file path; symbolic links are rejected"`
+	ExpectedSHA256            string `json:"expected_sha256" jsonschema:"source SHA256 returned by ssh_file_stat or ssh_file_read"`
+	DestinationHostID         string `json:"destination_host_id" jsonschema:"registered destination SSH host identifier"`
+	DestinationPath           string `json:"destination_path" jsonschema:"absolute destination file path"`
+	Overwrite                 bool   `json:"overwrite,omitempty" jsonschema:"replace an existing destination; defaults to false"`
+	ExpectedDestinationSHA256 string `json:"expected_destination_sha256,omitempty" jsonschema:"destination SHA256 from ssh_file_stat; required when overwrite is true"`
+	TimeoutSeconds            int    `json:"timeout_seconds,omitempty" jsonschema:"transfer timeout from 1 to 600 seconds"`
+	Reason                    string `json:"reason" jsonschema:"why this file migration is needed"`
+	Rollback                  string `json:"rollback" jsonschema:"how to remove or restore the destination file"`
 }
 
 type WorkspaceListOutput struct {
@@ -603,6 +616,12 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	}
 	if err := appendTool(toolutils.InferTool("ssh_file_stat", "Inspect metadata for one absolute remote file path.", func(ctx context.Context, input FileListInput) (domain.ExecResult, error) {
 		result, err := svc.StatFile(ctx, input.HostID, input.Path, "eino-agent")
+		return NormalizeExecToolResult(result, err)
+	})); err != nil {
+		return nil, err
+	}
+	if err := appendTool(toolutils.InferTool("ssh_file_transfer", "Transfer one regular file between two registered SSH hosts through the control plane. The hosts do not need network access to each other. Call ssh_file_stat on the source first and bind its SHA256. Existing destinations are rejected unless overwrite=true and their current SHA256 is also bound. The exact transfer requires human approval.", func(ctx context.Context, input SSHFileTransferInput) (domain.ExecResult, error) {
+		result, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, input.Rollback, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err

@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -719,11 +720,20 @@ func (s *Service) Evaluate(ctx context.Context, req domain.ExecRequest) (domain.
 			return domain.Decision{}, err
 		}
 	}
+	var transferSource domain.Host
 	if isWorkspaceMode(req.Mode) {
-		if req.SSHConnectionDigest != "" {
+		if req.SSHConnectionDigest != "" || req.SourceConnectionDigest != "" {
 			return domain.Decision{}, fmt.Errorf("SSH connection binding is invalid for local Workspace operations")
 		}
+	} else if req.Mode == domain.ExecSSHFileTransfer {
+		transferSource, err = s.bindSSHFileTransfer(ctx, host, &req)
+		if err != nil {
+			return domain.Decision{}, err
+		}
 	} else {
+		if req.SourceConnectionDigest != "" {
+			return domain.Decision{}, fmt.Errorf("source SSH connection binding is only valid for host-to-host transfers")
+		}
 		_, digest, err := s.resolveSSHConnection(ctx, host)
 		if err != nil {
 			return domain.Decision{}, err
@@ -733,7 +743,11 @@ func (s *Service) Evaluate(ctx context.Context, req domain.ExecRequest) (domain.
 	if err := validateExecutionRequest(host, req); err != nil {
 		return domain.Decision{}, err
 	}
-	return s.policy.Evaluate(ctx, host, req), nil
+	decision := s.policy.Evaluate(ctx, host, req)
+	if req.Mode == domain.ExecSSHFileTransfer {
+		decision = mergeTransferDecisions(decision, s.policy.Evaluate(ctx, transferSource, req))
+	}
+	return decision, nil
 }
 
 func (s *Service) Submit(ctx context.Context, req domain.ExecRequest, actor string) (domain.ExecResult, error) {
@@ -762,11 +776,20 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
+	var transferSource domain.Host
 	if isWorkspaceMode(req.Mode) {
-		if req.SSHConnectionDigest != "" {
+		if req.SSHConnectionDigest != "" || req.SourceConnectionDigest != "" {
 			return domain.ExecResult{}, fmt.Errorf("SSH connection binding is invalid for local Workspace operations")
 		}
+	} else if req.Mode == domain.ExecSSHFileTransfer {
+		transferSource, err = s.bindSSHFileTransfer(ctx, host, &req)
+		if err != nil {
+			return domain.ExecResult{}, err
+		}
 	} else {
+		if req.SourceConnectionDigest != "" {
+			return domain.ExecResult{}, fmt.Errorf("source SSH connection binding is only valid for host-to-host transfers")
+		}
 		_, digest, connectionErr := s.resolveSSHConnection(ctx, host)
 		if connectionErr != nil {
 			return domain.ExecResult{}, connectionErr
@@ -781,6 +804,9 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		return domain.ExecResult{}, err
 	}
 	decision := s.policy.Evaluate(ctx, host, req)
+	if req.Mode == domain.ExecSSHFileTransfer {
+		decision = mergeTransferDecisions(decision, s.policy.Evaluate(ctx, transferSource, req))
+	}
 	sessionID := SessionIDFromContext(ctx)
 	sessionGrantUsed := false
 	// A session grant can only remove repeated Change-level prompts. Critical
@@ -1225,14 +1251,18 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		}
 		req = prepared
 	}
-	release, err := s.acquire(ctx, host.ID)
+	hostIDs := []string{host.ID}
+	if req.Mode == domain.ExecSSHFileTransfer {
+		hostIDs = append(hostIDs, req.SourceHostID)
+	}
+	release, err := s.acquire(ctx, hostIDs...)
 	if err != nil {
 		logger.WarnContext(ctx, "SSH execution canceled before acquiring capacity", "error", err)
 		return domain.ExecResult{}, err
 	}
 	defer release()
 	var connection sshx.ConnectionSpec
-	if !isWorkspaceMode(req.Mode) {
+	if !isWorkspaceMode(req.Mode) && req.Mode != domain.ExecSSHFileTransfer {
 		latestHost, connectionErr := s.store.GetHost(ctx, host.ID)
 		if connectionErr == nil {
 			var currentDigest string
@@ -1258,7 +1288,9 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	s.audit(ctx, run.ID, "command_started", actor, map[string]any{"risk": run.Risk, "digest": run.RequestDigest})
 	var raw sshx.RawResult
 	var execErr error
-	if isWorkspaceMode(req.Mode) {
+	if req.Mode == domain.ExecSSHFileTransfer {
+		raw, execErr = s.executeSSHFileTransfer(ctx, req)
+	} else if isWorkspaceMode(req.Mode) {
 		raw, execErr = s.executeWorkspace(ctx, req)
 	} else if streaming, ok := s.transport.(sshx.StreamingTransport); ok && stream != nil {
 		raw, execErr = streaming.ExecStream(ctx, connection, req, stream)
@@ -1338,6 +1370,9 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 		}
 		return nil
 	}
+	if req.Mode == domain.ExecSSHFileTransfer && req.Elevated {
+		return fmt.Errorf("elevated mode is not supported for SFTP transfers")
+	}
 	usesSudo, err := policy.ContainsProgram(req, "sudo")
 	if err == nil && usesSudo {
 		return fmt.Errorf("do not invoke sudo directly; set elevated=true and provide the underlying program")
@@ -1345,7 +1380,7 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 	if !req.Elevated {
 		return nil
 	}
-	if req.Mode == domain.ExecWorkspaceUpload {
+	if req.Mode == domain.ExecWorkspaceUpload || req.Mode == domain.ExecSSHFileTransfer {
 		return fmt.Errorf("elevated mode is not supported for SFTP transfers")
 	}
 	if host.SudoMode == "none" || host.SudoMode == "" {
@@ -1386,6 +1421,9 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 	}
 	if req.RemotePath != "" && (!path.IsAbs(req.RemotePath) || path.Clean(req.RemotePath) != req.RemotePath || strings.ContainsAny(req.RemotePath, "\x00\r\n")) {
 		return fmt.Errorf("remote_path must be a clean absolute path")
+	}
+	if req.SourcePath != "" && (!path.IsAbs(req.SourcePath) || path.Clean(req.SourcePath) != req.SourcePath || strings.ContainsAny(req.SourcePath, "\x00\r\n")) {
+		return fmt.Errorf("source_path must be a clean absolute path")
 	}
 	for key, value := range req.Env {
 		if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`).MatchString(key) || len(value) > 32<<10 || strings.ContainsAny(value, "\x00\r\n") {
@@ -1748,16 +1786,30 @@ func (s *Service) ListAudit(ctx context.Context, runID string, limit int) ([]dom
 	return s.store.ListAudit(ctx, runID, limit)
 }
 
-func (s *Service) acquire(ctx context.Context, hostID string) (func(), error) {
-	s.semMu.Lock()
-	hostSem := s.hostSems[hostID]
-	if hostSem == nil {
-		limit := s.limits.HostConcurrency
-		if limit <= 0 {
-			limit = 2
+func (s *Service) acquire(ctx context.Context, hostIDs ...string) (func(), error) {
+	uniqueHostIDs := make([]string, 0, len(hostIDs))
+	seen := make(map[string]struct{}, len(hostIDs))
+	for _, hostID := range hostIDs {
+		if _, exists := seen[hostID]; hostID == "" || exists {
+			continue
 		}
-		hostSem = make(chan struct{}, limit)
-		s.hostSems[hostID] = hostSem
+		seen[hostID] = struct{}{}
+		uniqueHostIDs = append(uniqueHostIDs, hostID)
+	}
+	sort.Strings(uniqueHostIDs)
+	s.semMu.Lock()
+	hostSems := make([]chan struct{}, 0, len(uniqueHostIDs))
+	for _, hostID := range uniqueHostIDs {
+		hostSem := s.hostSems[hostID]
+		if hostSem == nil {
+			limit := s.limits.HostConcurrency
+			if limit <= 0 {
+				limit = 2
+			}
+			hostSem = make(chan struct{}, limit)
+			s.hostSems[hostID] = hostSem
+		}
+		hostSems = append(hostSems, hostSem)
 	}
 	s.semMu.Unlock()
 	select {
@@ -1765,13 +1817,25 @@ func (s *Service) acquire(ctx context.Context, hostID string) (func(), error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	select {
-	case hostSem <- struct{}{}:
-		return func() { <-hostSem; <-s.globalSem }, nil
-	case <-ctx.Done():
-		<-s.globalSem
-		return nil, ctx.Err()
+	acquired := make([]chan struct{}, 0, len(hostSems))
+	for _, hostSem := range hostSems {
+		select {
+		case hostSem <- struct{}{}:
+			acquired = append(acquired, hostSem)
+		case <-ctx.Done():
+			for index := len(acquired) - 1; index >= 0; index-- {
+				<-acquired[index]
+			}
+			<-s.globalSem
+			return nil, ctx.Err()
+		}
 	}
+	return func() {
+		for index := len(acquired) - 1; index >= 0; index-- {
+			<-acquired[index]
+		}
+		<-s.globalSem
+	}, nil
 }
 
 func (s *Service) audit(ctx context.Context, runID, eventType, actor string, data map[string]any) {
