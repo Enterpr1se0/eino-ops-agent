@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -20,11 +21,14 @@ import (
 	"eino-ops-agent/internal/proxyx"
 )
 
-const maxWebSearchResponseBytes = 2 << 20
+const (
+	maxWebSearchResponseBytes = 2 << 20
+	maxWebExtractURLs         = 5
+)
 
 var (
-	ErrWebSearchDisabled = errors.New("web search is disabled")
-	ErrWebSearchUpstream = errors.New("web search provider request failed")
+	ErrWebSearchDisabled = errors.New("Tavily Web is disabled")
+	ErrWebSearchUpstream = errors.New("Tavily provider request failed")
 	webSearchDomain      = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 )
 
@@ -48,6 +52,19 @@ type tavilySearchRequest struct {
 type tavilySearchResponse struct {
 	Results      []domain.WebSearchResult `json:"results"`
 	ResponseTime float64                  `json:"response_time"`
+}
+
+type tavilyExtractRequest struct {
+	URLs          []string `json:"urls"`
+	ExtractDepth  string   `json:"extract_depth"`
+	Format        string   `json:"format"`
+	IncludeImages bool     `json:"include_images"`
+}
+
+type tavilyExtractResponse struct {
+	Results       []domain.WebExtractResult       `json:"results"`
+	FailedResults []domain.WebExtractFailedResult `json:"failed_results"`
+	ResponseTime  float64                         `json:"response_time"`
 }
 
 func (s *Service) WebSearchSettings(ctx context.Context) (domain.WebSearchSettings, error) {
@@ -77,6 +94,21 @@ func (s *Service) SaveWebSearchSettings(ctx context.Context, input domain.WebSea
 	if input.MaxResults < domain.MinWebSearchMaxResults || input.MaxResults > domain.MaxWebSearchMaxResults {
 		return domain.WebSearchSettings{}, fmt.Errorf("max_results must be between %d and %d", domain.MinWebSearchMaxResults, domain.MaxWebSearchMaxResults)
 	}
+	if input.ExtractMaxContentKiB == 0 {
+		input.ExtractMaxContentKiB = domain.DefaultWebExtractMaxContentKiB
+	}
+	if input.ExtractMaxTotalKiB == 0 {
+		input.ExtractMaxTotalKiB = domain.DefaultWebExtractMaxTotalKiB
+	}
+	if input.ExtractMaxContentKiB < domain.MinWebExtractMaxContentKiB || input.ExtractMaxContentKiB > domain.MaxWebExtractMaxContentKiB {
+		return domain.WebSearchSettings{}, fmt.Errorf("extract_max_content_kib must be between %d and %d", domain.MinWebExtractMaxContentKiB, domain.MaxWebExtractMaxContentKiB)
+	}
+	if input.ExtractMaxTotalKiB < domain.MinWebExtractMaxTotalKiB || input.ExtractMaxTotalKiB > domain.MaxWebExtractMaxTotalKiB {
+		return domain.WebSearchSettings{}, fmt.Errorf("extract_max_total_kib must be between %d and %d", domain.MinWebExtractMaxTotalKiB, domain.MaxWebExtractMaxTotalKiB)
+	}
+	if input.ExtractMaxTotalKiB < input.ExtractMaxContentKiB {
+		return domain.WebSearchSettings{}, fmt.Errorf("extract_max_total_kib must not be less than extract_max_content_kib")
+	}
 
 	apiKeyCipher := current.APIKeyCipher
 	if input.ClearAPIKey {
@@ -89,7 +121,7 @@ func (s *Service) SaveWebSearchSettings(ctx context.Context, input domain.WebSea
 		}
 	}
 	if input.Enabled && apiKeyCipher == "" {
-		return domain.WebSearchSettings{}, fmt.Errorf("Tavily API key is required when web search is enabled")
+		return domain.WebSearchSettings{}, fmt.Errorf("Tavily API key is required when Tavily Web is enabled")
 	}
 
 	proxyUsername := strings.TrimSpace(input.ProxyUsername)
@@ -111,6 +143,7 @@ func (s *Service) SaveWebSearchSettings(ctx context.Context, input domain.WebSea
 		Enabled: input.Enabled, Provider: "tavily", BaseURL: baseURL, APIKeyCipher: apiKeyCipher,
 		ProxyURL: proxyURL, ProxyUsername: proxyUsername, ProxyPasswordCipher: proxyPasswordCipher,
 		TimeoutSeconds: input.TimeoutSeconds, MaxResults: input.MaxResults,
+		ExtractMaxContentKiB: input.ExtractMaxContentKiB, ExtractMaxTotalKiB: input.ExtractMaxTotalKiB,
 	})
 	if err != nil {
 		return domain.WebSearchSettings{}, err
@@ -118,6 +151,7 @@ func (s *Service) SaveWebSearchSettings(ctx context.Context, input domain.WebSea
 	s.audit(ctx, "", "web_search_settings_updated", actor, map[string]any{
 		"enabled": saved.Enabled, "provider": saved.Provider, "base_url": saved.BaseURL,
 		"proxy_configured": saved.ProxyURL != "", "timeout_seconds": saved.TimeoutSeconds, "max_results": saved.MaxResults,
+		"extract_max_content_kib": saved.ExtractMaxContentKiB, "extract_max_total_kib": saved.ExtractMaxTotalKiB,
 	})
 	return publicWebSearchSettings(saved), nil
 }
@@ -134,6 +168,12 @@ func decorateWebSearchSettings(settings domain.WebSearchSettings) domain.WebSear
 	}
 	if settings.MaxResults == 0 {
 		settings.MaxResults = domain.DefaultWebSearchMaxResults
+	}
+	if settings.ExtractMaxContentKiB < domain.MinWebExtractMaxContentKiB || settings.ExtractMaxContentKiB > domain.MaxWebExtractMaxContentKiB {
+		settings.ExtractMaxContentKiB = domain.DefaultWebExtractMaxContentKiB
+	}
+	if settings.ExtractMaxTotalKiB < domain.MinWebExtractMaxTotalKiB || settings.ExtractMaxTotalKiB > domain.MaxWebExtractMaxTotalKiB || settings.ExtractMaxTotalKiB < settings.ExtractMaxContentKiB {
+		settings.ExtractMaxTotalKiB = domain.DefaultWebExtractMaxTotalKiB
 	}
 	settings.HasAPIKey = settings.APIKeyCipher != ""
 	settings.HasProxyPassword = settings.ProxyPasswordCipher != ""
@@ -165,7 +205,7 @@ func (s *Service) resolveWebSearchSettings(ctx context.Context) (resolvedWebSear
 	}
 	proxyPassword, err := s.encryptor.Decrypt(settings.ProxyPasswordCipher)
 	if err != nil {
-		return resolvedWebSearchSettings{}, fmt.Errorf("decrypt web search proxy password: %w", err)
+		return resolvedWebSearchSettings{}, fmt.Errorf("decrypt Tavily Web proxy password: %w", err)
 	}
 	return resolvedWebSearchSettings{WebSearchSettings: settings, APIKey: string(apiKey), ProxyPassword: string(proxyPassword)}, nil
 }
@@ -179,51 +219,19 @@ func (s *Service) SearchWeb(ctx context.Context, input domain.WebSearchRequest, 
 	if err != nil {
 		return domain.WebSearchResponse{}, err
 	}
-	payload, err := json.Marshal(tavilySearchRequest{
+	payload := tavilySearchRequest{
 		Query: request.Query, SearchDepth: "basic", MaxResults: request.MaxResults, TimeRange: request.TimeRange,
 		IncludeDomains: request.IncludeDomains, ExcludeDomains: request.ExcludeDomains, IncludeAnswer: false, IncludeRaw: false,
-	})
-	if err != nil {
-		return domain.WebSearchResponse{}, err
-	}
-	endpoint := strings.TrimRight(settings.BaseURL, "/") + "/search"
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return domain.WebSearchResponse{}, err
-	}
-	httpRequest.Header.Set("Authorization", "Bearer "+settings.APIKey)
-	httpRequest.Header.Set("Content-Type", "application/json")
-	httpRequest.Header.Set("Accept", "application/json")
-	httpRequest.Header.Set("User-Agent", "OpsPilot-WebSearch/1.0")
-
-	client, err := webSearchHTTPClient(settings)
-	if err != nil {
-		return domain.WebSearchResponse{}, err
 	}
 	queryDigest := sha256.Sum256([]byte(request.Query))
 	started := time.Now()
-	response, err := client.Do(httpRequest)
+	var decoded tavilySearchResponse
+	err = s.requestTavily(ctx, settings, "/search", payload, &decoded)
 	if err != nil {
 		s.audit(ctx, "", "web_search_failed", actor, map[string]any{
 			"provider": "tavily", "query_sha256": hex.EncodeToString(queryDigest[:]), "duration_ms": time.Since(started).Milliseconds(),
 		})
-		return domain.WebSearchResponse{}, fmt.Errorf("%w: %s", ErrWebSearchUpstream, s.scrubWebSearchText(err.Error(), settings))
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxWebSearchResponseBytes+1))
-	if err != nil {
-		return domain.WebSearchResponse{}, fmt.Errorf("%w: read response: %v", ErrWebSearchUpstream, err)
-	}
-	if len(body) > maxWebSearchResponseBytes {
-		return domain.WebSearchResponse{}, fmt.Errorf("%w: response exceeded 2 MiB", ErrWebSearchUpstream)
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		message := boundedWebSearchText(s.scrubWebSearchText(string(body), settings), 1000)
-		return domain.WebSearchResponse{}, fmt.Errorf("%w: Tavily returned %s: %s", ErrWebSearchUpstream, response.Status, message)
-	}
-	var decoded tavilySearchResponse
-	if err := json.Unmarshal(body, &decoded); err != nil {
-		return domain.WebSearchResponse{}, fmt.Errorf("%w: decode response: %v", ErrWebSearchUpstream, err)
+		return domain.WebSearchResponse{}, err
 	}
 	results := make([]domain.WebSearchResult, 0, min(len(decoded.Results), request.MaxResults))
 	for _, result := range decoded.Results {
@@ -250,6 +258,125 @@ func (s *Service) SearchWeb(ctx context.Context, input domain.WebSearchRequest, 
 	return domain.WebSearchResponse{
 		Query: request.Query, Provider: "tavily", Results: results, ResponseTime: decoded.ResponseTime, ContentIsUntrusted: true,
 	}, nil
+}
+
+func (s *Service) ExtractWeb(ctx context.Context, input domain.WebExtractRequest, actor string) (domain.WebExtractResponse, error) {
+	settings, err := s.resolveWebSearchSettings(ctx)
+	if err != nil {
+		return domain.WebExtractResponse{}, err
+	}
+	request, err := normalizeWebExtractRequest(input)
+	if err != nil {
+		return domain.WebExtractResponse{}, err
+	}
+	urlsDigest := sha256.Sum256([]byte(strings.Join(request.URLs, "\n")))
+	started := time.Now()
+	var decoded tavilyExtractResponse
+	err = s.requestTavily(ctx, settings, "/extract", tavilyExtractRequest{
+		URLs: request.URLs, ExtractDepth: "basic", Format: "markdown", IncludeImages: false,
+	}, &decoded)
+	if err != nil {
+		s.audit(ctx, "", "web_extract_failed", actor, map[string]any{
+			"provider": "tavily", "urls_sha256": hex.EncodeToString(urlsDigest[:]), "url_count": len(request.URLs),
+			"duration_ms": time.Since(started).Milliseconds(), "proxy_used": settings.ProxyURL != "",
+		})
+		return domain.WebExtractResponse{Provider: "tavily", ContentIsUntrusted: true}, err
+	}
+
+	result := domain.WebExtractResponse{
+		Provider: "tavily", Results: make([]domain.WebExtractResult, 0, len(decoded.Results)),
+		FailedResults: make([]domain.WebExtractFailedResult, 0, len(decoded.FailedResults)),
+		ResponseTime:  decoded.ResponseTime, ContentIsUntrusted: true,
+	}
+	maxContentBytes := settings.ExtractMaxContentKiB << 10
+	remaining := settings.ExtractMaxTotalKiB << 10
+	resultLimit := min(len(decoded.Results), maxWebExtractURLs)
+	for index, extracted := range decoded.Results[:resultLimit] {
+		if remaining <= 0 {
+			break
+		}
+		normalizedURL, err := normalizePublicWebURL(extracted.URL)
+		if err != nil || containsWebSearchSecret(normalizedURL, settings) {
+			continue
+		}
+		slotsRemaining := resultLimit - index
+		limit := min(maxContentBytes, remaining/slotsRemaining)
+		content := boundedWebSearchText(s.scrubWebSearchText(extracted.RawContent, settings), limit)
+		if content == "" {
+			result.FailedResults = append(result.FailedResults, domain.WebExtractFailedResult{URL: normalizedURL, Error: "Tavily returned empty content"})
+			continue
+		}
+		remaining -= len(content)
+		result.Results = append(result.Results, domain.WebExtractResult{URL: normalizedURL, RawContent: content})
+	}
+	for _, failed := range decoded.FailedResults {
+		if len(result.FailedResults) == maxWebExtractURLs {
+			break
+		}
+		normalizedURL, err := normalizePublicWebURL(failed.URL)
+		if err != nil || containsWebSearchSecret(normalizedURL, settings) {
+			continue
+		}
+		result.FailedResults = append(result.FailedResults, domain.WebExtractFailedResult{
+			URL: normalizedURL, Error: boundedWebSearchText(s.scrubWebSearchText(failed.Error, settings), 1000),
+		})
+	}
+	eventType := "web_extract_completed"
+	if len(result.Results) == 0 {
+		eventType = "web_extract_failed"
+	}
+	s.audit(ctx, "", eventType, actor, map[string]any{
+		"provider": "tavily", "urls_sha256": hex.EncodeToString(urlsDigest[:]), "url_count": len(request.URLs),
+		"result_count": len(result.Results), "failed_count": len(result.FailedResults),
+		"duration_ms": time.Since(started).Milliseconds(), "proxy_used": settings.ProxyURL != "",
+	})
+	if len(result.Results) == 0 {
+		return result, fmt.Errorf("%w: Tavily did not extract any requested URL", ErrWebSearchUpstream)
+	}
+	return result, nil
+}
+
+func (s *Service) requestTavily(ctx context.Context, settings resolvedWebSearchSettings, path string, payload, output any) error {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	endpoint := strings.TrimRight(settings.BaseURL, "/") + path
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(encoded))
+	if err != nil {
+		return err
+	}
+	httpRequest.Header.Set("Authorization", "Bearer "+settings.APIKey)
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("Accept", "application/json")
+	httpRequest.Header.Set("User-Agent", "OpsPilot-Tavily/1.0")
+	client, err := webSearchHTTPClient(settings)
+	if err != nil {
+		return err
+	}
+	response, err := client.Do(httpRequest)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		return fmt.Errorf("%w: %s", ErrWebSearchUpstream, s.scrubWebSearchText(err.Error(), settings))
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxWebSearchResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("%w: read response: %v", ErrWebSearchUpstream, err)
+	}
+	if len(body) > maxWebSearchResponseBytes {
+		return fmt.Errorf("%w: response exceeded 2 MiB", ErrWebSearchUpstream)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		message := boundedWebSearchText(s.scrubWebSearchText(string(body), settings), 1000)
+		return fmt.Errorf("%w: Tavily returned %s: %s", ErrWebSearchUpstream, response.Status, message)
+	}
+	if err := json.Unmarshal(body, output); err != nil {
+		return fmt.Errorf("%w: decode response: %v", ErrWebSearchUpstream, err)
+	}
+	return nil
 }
 
 func containsWebSearchSecret(value string, settings resolvedWebSearchSettings) bool {
@@ -281,7 +408,8 @@ func normalizeTavilyBaseURL(value string) (string, error) {
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", fmt.Errorf("invalid Tavily base_url")
 	}
-	parsed.Path = strings.TrimSuffix(strings.TrimRight(parsed.Path, "/"), "/search")
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.Path = strings.TrimSuffix(strings.TrimSuffix(parsed.Path, "/search"), "/extract")
 	parsed.RawPath = ""
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
@@ -289,7 +417,7 @@ func normalizeTavilyBaseURL(value string) (string, error) {
 func normalizeWebSearchProxyURL(value string) (string, error) {
 	normalized, err := proxyx.NormalizeURL(value)
 	if err != nil {
-		return "", fmt.Errorf("invalid web search proxy URL: %w", err)
+		return "", fmt.Errorf("invalid Tavily Web proxy URL: %w", err)
 	}
 	return normalized, nil
 }
@@ -330,6 +458,61 @@ func normalizeWebSearchRequest(input domain.WebSearchRequest, configuredMax int)
 	return input, nil
 }
 
+func normalizeWebExtractRequest(input domain.WebExtractRequest) (domain.WebExtractRequest, error) {
+	if len(input.URLs) == 0 || len(input.URLs) > maxWebExtractURLs {
+		return domain.WebExtractRequest{}, fmt.Errorf("urls must contain between 1 and %d public URLs", maxWebExtractURLs)
+	}
+	result := domain.WebExtractRequest{URLs: make([]string, 0, len(input.URLs))}
+	seen := make(map[string]struct{}, len(input.URLs))
+	for _, value := range input.URLs {
+		normalized, err := normalizePublicWebURL(value)
+		if err != nil {
+			return domain.WebExtractRequest{}, err
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		result.URLs = append(result.URLs, normalized)
+	}
+	return result, nil
+}
+
+func normalizePublicWebURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 2048 {
+		return "", fmt.Errorf("URL is required and must not exceed 2048 bytes")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+		return "", fmt.Errorf("invalid public HTTP/HTTPS URL %q", value)
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		return "", fmt.Errorf("URL host %q is not public", parsed.Hostname())
+	}
+	if address := net.ParseIP(host); address != nil {
+		if !address.IsGlobalUnicast() || address.IsPrivate() {
+			return "", fmt.Errorf("URL host %q is not public", parsed.Hostname())
+		}
+	} else {
+		if !strings.Contains(host, ".") || isNumericWebHost(host) {
+			return "", fmt.Errorf("URL host %q is not a public domain", parsed.Hostname())
+		}
+	}
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func isNumericWebHost(host string) bool {
+	for _, character := range host {
+		if character != '.' && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 func normalizeWebSearchDomains(values []string) ([]string, error) {
 	if len(values) > 10 {
 		return nil, fmt.Errorf("at most 10 domains are allowed")
@@ -359,10 +542,15 @@ func boundedWebSearchText(value string, limit int) string {
 	if len(value) <= limit {
 		return value
 	}
-	for limit > 0 && !utf8RuneStart(value[limit]) {
-		limit--
+	const marker = "\n[CONTENT TRUNCATED]"
+	if limit <= len(marker) {
+		return marker[:limit]
 	}
-	return value[:limit] + "\n[CONTENT TRUNCATED]"
+	prefixLimit := limit - len(marker)
+	for prefixLimit > 0 && !utf8RuneStart(value[prefixLimit]) {
+		prefixLimit--
+	}
+	return value[:prefixLimit] + marker
 }
 
 func utf8RuneStart(value byte) bool {

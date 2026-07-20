@@ -29,34 +29,23 @@ func New(svc *service.Service, version string) *Server {
 			hosts, err := svc.ListHostCapabilities(ctx)
 			return nil, agent.HostListOutput{Hosts: hosts}, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_exec", Description: "Execute one remote program with separate arguments through deterministic policy, approval, and audit controls."},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_exec", Description: "Execute one remote program with separate arguments through deterministic policy, approval, and audit controls. Set background=true for cancellable background execution; it defaults to false."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ExecInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.Submit(ctx, execRequest(input), "mcp-client")
-			output, err = agent.NormalizeExecToolResult(output, err)
+			output, err := agent.RunExecutionTool(ctx, svc, execRequest(input), input.Background, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_run_script", Description: "Analyze and run a Bash script. State changes return approval_required without executing."},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_run_script", Description: "Analyze and run a Bash script. Set background=true for cancellable background execution; it defaults to false. State changes require human approval."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ScriptInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.Submit(ctx, scriptRequest(input), "mcp-client")
-			output, err = agent.NormalizeExecToolResult(output, err)
+			output, err := agent.RunExecutionTool(ctx, svc, scriptRequest(input), input.Background, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_start", Description: "Start a cancellable long-running SSH command and return its current execution result. Poll task status or tail while it is running."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.ExecInput) (*mcp.CallToolResult, agent.TaskOutput, error) {
-			task, err := svc.StartTask(ctx, execRequest(input), "mcp-client")
-			output, err := agent.TaskStartToolOutput(svc, task, err)
-			return nil, output, err
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_status", Description: "Read task status and bounded redacted output."},
-		func(_ context.Context, _ *mcp.CallToolRequest, input agent.TaskInput) (*mcp.CallToolResult, agent.TaskOutput, error) {
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_get", Description: "Read a background SSH task's status and bounded redacted stdout and stderr."},
+		func(_ context.Context, _ *mcp.CallToolRequest, input agent.TaskInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			task, result, taskErr, err := svc.GetTask(input.TaskID)
-			output, err := agent.TaskToolOutput(task, result, taskErr, err)
-			return nil, output, err
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_tail", Description: "Read the latest bounded redacted output accumulated by a running SSH task."},
-		func(_ context.Context, _ *mcp.CallToolRequest, input agent.TaskInput) (*mcp.CallToolResult, agent.TaskOutput, error) {
-			task, result, taskErr, err := svc.GetTask(input.TaskID)
-			output, err := agent.TaskToolOutput(task, result, taskErr, err)
+			if task.ID == "" {
+				task.ID = input.TaskID
+			}
+			output, err := agent.TaskToolResult(task, result, taskErr, err)
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_cancel", Description: "Cancel a running SSH task."},
@@ -66,19 +55,6 @@ func New(svc *service.Service, version string) *Server {
 				return nil, map[string]any{"tool_version": "1.1", "ok": false, "code": "not_running", "message": err.Error(), "task_id": input.TaskID, "cancelled": false}, nil
 			}
 			return nil, map[string]any{"tool_version": "1.1", "ok": true, "code": "cancelled", "task_id": input.TaskID, "cancelled": true}, nil
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_task_list", Description: "List persisted recent SSH tasks."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, agent.TaskListOutput, error) {
-			tasks, err := svc.ListTasks(ctx, 50)
-			output := agent.TaskListOutput{Tasks: tasks}
-			output.ToolVersion = "1.1"
-			output.OK = err == nil
-			if err != nil {
-				output.Code, output.Message = "unavailable", err.Error()
-				return nil, output, nil
-			}
-			output.Code = "completed"
-			return nil, output, nil
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read a bounded remote file. Credential paths are denied."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileReadInput) (*mcp.CallToolResult, domain.ExecResult, error) {

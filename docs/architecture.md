@@ -58,7 +58,7 @@ Workspace 在 `workspace_dir` 下按 ID 托管，SQLite 只保存 ID、权限和
 
 `workspace_shell` 是唯一开放给模型的本地 Shell。管理员在 SQLite 持久化的 System 设置中明确选择 `sandbox`、`host` 或 `disabled`，默认 `sandbox`。提交时解析出的实际后端写入 `ExecRequest.workspace_shell_backend`，和完整脚本、Workspace ID、相对 cwd、环境与超时一起进入加密审批摘要；执行前再次读取设置，后端不一致即拒绝，从而避免审批后切换权限边界。它复用确定性 Policy、Run、Approval 与 Audit，每个请求最低风险固定为 Change，危险脚本仍升级为 Critical。
 
-`web_search` 是唯一内置网络搜索 Tool，目前提供方为 Tavily。管理员设置独立保存于 `web_search_settings`，API Key 和代理密码用主密钥加密，HTTP API 与 Tool schema 均不暴露密文。请求禁用环境代理，只使用设置中明确选择的 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理；查询和域名过滤条件会离开本机。响应限制为 2 MiB，每项内容再做长度限制和当前凭据精确脱敏，并标记为不可信外部内容。审计保存查询 SHA256，不保存查询正文、凭据或结果正文。
+`web_search` 和 `web_extract` 共用管理员保存在 `web_search_settings` 中的 Tavily 配置，但可由 func 管理分别启停。API Key 和代理密码用主密钥加密，HTTP API 与 Tool schema 均不暴露密文。请求禁用环境代理，只使用设置中明确选择的 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理；查询、域名过滤条件和待提取 URL 会离开本机。`web_extract` 一次接受最多五个公开 HTTP/HTTPS URL，拒绝凭据、localhost、私网和链路本地地址，固定使用 basic Markdown 提取。提供方响应限制为 2 MiB；正文上限可配置为单页 8-128 KiB、单次总计 32-512 KiB，默认分别为 32 KiB 和 128 KiB，且总上限不能小于单页上限。全部外部内容都会执行当前凭据精确脱敏并标记为不可信。审计只保存查询或规范化 URL 列表的 SHA256，不保存正文、凭据或完整 URL。
 
 Sandbox 后端仅在 Linux 使用配置的 Bubblewrap；不存在或 namespace 创建失败时关闭失败，绝不回退到 Host Shell。沙箱新建 user/mount/PID/network namespace、丢弃 capabilities、禁用嵌套 user namespace 和网络，只读挂载 `/usr` 与动态链接库目录，创建独立 `/proc`、`/dev`、`/tmp`，并按 Workspace access 只读或读写挂载到 `/workspace`。预存的 `.env*`、`.ssh`、`.opspilot-*`、`.data`、`master.key` 与 credential 命名路径，以及 socket、FIFO 和 device 等特殊文件，在 mount namespace 内被遮蔽。
 

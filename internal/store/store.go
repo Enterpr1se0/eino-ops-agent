@@ -159,32 +159,6 @@ func (s *Store) GetTask(ctx context.Context, id string) (domain.Task, domain.Exe
 	return task, result, taskError, nil
 }
 
-func (s *Store) ListTasks(ctx context.Context, limit int) ([]domain.Task, error) {
-	if limit <= 0 || limit > 100 {
-		limit = 50
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,run_id,host_id,status,started_at,ended_at FROM tasks ORDER BY started_at DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := make([]domain.Task, 0)
-	for rows.Next() {
-		var task domain.Task
-		var started string
-		var ended sql.NullString
-		if err := rows.Scan(&task.ID, &task.RunID, &task.HostID, &task.Status, &started, &ended); err != nil {
-			return nil, err
-		}
-		task.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
-		if ended.Valid {
-			task.EndedAt, _ = time.Parse(time.RFC3339Nano, ended.String)
-		}
-		result = append(result, task)
-	}
-	return result, rows.Err()
-}
-
 func (s *Store) InterruptActiveTasks(ctx context.Context) error {
 	now := formatTime(time.Now().UTC())
 	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET status='interrupted',error=CASE WHEN error='' THEN 'control plane restarted before the task completed' ELSE error END,ended_at=? WHERE status IN ('running','waiting_for_approval','approval_required')`, now)
@@ -519,6 +493,8 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
   proxy_password_cipher TEXT NOT NULL DEFAULT '',
   timeout_seconds INTEGER NOT NULL DEFAULT 20,
   max_results INTEGER NOT NULL DEFAULT 10,
+  extract_max_content_kib INTEGER NOT NULL DEFAULT 32,
+  extract_max_total_kib INTEGER NOT NULL DEFAULT 128,
   updated_at TEXT NOT NULL
 );
 `
@@ -528,7 +504,7 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 	if err := s.migrateManagedWorkspaces(ctx); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name='ssh_approval_status'`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name IN ('ssh_approval_status','ssh_task_start','ssh_task_status','ssh_task_tail','ssh_task_list')`); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(id,agent_max_iterations,updated_at) VALUES(1,?,?)`,
@@ -552,6 +528,8 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		`ALTER TABLE model_providers ADD COLUMN proxy_url TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN proxy_password_cipher TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE web_search_settings ADD COLUMN extract_max_content_kib INTEGER NOT NULL DEFAULT 32`,
+		`ALTER TABLE web_search_settings ADD COLUMN extract_max_total_kib INTEGER NOT NULL DEFAULT 128`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
@@ -953,15 +931,16 @@ func (s *Store) GetWebSearchSettings(ctx context.Context) (domain.WebSearchSetti
 	var settings domain.WebSearchSettings
 	var enabled int
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,updated_at
+	err := s.db.QueryRowContext(ctx, `SELECT enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,extract_max_content_kib,extract_max_total_kib,updated_at
 FROM web_search_settings WHERE id=1`).Scan(
 		&enabled, &settings.Provider, &settings.BaseURL, &settings.APIKeyCipher, &settings.ProxyURL, &settings.ProxyUsername,
-		&settings.ProxyPasswordCipher, &settings.TimeoutSeconds, &settings.MaxResults, &updated,
+		&settings.ProxyPasswordCipher, &settings.TimeoutSeconds, &settings.MaxResults, &settings.ExtractMaxContentKiB, &settings.ExtractMaxTotalKiB, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.WebSearchSettings{
 			Provider: "tavily", BaseURL: domain.DefaultWebSearchBaseURL,
 			TimeoutSeconds: domain.DefaultWebSearchTimeoutSeconds, MaxResults: domain.DefaultWebSearchMaxResults,
+			ExtractMaxContentKiB: domain.DefaultWebExtractMaxContentKiB, ExtractMaxTotalKiB: domain.DefaultWebExtractMaxTotalKiB,
 		}, nil
 	}
 	if err != nil {
@@ -974,13 +953,14 @@ FROM web_search_settings WHERE id=1`).Scan(
 
 func (s *Store) SaveWebSearchSettings(ctx context.Context, settings domain.WebSearchSettings) (domain.WebSearchSettings, error) {
 	settings.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO web_search_settings(id,enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,updated_at)
-VALUES(1,?,?,?,?,?,?,?,?,?,?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO web_search_settings(id,enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,extract_max_content_kib,extract_max_total_kib,updated_at)
+VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,provider=excluded.provider,base_url=excluded.base_url,
 api_key_cipher=excluded.api_key_cipher,proxy_url=excluded.proxy_url,proxy_username=excluded.proxy_username,
-proxy_password_cipher=excluded.proxy_password_cipher,timeout_seconds=excluded.timeout_seconds,max_results=excluded.max_results,updated_at=excluded.updated_at`,
+proxy_password_cipher=excluded.proxy_password_cipher,timeout_seconds=excluded.timeout_seconds,max_results=excluded.max_results,
+extract_max_content_kib=excluded.extract_max_content_kib,extract_max_total_kib=excluded.extract_max_total_kib,updated_at=excluded.updated_at`,
 		boolInt(settings.Enabled), settings.Provider, settings.BaseURL, settings.APIKeyCipher, settings.ProxyURL, settings.ProxyUsername,
-		settings.ProxyPasswordCipher, settings.TimeoutSeconds, settings.MaxResults, formatTime(settings.UpdatedAt))
+		settings.ProxyPasswordCipher, settings.TimeoutSeconds, settings.MaxResults, settings.ExtractMaxContentKiB, settings.ExtractMaxTotalKiB, formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.WebSearchSettings{}, err
 	}

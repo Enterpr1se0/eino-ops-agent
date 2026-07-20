@@ -188,34 +188,44 @@ const (
 	DefaultWebSearchMaxResults     = 10
 	MinWebSearchMaxResults         = 1
 	MaxWebSearchMaxResults         = 20
+	DefaultWebExtractMaxContentKiB = 32
+	MinWebExtractMaxContentKiB     = 8
+	MaxWebExtractMaxContentKiB     = 128
+	DefaultWebExtractMaxTotalKiB   = 128
+	MinWebExtractMaxTotalKiB       = 32
+	MaxWebExtractMaxTotalKiB       = 512
 )
 
 type WebSearchSettings struct {
-	Enabled             bool      `json:"enabled"`
-	Provider            string    `json:"provider"`
-	BaseURL             string    `json:"base_url"`
-	APIKeyCipher        string    `json:"-"`
-	HasAPIKey           bool      `json:"has_api_key"`
-	ProxyURL            string    `json:"proxy_url,omitempty"`
-	ProxyUsername       string    `json:"proxy_username,omitempty"`
-	ProxyPasswordCipher string    `json:"-"`
-	HasProxyPassword    bool      `json:"has_proxy_password"`
-	TimeoutSeconds      int       `json:"timeout_seconds"`
-	MaxResults          int       `json:"max_results"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	Enabled              bool      `json:"enabled"`
+	Provider             string    `json:"provider"`
+	BaseURL              string    `json:"base_url"`
+	APIKeyCipher         string    `json:"-"`
+	HasAPIKey            bool      `json:"has_api_key"`
+	ProxyURL             string    `json:"proxy_url,omitempty"`
+	ProxyUsername        string    `json:"proxy_username,omitempty"`
+	ProxyPasswordCipher  string    `json:"-"`
+	HasProxyPassword     bool      `json:"has_proxy_password"`
+	TimeoutSeconds       int       `json:"timeout_seconds"`
+	MaxResults           int       `json:"max_results"`
+	ExtractMaxContentKiB int       `json:"extract_max_content_kib"`
+	ExtractMaxTotalKiB   int       `json:"extract_max_total_kib"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type WebSearchSettingsInput struct {
-	Enabled            bool   `json:"enabled"`
-	BaseURL            string `json:"base_url"`
-	APIKey             string `json:"api_key,omitempty"`
-	ClearAPIKey        bool   `json:"clear_api_key,omitempty"`
-	ProxyURL           string `json:"proxy_url,omitempty"`
-	ProxyUsername      string `json:"proxy_username,omitempty"`
-	ProxyPassword      string `json:"proxy_password,omitempty"`
-	ClearProxyPassword bool   `json:"clear_proxy_password,omitempty"`
-	TimeoutSeconds     int    `json:"timeout_seconds"`
-	MaxResults         int    `json:"max_results"`
+	Enabled              bool   `json:"enabled"`
+	BaseURL              string `json:"base_url"`
+	APIKey               string `json:"api_key,omitempty"`
+	ClearAPIKey          bool   `json:"clear_api_key,omitempty"`
+	ProxyURL             string `json:"proxy_url,omitempty"`
+	ProxyUsername        string `json:"proxy_username,omitempty"`
+	ProxyPassword        string `json:"proxy_password,omitempty"`
+	ClearProxyPassword   bool   `json:"clear_proxy_password,omitempty"`
+	TimeoutSeconds       int    `json:"timeout_seconds"`
+	MaxResults           int    `json:"max_results"`
+	ExtractMaxContentKiB int    `json:"extract_max_content_kib"`
+	ExtractMaxTotalKiB   int    `json:"extract_max_total_kib"`
 }
 
 type WebSearchRequest struct {
@@ -241,6 +251,29 @@ type WebSearchResponse struct {
 	Results            []WebSearchResult `json:"results"`
 	ResponseTime       float64           `json:"response_time,omitempty"`
 	ContentIsUntrusted bool              `json:"content_is_untrusted"`
+}
+
+type WebExtractRequest struct {
+	URLs []string `json:"urls"`
+}
+
+type WebExtractResult struct {
+	URL        string `json:"url"`
+	RawContent string `json:"raw_content"`
+}
+
+type WebExtractFailedResult struct {
+	URL   string `json:"url"`
+	Error string `json:"error"`
+}
+
+type WebExtractResponse struct {
+	ToolMeta
+	Provider           string                   `json:"provider"`
+	Results            []WebExtractResult       `json:"results"`
+	FailedResults      []WebExtractFailedResult `json:"failed_results,omitempty"`
+	ResponseTime       float64                  `json:"response_time,omitempty"`
+	ContentIsUntrusted bool                     `json:"content_is_untrusted"`
 }
 
 type MCPTransport string
@@ -388,6 +421,7 @@ type ToolMeta struct {
 type ExecResult struct {
 	ToolMeta
 	RunID               string        `json:"run_id"`
+	TaskID              string        `json:"task_id,omitempty"`
 	Status              string        `json:"status"`
 	Risk                RiskLevel     `json:"risk"`
 	ApprovalID          string        `json:"approval_id,omitempty"`

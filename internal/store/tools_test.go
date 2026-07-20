@@ -47,7 +47,7 @@ func TestAgentToolStatePersists(t *testing.T) {
 	}
 }
 
-func TestMigrationRemovesRetiredApprovalStatusToolSetting(t *testing.T) {
+func TestMigrationRemovesRetiredToolSettings(t *testing.T) {
 	ctx := context.Background()
 	path := t.TempDir() + "/retired-tool-setting.db"
 	st, err := Open(ctx, path)
@@ -56,6 +56,11 @@ func TestMigrationRemovesRetiredApprovalStatusToolSetting(t *testing.T) {
 	}
 	if err := st.SetAgentToolEnabled(ctx, "ssh_approval_status", false); err != nil {
 		t.Fatal(err)
+	}
+	for _, name := range []string{"ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list"} {
+		if err := st.SetAgentToolEnabled(ctx, name, false); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := st.SetAgentToolEnabled(ctx, "ssh_exec", false); err != nil {
 		t.Fatal(err)
@@ -73,8 +78,10 @@ func TestMigrationRemovesRetiredApprovalStatusToolSetting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, exists := states["ssh_approval_status"]; exists {
-		t.Fatalf("retired tool setting was not removed: %#v", states)
+	for _, name := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list"} {
+		if _, exists := states[name]; exists {
+			t.Fatalf("retired tool setting %s was not removed: %#v", name, states)
+		}
 	}
 	if enabled, exists := states["ssh_exec"]; !exists || enabled {
 		t.Fatalf("migration changed an unrelated tool setting: %#v", states)

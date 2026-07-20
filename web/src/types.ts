@@ -281,6 +281,8 @@ export interface WebSearchSettings {
   has_proxy_password: boolean
   timeout_seconds: number
   max_results: number
+  extract_max_content_kib: number
+  extract_max_total_kib: number
   updated_at?: string
 }
 
@@ -295,6 +297,8 @@ export interface WebSearchSettingsInput {
   clear_proxy_password?: boolean
   timeout_seconds: number
   max_results: number
+  extract_max_content_kib: number
+  extract_max_total_kib: number
 }
 
 export interface WebSearchResponse {

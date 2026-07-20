@@ -100,8 +100,8 @@ const zh = {
     mismatch: '两次输入的新密码不一致。', minimum: '至少 12 个字符', change: '修改密码', changing: '修改中...',
   },
   webSearch: {
-    title: 'Web Search', baseURL: 'API 地址', apiKey: 'API Key', proxyURL: '代理地址', proxyUsername: '代理用户名', proxyPassword: '代理密码',
-    timeout: '超时时间（秒）', maxResults: '默认 / 上限结果数', savedSecret: '已保存，留空不变', saved: 'Web Search 设置已保存。', testPassed: '连接正常，返回 {{count}} 条结果。', clearKey: '清除 Key', clearProxyPassword: '清除代理密码',
+    title: 'Tavily Web', modes: '搜索与提取', baseURL: 'API 地址', apiKey: 'API Key', proxyURL: '代理地址', proxyUsername: '代理用户名', proxyPassword: '代理密码',
+    timeout: '超时时间（秒）', maxResults: '搜索结果上限', extractMaxContent: '单页提取上限（KiB）', extractMaxTotal: '单次提取总上限（KiB）', savedSecret: '已保存，留空不变', saved: 'Tavily Web 设置已保存。', testPassed: '连接正常，返回 {{count}} 条结果。', clearKey: '清除 Key', clearProxyPassword: '清除代理密码',
   },
   chat: {
     session: 'OpsPilot 会话', newSession: '新会话', conversations: '会话记录', openConversations: '打开会话记录', closeConversations: '关闭会话记录',
@@ -215,10 +215,10 @@ const zh = {
   toolNames: {
     ssh_exec: '执行远程命令', ssh_run_script: '执行 Bash 脚本', ssh_file_read: '读取远程文件', ssh_file_search: '搜索远程文件', ssh_file_list: '列出远程目录', ssh_file_stat: '读取文件信息',
     ssh_file_write: '事务写入远程文件', ssh_file_apply_patch: '事务应用远程补丁', ssh_config_apply: '应用远程配置事务', ssh_config_restore: '恢复远程配置备份',
-    ssh_task_start: '启动远程任务', ssh_task_status: '查看任务状态', ssh_task_tail: '查看任务输出', ssh_task_list: '列出持久任务', ssh_host_list: '列出主机', ssh_host_inspect: '检查主机',
+    ssh_task_get: '查看后台任务', ssh_task_cancel: '取消后台任务', ssh_host_list: '列出主机', ssh_host_inspect: '检查主机',
     workspace_list: '列出 Workspace', workspace_file_list: '列出 Workspace 目录', workspace_file_read: '读取 Workspace 文件', workspace_file_search: '搜索 Workspace 文件', workspace_file_apply_patch: '应用 Workspace 补丁',
     workspace_file_upload: '上传 Workspace 文件', workspace_shell: '在 Workspace 运行 Shell', ssh_history_search: '搜索执行历史', ssh_history_get: '读取执行历史', ops_skill_list: '列出 Skills', ops_skill_get: '加载 Skill',
-    ops_plan_create: '创建任务计划', ops_plan_get: '读取任务计划', ops_plan_step_update: '推进任务步骤', web_search: '搜索网络',
+    ops_plan_create: '创建任务计划', ops_plan_get: '读取任务计划', ops_plan_step_update: '推进任务步骤', web_search: '搜索网络', web_extract: '提取网页',
   },
 }
 

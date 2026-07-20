@@ -1516,10 +1516,6 @@ func (s *Service) GetTask(id string) (domain.Task, domain.ExecResult, string, er
 	return s.store.GetTask(context.Background(), id)
 }
 
-func (s *Service) ListTasks(ctx context.Context, limit int) ([]domain.Task, error) {
-	return s.store.ListTasks(ctx, limit)
-}
-
 func (s *Service) CancelTask(id, actor string) error {
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()

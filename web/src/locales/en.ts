@@ -100,8 +100,8 @@ const en = {
     mismatch: 'New password confirmation does not match.', minimum: 'At least 12 characters', change: 'Change password', changing: 'Changing...',
   },
   webSearch: {
-    title: 'Web Search', baseURL: 'API URL', apiKey: 'API Key', proxyURL: 'Proxy URL', proxyUsername: 'Proxy username', proxyPassword: 'Proxy password',
-    timeout: 'Timeout (seconds)', maxResults: 'Default / max results', savedSecret: 'Saved; leave blank to keep', saved: 'Web Search settings saved.', testPassed: 'Connection passed with {{count}} result.', clearKey: 'Clear Key', clearProxyPassword: 'Clear proxy password',
+    title: 'Tavily Web', modes: 'Search and extract', baseURL: 'API URL', apiKey: 'API Key', proxyURL: 'Proxy URL', proxyUsername: 'Proxy username', proxyPassword: 'Proxy password',
+    timeout: 'Timeout (seconds)', maxResults: 'Search result limit', extractMaxContent: 'Per-page extract limit (KiB)', extractMaxTotal: 'Total extract limit (KiB)', savedSecret: 'Saved; leave blank to keep', saved: 'Tavily Web settings saved.', testPassed: 'Connection passed with {{count}} result.', clearKey: 'Clear Key', clearProxyPassword: 'Clear proxy password',
   },
   chat: {
     session: 'OpsPilot session', newSession: 'NEW SESSION', conversations: 'Conversations', openConversations: 'Open conversations', closeConversations: 'Close conversations',
@@ -215,10 +215,10 @@ const en = {
   toolNames: {
     ssh_exec: 'Run remote command', ssh_run_script: 'Run Bash script', ssh_file_read: 'Read remote file', ssh_file_search: 'Search remote file', ssh_file_list: 'List remote directory', ssh_file_stat: 'Read file metadata',
     ssh_file_write: 'Write remote file transactionally', ssh_file_apply_patch: 'Apply remote patch transactionally', ssh_config_apply: 'Apply remote configuration transaction', ssh_config_restore: 'Restore remote configuration backup',
-    ssh_task_start: 'Start remote task', ssh_task_status: 'Get task status', ssh_task_tail: 'Read task output', ssh_task_list: 'List persisted tasks', ssh_host_list: 'List hosts', ssh_host_inspect: 'Inspect host',
+    ssh_task_get: 'Read background task', ssh_task_cancel: 'Cancel background task', ssh_host_list: 'List hosts', ssh_host_inspect: 'Inspect host',
     workspace_list: 'List Workspaces', workspace_file_list: 'List Workspace directory', workspace_file_read: 'Read Workspace file', workspace_file_search: 'Search Workspace file', workspace_file_apply_patch: 'Apply Workspace patch',
     workspace_file_upload: 'Upload Workspace file', workspace_shell: 'Run Workspace Shell', ssh_history_search: 'Search execution history', ssh_history_get: 'Read execution history', ops_skill_list: 'List Skills', ops_skill_get: 'Load Skill',
-    ops_plan_create: 'Create task plan', ops_plan_get: 'Read task plan', ops_plan_step_update: 'Advance task step', web_search: 'Search the Web',
+    ops_plan_create: 'Create task plan', ops_plan_get: 'Read task plan', ops_plan_step_update: 'Advance task step', web_search: 'Search the Web', web_extract: 'Extract Web pages',
   },
 }
 
