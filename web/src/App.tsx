@@ -86,7 +86,14 @@ function App() {
 		catch(err){const message=errorText(err);if(/authentication required/i.test(message))setAuth('guest');setError(message)}
 	},[])
 
-	useEffect(()=>{api.authSession().then(()=>setAuth('authenticated')).catch(()=>setAuth('guest'))},[])
+	useEffect(()=>{
+		const bootstrapPassword=desktopBootstrapPassword()
+		const request=bootstrapPassword?api.login(bootstrapPassword):api.authSession()
+		request.then(()=>{
+			if(bootstrapPassword)window.history.replaceState(null,'',window.location.pathname+window.location.search)
+			setAuth('authenticated')
+		}).catch(()=>setAuth('guest'))
+	},[])
 	useEffect(() => { if(auth==='authenticated')void refresh() }, [auth,refresh])
 	useEffect(() => {
 		if(auth!=='authenticated'||agentStreaming)return
@@ -130,6 +137,11 @@ function App() {
       </section>
     </main>
   </div>
+}
+
+function desktopBootstrapPassword(){
+	if(!window.location.hash.startsWith('#desktop-bootstrap='))return ''
+	return new URLSearchParams(window.location.hash.slice(1)).get('desktop-bootstrap')||''
 }
 
 function LanguageSwitch(){

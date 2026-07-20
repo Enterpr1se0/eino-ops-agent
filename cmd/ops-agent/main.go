@@ -45,6 +45,7 @@ type application struct {
 
 type serveOptions struct {
 	QuickStart        bool
+	Desktop           bool
 	ConfigPath        string
 	ConfigCreated     bool
 	GeneratedPassword string
@@ -113,7 +114,8 @@ func run(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "serve":
 		return serve(ctx, app, serveOptions{
-			QuickStart: quickStart, ConfigPath: configPath, ConfigCreated: configCreated, GeneratedPassword: generatedPassword,
+			QuickStart: quickStart, Desktop: quickStart && envBool("OPS_AGENT_DESKTOP"), ConfigPath: configPath,
+			ConfigCreated: configCreated, GeneratedPassword: generatedPassword,
 		})
 	case "mcp":
 		return mcpserver.New(app.service, version).Run(ctx)
@@ -175,6 +177,9 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 }
 
 func prepareQuickStart() (string, bool, error) {
+	if appDir := strings.TrimSpace(os.Getenv("OPS_AGENT_HOME")); appDir != "" {
+		return prepareQuickStartIn(appDir)
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return "", false, fmt.Errorf("locate executable: %w", err)
@@ -233,8 +238,10 @@ func serve(ctx context.Context, app *application, options serveOptions) error {
 	if options.QuickStart {
 		url := localWebURL(listener.Addr())
 		printQuickStart(options, url)
-		if err := openQuickStartBrowser(url); err != nil {
-			slog.Debug("could not open browser", "component", "server", "error", err)
+		if !options.Desktop {
+			if err := openQuickStartBrowser(url); err != nil {
+				slog.Debug("could not open browser", "component", "server", "error", err)
+			}
 		}
 	}
 	err = server.Serve(listener)
@@ -257,6 +264,10 @@ func localWebURL(address net.Addr) string {
 }
 
 func printQuickStart(options serveOptions, url string) {
+	if options.Desktop {
+		fmt.Println(desktopReadyLine(options, url))
+		return
+	}
 	fmt.Println()
 	if options.ConfigCreated {
 		fmt.Println("Created configuration:", options.ConfigPath)
@@ -270,6 +281,24 @@ func printQuickStart(options serveOptions, url string) {
 	fmt.Println("Open:", url)
 	fmt.Println("Press Ctrl+C to stop OpsPilot.")
 	fmt.Println()
+}
+
+func desktopReadyLine(options serveOptions, url string) string {
+	payload, _ := json.Marshal(struct {
+		URL               string `json:"url"`
+		InitialPassword   string `json:"initial_password,omitempty"`
+		ConfigPath        string `json:"config_path"`
+		ConfigurationMade bool   `json:"configuration_created"`
+	}{
+		URL: url, InitialPassword: options.GeneratedPassword, ConfigPath: options.ConfigPath,
+		ConfigurationMade: options.ConfigCreated,
+	})
+	return "OPSPILOT_DESKTOP_READY=" + string(payload)
+}
+
+func envBool(name string) bool {
+	value, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(name)))
+	return err == nil && value
 }
 
 func openQuickStartBrowser(url string) error {

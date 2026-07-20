@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"eino-ops-agent/internal/config"
@@ -41,9 +43,60 @@ func TestPrepareQuickStartUsesApplicationDirectoryAndKeepsConfig(t *testing.T) {
 	}
 }
 
+func TestPrepareQuickStartUsesConfiguredHome(t *testing.T) {
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+	appDir := t.TempDir()
+	t.Setenv("OPS_AGENT_HOME", appDir)
+
+	path, created, err := prepareQuickStart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || path != filepath.Join(appDir, config.DefaultFileName) {
+		t.Fatalf("path=%q created=%v", path, created)
+	}
+}
+
 func TestLocalWebURLUsesLoopbackForWildcardListener(t *testing.T) {
 	address := &net.TCPAddr{IP: net.IPv6zero, Port: 49152}
 	if got := localWebURL(address); got != "http://127.0.0.1:49152" {
 		t.Fatalf("local URL = %q", got)
+	}
+}
+
+func TestDesktopReadyLineIsMachineReadable(t *testing.T) {
+	line := desktopReadyLine(serveOptions{
+		Desktop: true, ConfigPath: `/tmp/opspilot/config.yaml`, ConfigCreated: true, GeneratedPassword: "secret",
+	}, "http://127.0.0.1:49152")
+	const prefix = "OPSPILOT_DESKTOP_READY="
+	if !strings.HasPrefix(line, prefix) {
+		t.Fatalf("desktop line = %q", line)
+	}
+	var payload struct {
+		URL               string `json:"url"`
+		InitialPassword   string `json:"initial_password"`
+		ConfigPath        string `json:"config_path"`
+		ConfigurationMade bool   `json:"configuration_created"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, prefix)), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.URL != "http://127.0.0.1:49152" || payload.InitialPassword != "secret" || !payload.ConfigurationMade {
+		t.Fatalf("desktop payload = %#v", payload)
+	}
+}
+
+func TestEnvBool(t *testing.T) {
+	t.Setenv("OPS_AGENT_DESKTOP", "true")
+	if !envBool("OPS_AGENT_DESKTOP") {
+		t.Fatal("expected true")
+	}
+	t.Setenv("OPS_AGENT_DESKTOP", "invalid")
+	if envBool("OPS_AGENT_DESKTOP") {
+		t.Fatal("invalid boolean must be false")
 	}
 }

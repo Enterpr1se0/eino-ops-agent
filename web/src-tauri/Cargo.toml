@@ -1,0 +1,20 @@
+[package]
+name = "opspilot-desktop"
+version = "0.1.0"
+description = "OpsPilot desktop application"
+authors = ["OpsPilot contributors"]
+edition = "2024"
+
+[lib]
+name = "opspilot_desktop_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
