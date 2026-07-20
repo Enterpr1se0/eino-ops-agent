@@ -387,6 +387,9 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	if settings.AgentMaxIterations != domain.DefaultAgentMaxIterations || !settings.ApprovalExplanationsEnabled || settings.SubagentModelProviderID != "" || settings.SubagentTimeoutSeconds != domain.DefaultSubagentTimeoutSeconds || settings.WorkspaceShellMode != domain.WorkspaceShellModeSandbox {
 		t.Fatalf("unexpected default max iterations: %#v", settings)
 	}
+	if strings.Join(settings.ChatImageAllowedTypes, ",") != strings.Join(domain.DefaultChatImageAllowedTypes, ",") {
+		t.Fatalf("unexpected default chat image formats: %#v", settings.ChatImageAllowedTypes)
+	}
 	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 4}, "test"); err == nil {
 		t.Fatal("expected lower-bound validation error")
 	}
@@ -410,21 +413,22 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	explanationsEnabled := false
 	timeoutSeconds := 45
 	hostShell := domain.WorkspaceShellModeHost
+	imageTypes := []string{"image/png", "image/webp"}
 	saved, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
 		AgentMaxIterations: 30, ApprovalExplanationsEnabled: &explanationsEnabled,
-		SubagentModelProviderID: &provider.ID, SubagentTimeoutSeconds: &timeoutSeconds, WorkspaceShellMode: &hostShell,
+		SubagentModelProviderID: &provider.ID, SubagentTimeoutSeconds: &timeoutSeconds, ChatImageAllowedTypes: imageTypes, WorkspaceShellMode: &hostShell,
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.AgentMaxIterations != 30 || saved.ApprovalExplanationsEnabled || saved.SubagentModelProviderID != provider.ID || saved.SubagentTimeoutSeconds != timeoutSeconds || saved.WorkspaceShellMode != domain.WorkspaceShellModeHost || saved.UpdatedAt.IsZero() {
+	if saved.AgentMaxIterations != 30 || saved.ApprovalExplanationsEnabled || saved.SubagentModelProviderID != provider.ID || saved.SubagentTimeoutSeconds != timeoutSeconds || strings.Join(saved.ChatImageAllowedTypes, ",") != strings.Join(imageTypes, ",") || saved.WorkspaceShellMode != domain.WorkspaceShellModeHost || saved.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected saved settings: %#v", saved)
 	}
 	reloaded, err := svc.SystemSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.AgentMaxIterations != 30 || reloaded.ApprovalExplanationsEnabled || reloaded.SubagentModelProviderID != provider.ID || reloaded.SubagentTimeoutSeconds != timeoutSeconds || reloaded.WorkspaceShellMode != domain.WorkspaceShellModeHost {
+	if reloaded.AgentMaxIterations != 30 || reloaded.ApprovalExplanationsEnabled || reloaded.SubagentModelProviderID != provider.ID || reloaded.SubagentTimeoutSeconds != timeoutSeconds || strings.Join(reloaded.ChatImageAllowedTypes, ",") != strings.Join(imageTypes, ",") || reloaded.WorkspaceShellMode != domain.WorkspaceShellModeHost {
 		t.Fatalf("system settings were not persisted: %#v", reloaded)
 	}
 	if _, err := svc.DeleteModelProvider(ctx, provider.ID, "test"); !errors.Is(err, ErrModelProviderInUse) || !strings.Contains(err.Error(), "selected for the subagent") {
@@ -433,6 +437,12 @@ func TestSystemSettingsValidatePersistAndReturnDefault(t *testing.T) {
 	invalidMode := "automatic"
 	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 30, WorkspaceShellMode: &invalidMode}, "test"); err == nil {
 		t.Fatal("invalid workspace shell mode was accepted")
+	}
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 30, ChatImageAllowedTypes: []string{}}, "test"); err == nil {
+		t.Fatal("empty chat image format selection was accepted")
+	}
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{AgentMaxIterations: 30, ChatImageAllowedTypes: []string{"image/svg+xml"}}, "test"); err == nil {
+		t.Fatal("unsupported chat image format was accepted")
 	}
 }
 

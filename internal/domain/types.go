@@ -152,6 +152,8 @@ const (
 	MaxSubagentTimeoutSeconds     = 120
 )
 
+var DefaultChatImageAllowedTypes = []string{"image/png", "image/jpeg", "image/webp", "image/gif"}
+
 const (
 	WorkspaceShellModeSandbox  = "sandbox"
 	WorkspaceShellModeHost     = "host"
@@ -163,6 +165,7 @@ type SystemSettings struct {
 	ApprovalExplanationsEnabled bool      `json:"approval_explanations_enabled"`
 	SubagentModelProviderID     string    `json:"subagent_model_provider_id"`
 	SubagentTimeoutSeconds      int       `json:"subagent_timeout_seconds"`
+	ChatImageAllowedTypes       []string  `json:"chat_image_allowed_types"`
 	WorkspaceShellMode          string    `json:"workspace_shell_mode"`
 	WorkspaceShellPlatform      string    `json:"workspace_shell_platform,omitempty"`
 	WorkspaceShellBackend       string    `json:"workspace_shell_backend,omitempty"`
@@ -173,11 +176,12 @@ type SystemSettings struct {
 }
 
 type SystemSettingsInput struct {
-	AgentMaxIterations          int     `json:"agent_max_iterations"`
-	ApprovalExplanationsEnabled *bool   `json:"approval_explanations_enabled,omitempty"`
-	SubagentModelProviderID     *string `json:"subagent_model_provider_id,omitempty"`
-	SubagentTimeoutSeconds      *int    `json:"subagent_timeout_seconds,omitempty"`
-	WorkspaceShellMode          *string `json:"workspace_shell_mode,omitempty"`
+	AgentMaxIterations          int      `json:"agent_max_iterations"`
+	ApprovalExplanationsEnabled *bool    `json:"approval_explanations_enabled,omitempty"`
+	SubagentModelProviderID     *string  `json:"subagent_model_provider_id,omitempty"`
+	SubagentTimeoutSeconds      *int     `json:"subagent_timeout_seconds,omitempty"`
+	ChatImageAllowedTypes       []string `json:"chat_image_allowed_types,omitempty"`
+	WorkspaceShellMode          *string  `json:"workspace_shell_mode,omitempty"`
 }
 
 const (
@@ -346,11 +350,22 @@ type ChatSession struct {
 }
 
 type ChatMessage struct {
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`
-	ToolName  string    `json:"tool_name,omitempty"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          string           `json:"id"`
+	Role        string           `json:"role"`
+	Content     string           `json:"content"`
+	ToolName    string           `json:"tool_name,omitempty"`
+	Status      string           `json:"status"`
+	Attachments []ChatAttachment `json:"attachments,omitempty"`
+	CreatedAt   time.Time        `json:"created_at"`
+}
+
+type ChatAttachment struct {
+	ID        string `json:"id"`
+	MessageID string `json:"-"`
+	Name      string `json:"name"`
+	MIMEType  string `json:"mime_type"`
+	SizeBytes int64  `json:"size_bytes"`
+	Data      []byte `json:"-"`
 }
 
 type AgentPlan struct {

@@ -110,7 +110,7 @@ HTTP Middleware 为请求生成 `request_id` 并记录 method、path、status、
 
 ## Conversation persistence
 
-每个新对话由后端生成 session ID，用户消息、最终 Assistant 文本和带 `tool_name` 的脱敏工具结果写入 `chat_messages`，Eino checkpoint 使用同一 session ID。Web 恢复历史时重建工具结果卡片。下一轮模型输入按用户消息划分完整 turn；历史工具结果不会伪造成缺少 ToolCall ID 的协议级 Tool Message，而是作为明确标记、仍按不可信数据处理的 Assistant 历史证据。失败或中断 turn 只要已经执行过工具也会恢复，没有任何活动的失败 turn 则排除。查询最多读取最近 500 条模型相关记录，再按最近完整 turn、单条工具结果、单个 turn 和 256 KiB 总字节预算逐层裁剪；reasoning 不回放。每轮只记录消息数、工具证据数、字节数和截断状态，不记录上下文正文。会话索引按最后事件时间排序，标题取第一条用户消息；删除会话会在同一 SQLite 事务中删除消息和对应 checkpoint，执行证据仍保留在独立的 runs 与 audit_events 中。
+每个新对话由后端生成 session ID，用户消息、最终 Assistant 文本和带 `tool_name` 的脱敏工具结果写入 `chat_messages`，Eino checkpoint 使用同一 session ID。用户图片保存到 `chat_attachments`，普通历史 API 只返回元数据，鉴权附件接口返回原始内容，删除消息时通过外键级联删除。聊天上传使用 multipart，允许格式取自 `system_settings.chat_image_allowed_types_json`；不设置图片张数、大小或图片上下文预算。选入模型上下文的 turn 会把全部图片编码为 Eino `UserInputMultiContent`，再由 OpenAI-compatible adapter 生成 `image_url` data URL。Web 恢复历史时重建工具结果卡片和图片缩略图。下一轮模型输入按用户消息划分完整 turn；历史工具结果不会伪造成缺少 ToolCall ID 的协议级 Tool Message，而是作为明确标记、仍按不可信数据处理的 Assistant 历史证据。失败或中断 turn 只要已经执行过工具也会恢复，没有任何活动的失败 turn 则排除。查询最多读取最近 500 条模型相关记录，再按最近完整 turn、单条工具结果、单个 turn 和 256 KiB 文本总字节预算逐层裁剪；reasoning 不回放。每轮只记录消息数、图片数、图片字节数、工具证据数、文本字节数和截断状态，不记录上下文正文。会话索引按最后事件时间排序，标题取第一条用户消息，纯图片会话使用 `Image`；删除会话会在同一 SQLite 事务中删除消息、附件和对应 checkpoint，执行证据仍保留在独立的 runs 与 audit_events 中。
 
 Runner 在调用工具前通过 Go context 绑定当前 session ID，Service 创建 Run 时只从可信 context 读取该值，模型工具参数不能伪造会话归属。异步 Task 会把该值复制到脱离 HTTP 请求生命周期的后台 context。Audit 页面按 `runs.session_id` 分组；CLI、MCP、HTTP 直调和升级前的历史记录显示在 Direct / Legacy 分组。
 
@@ -130,4 +130,4 @@ SQLite 使用部分唯一索引保证最多只有一个 active provider。切换
 
 ## Runtime settings
 
-Web 配置中心把模型提供商、SSH 主机和系统设置收敛到同一入口。`system_settings` 单行表保存 Agent 最大模型迭代数、命令解释开关、独立 provider、请求超时和 Workspace Shell 模式；每次修改都会写入 `system_settings_updated` 审计事件。保存后 Runtime 构建新的 ChatModelAgent/Runner 并原子替换指针，因此新请求立即使用新的循环预算和解释模型路由，已经取得旧 Runner 的执行不会被中断。
+Web 配置中心把模型提供商、SSH 主机和系统设置收敛到同一入口。`system_settings` 单行表保存 Agent 最大模型迭代数、命令解释开关、独立 provider、请求超时、聊天图片格式和 Workspace Shell 模式；每次修改都会写入 `system_settings_updated` 审计事件。保存后 Runtime 构建新的 ChatModelAgent/Runner 并原子替换指针，因此新请求立即使用新的循环预算和解释模型路由，已经取得旧 Runner 的执行不会被中断。

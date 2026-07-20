@@ -88,6 +88,7 @@ const en = {
     runnerReady: 'Available', modelUnavailable: 'Unavailable', commandAgent: 'Enable command details', commandAgentHelp: 'Show effects, risks, and rollback steps.', modelProvider: 'Model', requestTimeout: 'Timeout',
     subagentProvider: 'Command details model', subagentProviderHelp: 'A separate model provider can be used.',
     activeMain: 'Main model', timeout: 'Timeout', timeoutHelp: 'Maximum time for one request.', seconds: '{{count}} seconds',
+	chatImages: 'Chat image formats',
     workspaceShell: 'Workspace Shell execution', workspaceShellHelp: 'Choose whether local Workspace shell calls are disabled, sandboxed, or run on the host after approval.',
     shellDisabled: 'Disabled', shellSandbox: 'Bubblewrap sandbox', shellHost: 'Host shell · approval required', shellUnsupported: 'Bubblewrap is unavailable on this host.',
     shellBackend: 'Workspace Shell', detecting: 'Detecting', sandbox: 'Sandbox', sandboxAvailable: 'Bubblewrap · no network', unavailableHost: 'Unavailable', hostShell: 'Host', systemShell: 'System Shell', fullAuthority: 'Full access', noShell: 'No Shell available', removeShell: 'Disable Shell commands', hostWarning: 'Can access host files and network', hostWarningText: 'Each run requires separate approval. Read-only Workspaces cannot use it.', sandboxWarning: 'Sandbox unavailable', sandboxWarningText: 'Shell commands will fail and will not run on the host.',
@@ -117,6 +118,7 @@ const en = {
     deleteConfirm: 'Delete conversation "{{title}}"?', cannotDelete: 'Agent is still running', stopFailed: 'Unable to stop Agent: {{message}}',
     stopped: 'Agent run stopped by the operator before completion.', agentError: 'Agent error',
     operator: 'Operator', failedContext: 'not included in later context', processing: 'processing', blockedImage: '[Blocked image: {{alt}}]',
+	addImages: 'Add images', removeImage: 'Remove image', imageTypeRejected: 'Some image formats are not enabled.',
     reasoning: 'Reasoning', reasoningActive: 'Reasoning...', reasoningFallback: 'Thinking...',
   },
   workspace: {

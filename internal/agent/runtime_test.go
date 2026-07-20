@@ -453,6 +453,43 @@ func TestBuildModelContextExcludesFailedTurnWithoutActivity(t *testing.T) {
 	}
 }
 
+func TestBuildMultimodalModelContextIncludesAllImages(t *testing.T) {
+	historyImage := []byte("history-image")
+	currentImageOne := []byte("current-image-one")
+	currentImageTwo := []byte("current-image-two")
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "previous screenshot", Status: "completed", Attachments: []domain.ChatAttachment{{Name: "previous.png", MIMEType: "image/png", Data: historyImage}}},
+		{Role: "assistant", Content: "I can see it", Status: "completed"},
+	}
+	current := domain.ChatMessage{Role: "user", Content: "compare these", Attachments: []domain.ChatAttachment{
+		{Name: "one.jpg", MIMEType: "image/jpeg", Data: currentImageOne},
+		{Name: "two.webp", MIMEType: "image/webp", Data: currentImageTwo},
+	}}
+	messages, stats := buildMultimodalModelContext(history, current)
+	if len(messages) != 3 || len(messages[0].UserInputMultiContent) != 2 || len(messages[2].UserInputMultiContent) != 3 {
+		t.Fatalf("multimodal messages = %#v", messages)
+	}
+	if messages[0].UserInputMultiContent[0].Text != "previous screenshot" || messages[2].UserInputMultiContent[0].Text != "compare these" {
+		t.Fatalf("multimodal text parts = %#v", messages)
+	}
+	wantImages := [][]byte{historyImage, currentImageOne, currentImageTwo}
+	imageParts := []schema.MessageInputPart{
+		messages[0].UserInputMultiContent[1], messages[2].UserInputMultiContent[1], messages[2].UserInputMultiContent[2],
+	}
+	for index, part := range imageParts {
+		if part.Type != schema.ChatMessagePartTypeImageURL || part.Image == nil || part.Image.Base64Data == nil {
+			t.Fatalf("image part %d = %#v", index, part)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(*part.Image.Base64Data)
+		if err != nil || string(decoded) != string(wantImages[index]) {
+			t.Fatalf("image part %d data = %q, err = %v", index, decoded, err)
+		}
+	}
+	if stats.Images != 3 || stats.ImageBytes != int64(len(historyImage)+len(currentImageOne)+len(currentImageTwo)) || stats.Truncated {
+		t.Fatalf("multimodal context stats = %#v", stats)
+	}
+}
+
 func TestTruncateModelTextKeepsValidUTF8AndBothEnds(t *testing.T) {
 	value := strings.Repeat("开头", 100) + " middle " + strings.Repeat("结尾", 100)
 	truncated := truncateModelText(value, 180)

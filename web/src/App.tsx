@@ -3,19 +3,21 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import {
-  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronRight, CircleDot, Clock3, Cpu, Edit3, FileText, FolderOpen, FunctionSquare, History, KeyRound, LockKeyhole, LogOut,
+  Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronRight, CircleDot, Clock3, Cpu, Edit3, FileText, FolderOpen, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, LogOut,
   ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, X, Zap,
 } from 'lucide-react'
-import { api, streamChat } from './api'
+import { api, chatAttachmentURL, streamChat } from './api'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'config' | 'extensions' | 'audit' | 'logs'
-type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; active?: boolean; streaming?: boolean; status?: 'pending' | 'completed' | 'failed' }
+type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
+type PendingChatImage = {id:string;file:File;url:string}
+type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; images?:ChatEntryImage[]; active?: boolean; streaming?: boolean; status?: 'pending' | 'completed' | 'failed' }
 type ActiveChatStream = { id: string; sessionId: string; controller: AbortController }
 
-function historyEntries(messages:ChatMessage[]):ChatEntry[]{
-  return messages.map((item,index)=>({id:`history_${index}_${item.created_at}`,kind:item.role,content:item.content,tool:item.tool_name,status:item.status}))
+function historyEntries(messages:ChatMessage[],sessionID:string):ChatEntry[]{
+  return messages.map((item,index)=>({id:`history_${item.id||`${index}_${item.created_at}`}`,kind:item.role,content:item.content,tool:item.tool_name,status:item.status,images:item.attachments?.map(image=>({id:image.id,name:image.name,mimeType:image.mime_type,sizeBytes:image.size_bytes,url:chatAttachmentURL(sessionID,image.id)}))}))
 }
 
 function deactivateReasoning(entry:ChatEntry):ChatEntry{
@@ -50,6 +52,7 @@ function errorText(error: unknown) {
 }
 
 const newSessionMarker = '__new__'
+const defaultChatImageTypes=['image/png','image/jpeg','image/webp','image/gif']
 function rememberSession(id: string) { try { localStorage.setItem('opspilot.activeSession', id) } catch { /* storage may be disabled */ } }
 function recalledSession() { try { return localStorage.getItem('opspilot.activeSession') || '' } catch { return '' } }
 
@@ -119,7 +122,7 @@ function App() {
       </div></header>
       {error && <div className="global-error"><ShieldAlert size={17}/>{error}<button onClick={() => setError('')}><X size={15}/></button></div>}
       <section className="workspace">
-		{page === 'chat' && <ChatPage hosts={hosts} approvals={approvals} runs={runs} capabilities={capabilities} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshApprovals={refreshApprovals} onStreamingChange={setAgentStreaming}/>}
+			{page === 'chat' && <ChatPage hosts={hosts} approvals={approvals} runs={runs} capabilities={capabilities} imageTypes={settings?.chat_image_allowed_types||defaultChatImageTypes} agentAvailable={!!health?.agent_available} modelName={health?.model?.model} refresh={refresh} refreshApprovals={refreshApprovals} onStreamingChange={setAgentStreaming}/>}
 		{page === 'config' && <ConfigurationPage hosts={hosts} providers={providers} settings={settings} capabilities={capabilities} health={health} refresh={refresh}/>}
 		{page === 'extensions' && <ExtensionsPage skills={skills} mcpServers={mcpServers} toolCatalog={toolCatalog} refresh={refresh}/>}
         {page === 'audit' && <AuditPage runs={runs}/>} 
@@ -334,24 +337,27 @@ function SystemSettingsPage({settings,providers,capabilities,modelStatus,refresh
 	  const {t,i18n:instance}=useTranslation()
   const savedValue=settings?.agent_max_iterations??50
   const savedExplanation=settings?.approval_explanations_enabled??true
-  const savedSubagentProvider=settings?.subagent_model_provider_id??''
-  const savedSubagentTimeout=settings?.subagent_timeout_seconds??30
-  const savedShellMode=settings?.workspace_shell_mode??'sandbox'
+	  const savedSubagentProvider=settings?.subagent_model_provider_id??''
+	  const savedSubagentTimeout=settings?.subagent_timeout_seconds??30
+	  const savedImageTypes=settings?.chat_image_allowed_types??defaultChatImageTypes
+	  const savedShellMode=settings?.workspace_shell_mode??'sandbox'
   const [maxIterations,setMaxIterations]=useState(savedValue)
   const [explanationEnabled,setExplanationEnabled]=useState(savedExplanation)
   const [subagentProvider,setSubagentProvider]=useState(savedSubagentProvider)
-  const [subagentTimeout,setSubagentTimeout]=useState(savedSubagentTimeout)
+	  const [subagentTimeout,setSubagentTimeout]=useState(savedSubagentTimeout)
+	  const [imageTypes,setImageTypes]=useState(savedImageTypes)
   const [shellMode,setShellMode]=useState<WorkspaceShellMode>(savedShellMode)
   const [dirty,setDirty]=useState(false)
   const [saving,setSaving]=useState(false)
   const [notice,setNotice]=useState('')
-  useEffect(()=>{if(!dirty){setMaxIterations(savedValue);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setShellMode(savedShellMode)}},[savedValue,savedExplanation,savedSubagentProvider,savedSubagentTimeout,savedShellMode,dirty])
+	  useEffect(()=>{if(!dirty){setMaxIterations(savedValue);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setImageTypes(savedImageTypes);setShellMode(savedShellMode)}},[savedValue,savedExplanation,savedSubagentProvider,savedSubagentTimeout,savedImageTypes,savedShellMode,dirty])
   const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(100,value||5)));setDirty(true);setNotice('')}
   const toggleExplanation=(value:boolean)=>{setExplanationEnabled(value);setDirty(true);setNotice('')}
   const selectSubagentProvider=(value:string)=>{setSubagentProvider(value);setDirty(true);setNotice('')}
-  const updateSubagentTimeout=(value:number)=>{setSubagentTimeout(Math.max(5,Math.min(120,value||5)));setDirty(true);setNotice('')}
+	  const updateSubagentTimeout=(value:number)=>{setSubagentTimeout(Math.max(5,Math.min(120,value||5)));setDirty(true);setNotice('')}
+	  const toggleImageType=(value:string)=>{setImageTypes(current=>current.includes(value)?current.length===1?current:current.filter(item=>item!==value):[...current,value]);setDirty(true);setNotice('')}
   const selectShellMode=(value:WorkspaceShellMode)=>{setShellMode(value);setDirty(true);setNotice('')}
-	  const save=async(event:FormEvent)=>{event.preventDefault();setSaving(true);try{const result=await api.saveSystemSettings({agent_max_iterations:maxIterations,approval_explanations_enabled:explanationEnabled,subagent_model_provider_id:subagentProvider,subagent_timeout_seconds:subagentTimeout,workspace_shell_mode:shellMode});setMaxIterations(result.agent_max_iterations);setExplanationEnabled(result.approval_explanations_enabled);setSubagentProvider(result.subagent_model_provider_id);setSubagentTimeout(result.subagent_timeout_seconds);setShellMode(result.workspace_shell_mode);setDirty(false);setNotice(t('settings.saved',{timeout:result.subagent_timeout_seconds,mode:result.workspace_shell_mode}));await refresh()}catch(err){setNotice(errorText(err))}finally{setSaving(false)}}
+		  const save=async(event:FormEvent)=>{event.preventDefault();setSaving(true);try{const result=await api.saveSystemSettings({agent_max_iterations:maxIterations,approval_explanations_enabled:explanationEnabled,subagent_model_provider_id:subagentProvider,subagent_timeout_seconds:subagentTimeout,chat_image_allowed_types:imageTypes,workspace_shell_mode:shellMode});setMaxIterations(result.agent_max_iterations);setExplanationEnabled(result.approval_explanations_enabled);setSubagentProvider(result.subagent_model_provider_id);setSubagentTimeout(result.subagent_timeout_seconds);setImageTypes(result.chat_image_allowed_types);setShellMode(result.workspace_shell_mode);setDirty(false);setNotice(t('settings.saved'));await refresh()}catch(err){setNotice(errorText(err))}finally{setSaving(false)}}
   const selectedSubagentProvider=providers.find(provider=>provider.id===subagentProvider)
 	  const subagentRoute=subagentProvider?(selectedSubagentProvider?`${selectedSubagentProvider.name} · ${selectedSubagentProvider.model}`:t('settings.unavailableProvider')):t('settings.followMain')
   return <div className="system-settings page-stack">
@@ -360,10 +366,11 @@ function SystemSettingsPage({settings,providers,capabilities,modelStatus,refresh
 	    <form className="settings-panel panel" onSubmit={save}><div className="settings-panel-head"><div className="settings-glyph"><SlidersHorizontal size={20}/></div><div><span>{t('settings.agentLoop')}</span><h3>{t('settings.maxIterations')}</h3><p>{t('settings.maxIterationsHelp')}</p></div><strong>{maxIterations}</strong></div>
 	      <div className="iteration-editor"><input aria-label={t('settings.maxIterations')} type="range" min="5" max="100" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>{t('settings.rounds')}</span><input type="number" min="5" max="100" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div>
 	      <div className="iteration-presets"><span>{t('settings.quickPresets')}</span>{[20,50,100].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b><small>{value===20?t('settings.shortDiagnosis'):value===50?t('settings.recommended'):t('settings.longDeployment')}</small></button>)}</div>
-		      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>{t('settings.explanationSection')}</b></div><em className={modelStatus?.explanation_agent_available?'ready':'offline'}><CircleDot size={9}/>{modelStatus?.explanation_agent_available?t('settings.runnerReady'):t('settings.modelUnavailable')}</em></div><label className="subagent-toggle"><span><b>{t('settings.commandAgent')}</b><small>{t('settings.commandAgentHelp')}</small></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label><div className="subagent-config-grid"><label><span><b>{t('settings.modelProvider')}</b><small>{subagentRoute}</small></span><select value={subagentProvider} onChange={event=>selectSubagentProvider(event.target.value)}><option value="">{t('settings.followMain')}</option>{providers.map(provider=><option value={provider.id} key={provider.id}>{provider.name} · {provider.model}</option>)}</select></label><label><span><b>{t('settings.requestTimeout')}</b></span><div className="subagent-timeout-input"><input aria-label={t('settings.timeout')} type="number" min="5" max="120" step="1" value={subagentTimeout} onChange={event=>updateSubagentTimeout(Number(event.target.value))}/><em>{t('settings.seconds',{count:subagentTimeout})}</em></div></label></div>{modelStatus?.explanation_error&&<div className="subagent-runtime-error"><ShieldAlert size={14}/><span>{modelStatus.explanation_error}</span></div>}</div>
+			      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>{t('settings.explanationSection')}</b></div><em className={modelStatus?.explanation_agent_available?'ready':'offline'}><CircleDot size={9}/>{modelStatus?.explanation_agent_available?t('settings.runnerReady'):t('settings.modelUnavailable')}</em></div><label className="subagent-toggle"><span><b>{t('settings.commandAgent')}</b><small>{t('settings.commandAgentHelp')}</small></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label><div className="subagent-config-grid"><label><span><b>{t('settings.modelProvider')}</b><small>{subagentRoute}</small></span><select value={subagentProvider} onChange={event=>selectSubagentProvider(event.target.value)}><option value="">{t('settings.followMain')}</option>{providers.map(provider=><option value={provider.id} key={provider.id}>{provider.name} · {provider.model}</option>)}</select></label><label><span><b>{t('settings.requestTimeout')}</b></span><div className="subagent-timeout-input"><input aria-label={t('settings.timeout')} type="number" min="5" max="120" step="1" value={subagentTimeout} onChange={event=>updateSubagentTimeout(Number(event.target.value))}/><em>{t('settings.seconds',{count:subagentTimeout})}</em></div></label></div>{modelStatus?.explanation_error&&<div className="subagent-runtime-error"><ShieldAlert size={14}/><span>{modelStatus.explanation_error}</span></div>}</div>
+				  <div className="chat-image-settings"><div className="chat-image-settings-head"><ImagePlus size={18}/><b>{t('settings.chatImages')}</b></div><div className="chat-image-formats">{[['image/png','PNG'],['image/jpeg','JPEG'],['image/webp','WebP'],['image/gif','GIF']].map(([value,label])=><label className={imageTypes.includes(value)?'active':''} key={value}><input type="checkbox" checked={imageTypes.includes(value)} disabled={imageTypes.length===1&&imageTypes.includes(value)} onChange={()=>toggleImageType(value)}/><span>{label}</span></label>)}</div></div>
 			  <div className="workspace-shell-settings"><div className="workspace-shell-settings-head"><TerminalSquare size={18}/><div><b>{t('settings.shellBackend')}</b></div><em>{settings?.workspace_shell_platform||t('settings.detecting')}</em></div><div className="workspace-shell-modes" role="group" aria-label={t('settings.shellBackend')}><button type="button" className={shellMode==='sandbox'?'active':''} disabled={!settings?.workspace_sandbox_available} onClick={()=>selectShellMode('sandbox')}><ShieldCheck size={16}/><span><b>{t('settings.sandbox')}</b><small>{settings?.workspace_sandbox_available?t('settings.sandboxAvailable'):t('settings.unavailableHost')}</small></span></button><button type="button" className={`${shellMode==='host'?'active ':''}host`} disabled={!settings?.workspace_host_shell_available} onClick={()=>selectShellMode('host')}><TerminalSquare size={16}/><span><b>{t('settings.hostShell')}</b><small>{settings?.workspace_host_shell_available?`${settings.workspace_shell_name||t('settings.systemShell')} · ${t('settings.fullAuthority')}`:t('settings.noShell')}</small></span></button><button type="button" className={shellMode==='disabled'?'active':''} onClick={()=>selectShellMode('disabled')}><Power size={16}/><span><b>{t('settings.shellDisabled')}</b><small>{t('settings.removeShell')}</small></span></button></div>{shellMode==='host'&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><span><b>{t('settings.hostWarning')}</b><small>{t('settings.hostWarningText')}</small></span></div>}{shellMode==='sandbox'&&!settings?.workspace_sandbox_available&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><span><b>{t('settings.sandboxWarning')}</b><small>{t('settings.sandboxWarningText')}</small></span></div>}</div>
 			  <WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refresh} onNotice={setNotice}/>
-	      <div className="settings-footer"><span>{settings?.updated_at?t('settings.lastUpdated',{date:new Date(settings.updated_at).toLocaleString(localeFor(instance.language))}):t('settings.systemDefault')}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setShellMode(savedShellMode);setDirty(false);setNotice('')}}>{t('settings.discard')}</button><button className="primary" disabled={!dirty||saving}>{saving?t('settings.applying'):t('settings.apply')}</button></div>
+			      <div className="settings-footer"><span>{settings?.updated_at?t('settings.lastUpdated',{date:new Date(settings.updated_at).toLocaleString(localeFor(instance.language))}):t('settings.systemDefault')}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setImageTypes(savedImageTypes);setShellMode(savedShellMode);setDirty(false);setNotice('')}}>{t('settings.discard')}</button><button className="primary" disabled={!dirty||saving}>{saving?t('settings.applying'):t('settings.apply')}</button></div>
 	    </form>
 	<WebSearchSettingsPanel refresh={refresh}/>
 	<AdminPasswordPanel/>
@@ -411,10 +418,13 @@ function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon
   return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}>{icon}<span>{label}</span>{count !== undefined && <em className={warn ? 'warn' : ''}>{count}</em>}</button>
 }
 
-function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelName, refresh, refreshApprovals, onStreamingChange }: {hosts:Host[];approvals:Approval[];runs:Run[];capabilities:ToolCapabilities;agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:()=>Promise<void>;onStreamingChange:(streaming:boolean)=>void}) {
+function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvailable, modelName, refresh, refreshApprovals, onStreamingChange }: {hosts:Host[];approvals:Approval[];runs:Run[];capabilities:ToolCapabilities;imageTypes:string[];agentAvailable:boolean;modelName?:string;refresh:()=>Promise<void>;refreshApprovals:()=>Promise<void>;onStreamingChange:(streaming:boolean)=>void}) {
 	const {t,i18n:instance}=useTranslation()
   const [entries, setEntries] = useState<ChatEntry[]>([])
-  const [message, setMessage] = useState('')
+	  const [message, setMessage] = useState('')
+	  const [pendingImages,setPendingImages]=useState<PendingChatImage[]>([])
+	  const [imageNotice,setImageNotice]=useState('')
+	  const [imageInputKey,setImageInputKey]=useState(0)
   const [sessionId, setSessionId] = useState('')
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [historyError, setHistoryError] = useState('')
@@ -429,7 +439,8 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
 	const [workspaceID,setWorkspaceID]=useState('')
   const messagesRef=useRef<HTMLDivElement>(null)
   const stickToLatest=useRef(true)
-  const activeStreamRef=useRef<ActiveChatStream|null>(null)
+	  const activeStreamRef=useRef<ActiveChatStream|null>(null)
+	  const imageURLsRef=useRef(new Set<string>())
   const sessionLoadRef=useRef('')
   const hostNames = useMemo(() => hosts.map((host) => host.name).join(', '), [hosts])
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
@@ -440,6 +451,10 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
 	useEffect(()=>{onStreamingChange(running)},[running,onStreamingChange])
 	useEffect(()=>()=>onStreamingChange(false),[onStreamingChange])
 	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort()},[])
+	useEffect(()=>()=>{for(const url of imageURLsRef.current)URL.revokeObjectURL(url);imageURLsRef.current.clear()},[])
+	const addImages=(files:File[])=>{const accepted=files.filter(file=>imageTypes.includes(file.type));if(accepted.length!==files.length)setImageNotice(t('chat.imageTypeRejected'));if(!accepted.length)return;const next=accepted.map(file=>{const url=URL.createObjectURL(file);imageURLsRef.current.add(url);return{id:clientId(),file,url}});setPendingImages(current=>[...current,...next])}
+	const removePendingImage=(id:string)=>{setPendingImages(current=>{const target=current.find(image=>image.id===id);if(target){URL.revokeObjectURL(target.url);imageURLsRef.current.delete(target.url)}return current.filter(image=>image.id!==id)});setImageInputKey(value=>value+1)}
+	const clearPendingImages=()=>{for(const image of pendingImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}setPendingImages([]);setImageInputKey(value=>value+1);setImageNotice('')}
 	useEffect(()=>{
 		if(!pendingExplanationID)return
 		void refreshApprovals()
@@ -469,7 +484,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
     try {
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
-      setEntries(historyEntries(state.messages||[]));setDetachedRunning(!!state.active);setStopping(false);setPlan(state.plan||null)
+	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setPlan(state.plan||null)
       setSessionId(id); rememberSession(id); setHistoryError('')
       void refresh()
     } catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
@@ -480,7 +495,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
     if(!sessionId||running||!detachedRunning)return
     let active=true
     const sync=async()=>{
-      try{const state=await api.chatState(sessionId);if(!active)return;setDetachedRunning(!!state.active);setPlan(state.plan||null);setEntries(old=>[...historyEntries(state.messages||[]),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))]);if(!state.active){setStopping(false);void refreshSessions()}}
+	      try{const state=await api.chatState(sessionId);if(!active)return;setDetachedRunning(!!state.active);setPlan(state.plan||null);setEntries(old=>[...historyEntries(state.messages||[],sessionId),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))]);if(!state.active){setStopping(false);void refreshSessions()}}
       catch(err){if(active)setHistoryError(errorText(err))}
     }
     void sync();const timer=window.setInterval(()=>void sync(),2500)
@@ -519,7 +534,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
     sessionLoadRef.current=''
     setLoadingSession('')
     setHistoryOpen(false)
-    stickToLatest.current=true;setSessionId(''); setEntries([]); setMessage(''); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setPlan(null); rememberSession(newSessionMarker)
+	    stickToLatest.current=true;setSessionId(''); setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setPlan(null); rememberSession(newSessionMarker)
     void refreshSessions()
   }
 
@@ -545,8 +560,8 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
     } catch (err) { setHistoryError(errorText(err)) }
   }
 
-  const sendQuery = async (query:string) => {
-    query=query.trim(); if(!query||sessionBusy||loadingSession)return
+	  const sendQuery = async (query:string,queryImages:PendingChatImage[]) => {
+	    query=query.trim(); if((!query&&!queryImages.length)||sessionBusy||loadingSession)return
     let querySessionID=sessionId
     const userEntryID=clientId()
     const streamID=clientId()
@@ -555,9 +570,10 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
     const isAttached=()=>activeStreamRef.current?.id===streamID
     stickToLatest.current=true
     setApprovalNotice('');setReasoningSeen(false);setStopping(false);setRunning(true)
-    setEntries((old) => [...old, { id: userEntryID, kind: 'user', content: query, status:'pending' }, { id: 'streaming', kind: 'assistant', content: '', streaming:true }])
-    try {
-      await streamChat(sessionId, query, (frame: AgentEvent) => {
+	    const entryImages=queryImages.map(image=>({id:image.id,name:image.file.name,mimeType:image.file.type,sizeBytes:image.file.size,url:image.url}))
+	    setEntries((old) => [...old, { id: userEntryID, kind: 'user', content: query, images:entryImages, status:'pending' }, { id: 'streaming', kind: 'assistant', content: '', streaming:true }])
+	    try {
+	      await streamChat(sessionId, query, queryImages.map(image=>image.file), (frame: AgentEvent) => {
         if(!isAttached())return
         if (frame.session_id) { querySessionID=frame.session_id;activeStreamRef.current!.sessionId=frame.session_id;setSessionId(frame.session_id); rememberSession(frame.session_id) }
         if (frame.type === 'approval') { setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item));setApprovalNotice('');void refreshApprovals() }
@@ -584,14 +600,14 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
       setEntries((old) => old.filter((item) => item.id !== 'streaming' || item.content !== '').map((item)=>item.id==='streaming'?{...item,streaming:false}:deactivateReasoning(item)))
       setRunning(false)
 		setStopping(false)
-      if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setPlan(state.plan||null);if(state.active)setEntries(old=>[...historyEntries(state.messages||[]),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))])}catch{/* polling or the next reload will recover state */}}
+	      if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setPlan(state.plan||null);setEntries(old=>[...historyEntries(state.messages||[],querySessionID),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))]);for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
       if(!isAttached())return
       activeStreamRef.current=null
       void refreshSessions();void refresh()
     }
   }
 
-  const submit = (event: FormEvent) => {event.preventDefault();const query=message.trim();if(!query||sessionBusy||loadingSession)return;setMessage('');void sendQuery(query)}
+	  const submit = (event: FormEvent) => {event.preventDefault();const query=message.trim();if((!query&&!pendingImages.length)||sessionBusy||loadingSession)return;const images=pendingImages;setMessage('');setPendingImages([]);setImageInputKey(value=>value+1);setImageNotice('');void sendQuery(query,images)}
 	const stopAgent = async () => {
 		const targetSessionID=activeStreamRef.current?.sessionId||sessionId
 		if(!targetSessionID||!sessionBusy||stopping)return
@@ -600,7 +616,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
 		try{
 			const result=await api.cancelChatSession(targetSessionID)
 			requested=result.cancelled
-			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setPlan(state.plan||null);setEntries(historyEntries(state.messages||[]));void refreshSessions();void refresh()}
+			if(!result.cancelled){const state=await api.chatState(targetSessionID);setDetachedRunning(!!state.active);setPlan(state.plan||null);setEntries(historyEntries(state.messages||[],targetSessionID));void refreshSessions();void refresh()}
 		}catch(err){setEntries(old=>[...old,{id:clientId(),kind:'error',content:t('chat.stopFailed',{message:errorText(err)})}])}
 		finally{if(!requested)setStopping(false)}
 	}
@@ -620,7 +636,13 @@ function ChatPage({ hosts, approvals, runs, capabilities, agentAvailable, modelN
 		{running && !reasoningSeen && !streamingResponseStarted && <div className="thinking"><span/><span/><span/> {t('chat.waitingModel')}</div>}
 		{detachedRunning&&!running&&<div className="thinking background-agent"><span/><span/><span/> {t('chat.backgroundRunning')}</div>}
       </div>
-	  <form className="composer" onSubmit={submit}>{sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):t('chat.running')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}<div className="context-line"><span><Server size={13}/>{hosts.length?t('chat.hostsCount',{count:hosts.length,names:hostNames}):t('chat.noHosts')}</span><span className="composer-workspace"><FolderOpen size={13}/>{selectedWorkspace?t('chat.workspaceSelected',{id:selectedWorkspace.id}):t('chat.noWorkspace')}</span>{selectedWorkspace?.access==='read_write'&&<QuickWorkspaceUpload workspace={selectedWorkspace} refresh={refresh}/>}<span><Cpu size={13}/>{modelName || t('chat.noModel')}</span><span><ShieldCheck size={13}/>{t('chat.guarded')}</span></div><div className="input-row"><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || !!loadingSession || !message.trim()}><Send size={18}/></button></div></form>
+		  <form className="composer" onSubmit={submit}>
+			  {sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):t('chat.running')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
+			  <div className="context-line"><span><Server size={13}/>{hosts.length?t('chat.hostsCount',{count:hosts.length,names:hostNames}):t('chat.noHosts')}</span><span className="composer-workspace"><FolderOpen size={13}/>{selectedWorkspace?t('chat.workspaceSelected',{id:selectedWorkspace.id}):t('chat.noWorkspace')}</span>{selectedWorkspace?.access==='read_write'&&<QuickWorkspaceUpload workspace={selectedWorkspace} refresh={refresh}/>}<span><Cpu size={13}/>{modelName || t('chat.noModel')}</span><span><ShieldCheck size={13}/>{t('chat.guarded')}</span></div>
+			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
+			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
+			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>
+		  </form>
     </div>
 	{historyOpen&&<button className="conversation-backdrop" onClick={()=>setHistoryOpen(false)} aria-label={t('chat.closeConversations')}/>}
 	<aside className={`context-panel conversation-panel panel ${historyOpen?'mobile-open':''}`}><div className="panel-header"><div><History size={17}/><span>{t('chat.conversations')}</span></div><section className="conversation-header-actions"><button className="new-chat-button" onClick={newChat} title={t('chat.newConversation')}><Plus size={14}/>{t('common.new')}</button><button className="conversation-close-button" onClick={()=>setHistoryOpen(false)} title={t('chat.closeConversations')} aria-label={t('chat.closeConversations')}><X size={14}/></button></section></div><div className="session-list">
@@ -674,7 +696,7 @@ const ChatBubble=memo(function ChatBubble({ entry, runs, hosts }: {entry: ChatEn
   if (entry.kind === 'tool') return <ToolEventCard entry={entry} runs={runs} hosts={hosts}/>
   if (entry.kind === 'reasoning') return <ReasoningCard content={entry.content} active={!!entry.active}/>
   if (entry.kind === 'assistant' && !entry.content) return null
-	return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? 'YOU' : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.failedContext')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsPilot'}</span><div className={`bubble-copy ${entry.kind==='assistant'&&!entry.streaming?'markdown-body':''}`}>{entry.kind==='assistant'&&!entry.streaming?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">{t('chat.blockedImage',{alt:alt||t('common.noDescription')})}</span>}}>{entry.content||'...'}</Markdown>:entry.content||'...'}</div></div></div>
+	return <div className={`bubble ${entry.kind} ${entry.status||''}`}><div className="avatar">{entry.kind === 'user' ? 'YOU' : entry.kind === 'error' ? '!' : <Bot size={17}/>}</div><div><span className="bubble-label">{entry.kind === 'user' ? <>{t('chat.operator')}{entry.status==='failed'&&<em>{t('chat.failedContext')}</em>}{entry.status==='pending'&&<em>{t('chat.processing')}</em>}</> : entry.kind === 'error' ? t('common.error') : 'OpsPilot'}</span>{entry.images&&entry.images.length>0&&<div className="message-images">{entry.images.map(image=><a href={image.url} target="_blank" rel="noopener noreferrer" title={`${image.name} · ${formatFileSize(image.sizeBytes)}`} key={image.id}><img src={image.url} alt={image.name}/><span>{image.name}</span></a>)}</div>}{entry.content&&<div className={`bubble-copy ${entry.kind==='assistant'&&!entry.streaming?'markdown-body':''}`}>{entry.kind==='assistant'&&!entry.streaming?<Markdown skipHtml remarkPlugins={[remarkGfm]} components={{a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,img:({alt})=><span className="markdown-image-blocked">{t('chat.blockedImage',{alt:alt||t('common.noDescription')})}</span>}}>{entry.content}</Markdown>:entry.content}</div>}</div></div>
 })
 
 function latestReasoningLine(content:string){

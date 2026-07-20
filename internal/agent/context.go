@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -26,6 +27,8 @@ type modelContextStats struct {
 	IncludedTurns      int
 	ToolResults        int
 	Bytes              int
+	Images             int
+	ImageBytes         int64
 	Truncated          bool
 	RecordLimitReached bool
 }
@@ -38,12 +41,17 @@ type storedModelTurn struct {
 
 type preparedModelTurn struct {
 	user        string
+	attachments []domain.ChatAttachment
 	assistant   string
 	toolResults int
 	truncated   bool
 }
 
 func buildModelContext(history []domain.ChatMessage, query string) ([]*schema.Message, modelContextStats) {
+	return buildMultimodalModelContext(history, domain.ChatMessage{Role: "user", Content: query})
+}
+
+func buildMultimodalModelContext(history []domain.ChatMessage, current domain.ChatMessage) ([]*schema.Message, modelContextStats) {
 	stats := modelContextStats{StoredRecords: len(history)}
 	turns := groupStoredModelTurns(history)
 	stats.StoredTurns = len(turns)
@@ -56,7 +64,7 @@ func buildModelContext(history []domain.ChatMessage, query string) ([]*schema.Me
 		}
 	}
 
-	remaining := modelHistoryByteBudget - len(query)
+	remaining := modelHistoryByteBudget - len(current.Content)
 	if remaining < 0 {
 		remaining = 0
 		stats.Truncated = true
@@ -80,16 +88,32 @@ func buildModelContext(history []domain.ChatMessage, query string) ([]*schema.Me
 		remaining -= size
 	}
 
+	stats.Images = len(current.Attachments)
+	for _, attachment := range current.Attachments {
+		stats.ImageBytes += int64(len(attachment.Data))
+	}
+	for _, turn := range selected {
+		stats.Images += len(turn.attachments)
+		for _, attachment := range turn.attachments {
+			stats.ImageBytes += int64(len(attachment.Data))
+		}
+	}
+
 	messages := make([]*schema.Message, 0, len(selected)*2+1)
 	for index := len(selected) - 1; index >= 0; index-- {
 		turn := selected[index]
-		messages = append(messages, schema.UserMessage(turn.user), schema.AssistantMessage(turn.assistant, nil))
+		messages = append(messages, multimodalUserMessage(turn.user, turn.attachments), schema.AssistantMessage(turn.assistant, nil))
 		stats.ToolResults += turn.toolResults
 	}
-	messages = append(messages, schema.UserMessage(truncateModelText(query, modelMessageByteLimit)))
+	messages = append(messages, multimodalUserMessage(truncateModelText(current.Content, modelMessageByteLimit), current.Attachments))
 	stats.IncludedTurns = len(selected)
 	for _, message := range messages {
 		stats.Bytes += len(message.Content)
+		for _, part := range message.UserInputMultiContent {
+			if part.Type == schema.ChatMessagePartTypeText {
+				stats.Bytes += len(part.Text)
+			}
+		}
 	}
 	return messages, stats
 }
@@ -115,7 +139,7 @@ func groupStoredModelTurns(history []domain.ChatMessage) []storedModelTurn {
 
 func prepareModelTurn(turn storedModelTurn) (preparedModelTurn, bool) {
 	user := strings.TrimSpace(turn.user.Content)
-	if user == "" {
+	if user == "" && len(turn.user.Attachments) == 0 {
 		return preparedModelTurn{}, false
 	}
 	if turn.user.Status == "failed" && len(turn.tools) == 0 && len(turn.assistant) == 0 {
@@ -135,10 +159,32 @@ func prepareModelTurn(turn storedModelTurn) (preparedModelTurn, bool) {
 	assistant := strings.Join(parts, "\n\n")
 	return preparedModelTurn{
 		user:        truncateModelText(user, modelMessageByteLimit),
+		attachments: turn.user.Attachments,
 		assistant:   truncateModelText(assistant, modelMessageByteLimit+modelTurnToolEvidenceByteLimit),
 		toolResults: includedTools,
 		truncated:   toolEvidenceTruncated || len(user) > modelMessageByteLimit || len(assistant) > modelMessageByteLimit+modelTurnToolEvidenceByteLimit,
 	}, true
+}
+
+func multimodalUserMessage(text string, attachments []domain.ChatAttachment) *schema.Message {
+	if len(attachments) == 0 {
+		return schema.UserMessage(text)
+	}
+	parts := make([]schema.MessageInputPart, 0, len(attachments)+1)
+	if text != "" {
+		parts = append(parts, schema.MessageInputPart{Type: schema.ChatMessagePartTypeText, Text: text})
+	}
+	for _, attachment := range attachments {
+		encoded := base64.StdEncoding.EncodeToString(attachment.Data)
+		parts = append(parts, schema.MessageInputPart{
+			Type: schema.ChatMessagePartTypeImageURL,
+			Image: &schema.MessageInputImage{
+				MessagePartCommon: schema.MessagePartCommon{Base64Data: &encoded, MIMEType: attachment.MIMEType},
+				Detail:            schema.ImageURLDetailAuto,
+			},
+		})
+	}
+	return &schema.Message{Role: schema.User, UserInputMultiContent: parts}
 }
 
 func formatPersistedToolEvidence(tools []domain.ChatMessage) (string, int, bool) {

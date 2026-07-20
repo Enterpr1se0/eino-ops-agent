@@ -2,12 +2,15 @@ package httpapi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -126,6 +129,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/v1/chat/{id}", s.deleteChatSession)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/messages", s.chatMessages)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/state", s.chatState)
+	s.mux.HandleFunc("GET /api/v1/chat/{id}/attachments/{attachment_id}", s.chatAttachment)
 	s.mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, _ *http.Request) {
 		writeErrorStatus(w, fmt.Errorf("API endpoint not found"), http.StatusNotFound)
 	})
@@ -958,25 +962,94 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
 		return
 	}
-	var input struct {
-		SessionID string `json:"session_id"`
-		Message   string `json:"message"`
-	}
-	if !decode(w, r, &input) {
+	sessionID, message, attachments, ok := s.decodeChatInput(w, r)
+	if !ok {
 		return
 	}
-	if strings.TrimSpace(input.Message) == "" {
-		writeErrorStatus(w, fmt.Errorf("message is required"), http.StatusBadRequest)
+	if strings.TrimSpace(message) == "" && len(attachments) == 0 {
+		writeErrorStatus(w, fmt.Errorf("message or image is required"), http.StatusBadRequest)
 		return
 	}
 	streamAgentEvents(w, r, 10*time.Second, func(emit func(agent.Event)) {
 		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
 		defer cancel()
-		_, err := s.agent.Query(queryCtx, input.SessionID, input.Message, emit)
+		_, err := s.agent.QueryWithAttachments(queryCtx, sessionID, message, attachments, emit)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			emit(agent.Event{Type: "error", Error: err.Error(), SessionID: input.SessionID})
+			emit(agent.Event{Type: "error", Error: err.Error(), SessionID: sessionID})
 		}
 	})
+}
+
+func (s *Server) decodeChatInput(w http.ResponseWriter, r *http.Request) (string, string, []domain.ChatAttachment, bool) {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil {
+		writeErrorStatus(w, fmt.Errorf("invalid chat content type: %w", err), http.StatusBadRequest)
+		return "", "", nil, false
+	}
+	if mediaType == "application/json" {
+		var input struct {
+			SessionID string `json:"session_id"`
+			Message   string `json:"message"`
+		}
+		if !decode(w, r, &input) {
+			return "", "", nil, false
+		}
+		return input.SessionID, input.Message, nil, true
+	}
+	if mediaType != "multipart/form-data" {
+		writeErrorStatus(w, fmt.Errorf("chat content type must be application/json or multipart/form-data"), http.StatusUnsupportedMediaType)
+		return "", "", nil, false
+	}
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeErrorStatus(w, fmt.Errorf("invalid chat upload: %w", err), http.StatusBadRequest)
+		return "", "", nil, false
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	settings, err := s.service.SystemSettings(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return "", "", nil, false
+	}
+	allowed := make(map[string]struct{}, len(settings.ChatImageAllowedTypes))
+	for _, value := range settings.ChatImageAllowedTypes {
+		allowed[value] = struct{}{}
+	}
+	files := r.MultipartForm.File["images"]
+	attachments := make([]domain.ChatAttachment, 0, len(files))
+	for index, header := range files {
+		file, err := header.Open()
+		if err != nil {
+			writeErrorStatus(w, fmt.Errorf("open image %q: %w", header.Filename, err), http.StatusBadRequest)
+			return "", "", nil, false
+		}
+		data, readErr := io.ReadAll(file)
+		closeErr := file.Close()
+		if readErr != nil {
+			writeErrorStatus(w, fmt.Errorf("read image %q: %w", header.Filename, readErr), http.StatusBadRequest)
+			return "", "", nil, false
+		}
+		if closeErr != nil {
+			writeErrorStatus(w, fmt.Errorf("close image %q: %w", header.Filename, closeErr), http.StatusBadRequest)
+			return "", "", nil, false
+		}
+		if len(data) == 0 {
+			writeErrorStatus(w, fmt.Errorf("image %q is empty", header.Filename), http.StatusBadRequest)
+			return "", "", nil, false
+		}
+		mimeType := http.DetectContentType(data)
+		if _, ok := allowed[mimeType]; !ok {
+			writeErrorStatus(w, fmt.Errorf("image type %s is not enabled", mimeType), http.StatusBadRequest)
+			return "", "", nil, false
+		}
+		name := path.Base(strings.ReplaceAll(header.Filename, "\\", "/"))
+		if name == "." || name == "/" || name == "" {
+			name = fmt.Sprintf("image-%d", index+1)
+		}
+		attachments = append(attachments, domain.ChatAttachment{Name: name, MIMEType: mimeType, SizeBytes: int64(len(data)), Data: data})
+	}
+	return r.FormValue("session_id"), r.FormValue("message"), attachments, true
 }
 
 // streamAgentEvents keeps the ResponseWriter owned by the HTTP goroutine while
@@ -1065,6 +1138,23 @@ func (s *Server) chatMessages(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	result, err := s.service.ListChatMessages(r.Context(), r.PathValue("id"), limit)
 	respond(w, result, err)
+}
+
+func (s *Server) chatAttachment(w http.ResponseWriter, r *http.Request) {
+	attachment, err := s.service.GetChatAttachment(r.Context(), r.PathValue("id"), r.PathValue("attachment_id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeErrorStatus(w, err, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", attachment.MIMEType)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": attachment.Name}))
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, attachment.Name, time.Time{}, bytes.NewReader(attachment.Data))
 }
 
 func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {

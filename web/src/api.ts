@@ -95,12 +95,20 @@ export const api = {
   deleteChatSession: (id: string) => request<void>(`/api/v1/chat/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
 
-export async function streamChat(sessionId: string, message: string, onEvent: (event: AgentEvent) => void, signal?: AbortSignal) {
+export function chatAttachmentURL(sessionId:string,attachmentId:string){
+	return `/api/v1/chat/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`
+}
+
+export async function streamChat(sessionId: string, message: string, images:File[], onEvent: (event: AgentEvent) => void, signal?: AbortSignal) {
+	const body=new FormData()
+	body.set('session_id',sessionId)
+	body.set('message',message)
+	for(const image of images)body.append('images',image,image.name)
   const response = await fetch('/api/v1/chat', {
     method: 'POST',
 	credentials:'same-origin',
-	headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-    body: JSON.stringify({ session_id: sessionId, message }),
+	headers: { 'X-CSRF-Token': csrfToken },
+	body,
     signal,
   })
   if (!response.ok || !response.body) {

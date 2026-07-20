@@ -357,6 +357,17 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id, created_at);
+CREATE TABLE IF NOT EXISTS chat_attachments (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  data BLOB NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_chat_attachments_message ON chat_attachments(message_id, created_at);
 CREATE TABLE IF NOT EXISTS agent_plans (
   session_id TEXT PRIMARY KEY,
   goal TEXT NOT NULL,
@@ -448,6 +459,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
   approval_explanations_enabled INTEGER NOT NULL DEFAULT 1,
   subagent_model_provider_id TEXT NOT NULL DEFAULT '',
   subagent_timeout_seconds INTEGER NOT NULL DEFAULT 30,
+  chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]',
   workspace_shell_mode TEXT NOT NULL DEFAULT 'sandbox',
   updated_at TEXT NOT NULL
 );
@@ -530,6 +542,7 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		`ALTER TABLE model_providers ADD COLUMN proxy_password_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE web_search_settings ADD COLUMN extract_max_content_kib INTEGER NOT NULL DEFAULT 32`,
 		`ALTER TABLE web_search_settings ADD COLUMN extract_max_total_kib INTEGER NOT NULL DEFAULT 128`,
+		`ALTER TABLE system_settings ADD COLUMN chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]'`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
@@ -890,14 +903,18 @@ func scanMCPServer(row scanner) (domain.MCPServer, error) {
 func (s *Store) GetSystemSettings(ctx context.Context) (domain.SystemSettings, error) {
 	var settings domain.SystemSettings
 	var explanationsEnabled int
+	var imageTypesJSON string
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,workspace_shell_mode,updated_at FROM system_settings WHERE id=1`).Scan(
-		&settings.AgentMaxIterations, &explanationsEnabled, &settings.SubagentModelProviderID, &settings.SubagentTimeoutSeconds, &settings.WorkspaceShellMode, &updated,
+	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,
+chat_image_allowed_types_json,workspace_shell_mode,updated_at FROM system_settings WHERE id=1`).Scan(
+		&settings.AgentMaxIterations, &explanationsEnabled, &settings.SubagentModelProviderID, &settings.SubagentTimeoutSeconds,
+		&imageTypesJSON, &settings.WorkspaceShellMode, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.SystemSettings{
 			AgentMaxIterations: domain.DefaultAgentMaxIterations, ApprovalExplanationsEnabled: true,
 			SubagentTimeoutSeconds: domain.DefaultSubagentTimeoutSeconds, WorkspaceShellMode: domain.WorkspaceShellModeSandbox,
+			ChatImageAllowedTypes: append([]string(nil), domain.DefaultChatImageAllowedTypes...),
 		}, nil
 	}
 	if err != nil {
@@ -905,6 +922,9 @@ func (s *Store) GetSystemSettings(ctx context.Context) (domain.SystemSettings, e
 	}
 	settings.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
 	settings.ApprovalExplanationsEnabled = explanationsEnabled != 0
+	if err := json.Unmarshal([]byte(imageTypesJSON), &settings.ChatImageAllowedTypes); err != nil || len(settings.ChatImageAllowedTypes) == 0 {
+		settings.ChatImageAllowedTypes = append([]string(nil), domain.DefaultChatImageAllowedTypes...)
+	}
 	if settings.SubagentTimeoutSeconds < domain.MinSubagentTimeoutSeconds || settings.SubagentTimeoutSeconds > domain.MaxSubagentTimeoutSeconds {
 		settings.SubagentTimeoutSeconds = domain.DefaultSubagentTimeoutSeconds
 	}
@@ -913,14 +933,19 @@ func (s *Store) GetSystemSettings(ctx context.Context) (domain.SystemSettings, e
 
 func (s *Store) SaveSystemSettings(ctx context.Context, settings domain.SystemSettings) (domain.SystemSettings, error) {
 	settings.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,workspace_shell_mode,updated_at) VALUES(1,?,?,?,?,?,?)
+	imageTypesJSON, err := json.Marshal(settings.ChatImageAllowedTypes)
+	if err != nil {
+		return domain.SystemSettings{}, err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,updated_at) VALUES(1,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,
 approval_explanations_enabled=excluded.approval_explanations_enabled,
 subagent_model_provider_id=excluded.subagent_model_provider_id,
 subagent_timeout_seconds=excluded.subagent_timeout_seconds,
+chat_image_allowed_types_json=excluded.chat_image_allowed_types_json,
 workspace_shell_mode=excluded.workspace_shell_mode,updated_at=excluded.updated_at`,
 		settings.AgentMaxIterations, boolInt(settings.ApprovalExplanationsEnabled), settings.SubagentModelProviderID,
-		settings.SubagentTimeoutSeconds, settings.WorkspaceShellMode, formatTime(settings.UpdatedAt))
+		settings.SubagentTimeoutSeconds, string(imageTypesJSON), settings.WorkspaceShellMode, formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
@@ -1363,15 +1388,42 @@ func (s *Store) AppendPendingChatMessage(ctx context.Context, sessionID, role, c
 	return s.appendChatMessage(ctx, sessionID, role, content, "pending", toolName...)
 }
 
+func (s *Store) AppendPendingChatMessageWithAttachments(ctx context.Context, sessionID, role, content string, attachments []domain.ChatAttachment) (string, error) {
+	name := ""
+	return s.appendChatMessageWithAttachments(ctx, sessionID, role, content, "pending", name, attachments)
+}
+
 func (s *Store) appendChatMessage(ctx context.Context, sessionID, role, content, status string, toolName ...string) (string, error) {
 	name := ""
 	if len(toolName) > 0 {
 		name = toolName[0]
 	}
+	return s.appendChatMessageWithAttachments(ctx, sessionID, role, content, status, name, nil)
+}
+
+func (s *Store) appendChatMessageWithAttachments(ctx context.Context, sessionID, role, content, status, toolName string, attachments []domain.ChatAttachment) (string, error) {
 	id := ids.New("msg")
-	_, err := s.db.ExecContext(ctx, `INSERT INTO chat_messages(id,session_id,role,content,tool_name,status,created_at)
-VALUES(?,?,?,?,?,?,?)`, id, sessionID, role, content, name, status, formatTime(time.Now().UTC()))
+	now := formatTime(time.Now().UTC())
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO chat_messages(id,session_id,role,content,tool_name,status,created_at)
+VALUES(?,?,?,?,?,?,?)`, id, sessionID, role, content, toolName, status, now); err != nil {
+		return "", err
+	}
+	for _, attachment := range attachments {
+		attachmentID := attachment.ID
+		if attachmentID == "" {
+			attachmentID = ids.New("image")
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO chat_attachments(id,message_id,name,mime_type,size_bytes,data,created_at)
+VALUES(?,?,?,?,?,?,?)`, attachmentID, id, attachment.Name, attachment.MIMEType, len(attachment.Data), attachment.Data, now); err != nil {
+			return "", err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -1517,8 +1569,8 @@ func (s *Store) ListChatContextMessages(ctx context.Context, sessionID string, l
 	if limit <= 0 || limit > 1000 {
 		limit = 500
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT role,content,tool_name,status,created_at FROM (
-SELECT role,content,tool_name,status,created_at FROM chat_messages
+	rows, err := s.db.QueryContext(ctx, `SELECT id,role,content,tool_name,status,created_at FROM (
+SELECT id,role,content,tool_name,status,created_at FROM chat_messages
 WHERE session_id=? AND role IN ('user','assistant','tool') AND status IN ('completed','failed')
 ORDER BY created_at DESC LIMIT ?)
 ORDER BY created_at`, sessionID, limit+1)
@@ -1530,7 +1582,7 @@ ORDER BY created_at`, sessionID, limit+1)
 	for rows.Next() {
 		var message domain.ChatMessage
 		var created string
-		if err := rows.Scan(&message.Role, &message.Content, &message.ToolName, &message.Status, &created); err != nil {
+		if err := rows.Scan(&message.ID, &message.Role, &message.Content, &message.ToolName, &message.Status, &created); err != nil {
 			return nil, false, err
 		}
 		message.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -1539,9 +1591,15 @@ ORDER BY created_at`, sessionID, limit+1)
 	if err := rows.Err(); err != nil {
 		return nil, false, err
 	}
+	if err := rows.Close(); err != nil {
+		return nil, false, err
+	}
 	truncated := len(result) > limit
 	if truncated {
 		result = result[len(result)-limit:]
+	}
+	if err := s.loadChatAttachments(ctx, result, true); err != nil {
+		return nil, false, err
 	}
 	return result, truncated, nil
 }
@@ -1554,8 +1612,8 @@ func (s *Store) listChatMessages(ctx context.Context, sessionID string, limit in
 	if modelOnly {
 		filter = " AND role IN ('user','assistant') AND status='completed'"
 	}
-	query := `SELECT role,content,tool_name,status,created_at FROM (
-SELECT role,content,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at DESC LIMIT ?)
+	query := `SELECT id,role,content,tool_name,status,created_at FROM (
+SELECT id,role,content,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at DESC LIMIT ?)
 ORDER BY created_at`
 	rows, err := s.db.QueryContext(ctx, query, sessionID, limit)
 	if err != nil {
@@ -1566,13 +1624,70 @@ ORDER BY created_at`
 	for rows.Next() {
 		var message domain.ChatMessage
 		var created string
-		if err := rows.Scan(&message.Role, &message.Content, &message.ToolName, &message.Status, &created); err != nil {
+		if err := rows.Scan(&message.ID, &message.Role, &message.Content, &message.ToolName, &message.Status, &created); err != nil {
 			return nil, err
 		}
 		message.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		result = append(result, message)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := s.loadChatAttachments(ctx, result, false); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Store) loadChatAttachments(ctx context.Context, messages []domain.ChatMessage, includeData bool) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	messageIndex := make(map[string]int, len(messages))
+	placeholders := make([]string, 0, len(messages))
+	args := make([]any, 0, len(messages))
+	for index := range messages {
+		messageIndex[messages[index].ID] = index
+		placeholders = append(placeholders, "?")
+		args = append(args, messages[index].ID)
+	}
+	dataColumn := "NULL"
+	if includeData {
+		dataColumn = "data"
+	}
+	query := `SELECT id,message_id,name,mime_type,size_bytes,` + dataColumn + ` FROM chat_attachments WHERE message_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY created_at`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var attachment domain.ChatAttachment
+		if err := rows.Scan(&attachment.ID, &attachment.MessageID, &attachment.Name, &attachment.MIMEType, &attachment.SizeBytes, &attachment.Data); err != nil {
+			return err
+		}
+		if index, ok := messageIndex[attachment.MessageID]; ok {
+			messages[index].Attachments = append(messages[index].Attachments, attachment)
+		}
+	}
+	return rows.Err()
+}
+
+func (s *Store) GetChatAttachment(ctx context.Context, sessionID, attachmentID string) (domain.ChatAttachment, error) {
+	var attachment domain.ChatAttachment
+	err := s.db.QueryRowContext(ctx, `SELECT attachments.id,attachments.message_id,attachments.name,attachments.mime_type,attachments.size_bytes,attachments.data
+FROM chat_attachments AS attachments
+JOIN chat_messages AS messages ON messages.id=attachments.message_id
+WHERE attachments.id=? AND messages.session_id=?`, attachmentID, sessionID).Scan(
+		&attachment.ID, &attachment.MessageID, &attachment.Name, &attachment.MIMEType, &attachment.SizeBytes, &attachment.Data,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ChatAttachment{}, ErrNotFound
+	}
+	return attachment, err
 }
 
 func (s *Store) ListChatSessions(ctx context.Context, limit int) ([]domain.ChatSession, error) {
@@ -1581,9 +1696,9 @@ func (s *Store) ListChatSessions(ctx context.Context, limit int) ([]domain.ChatS
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT messages.session_id,
-  COALESCE((SELECT substr(first.content,1,80) FROM chat_messages AS first
+  COALESCE(NULLIF((SELECT trim(substr(first.content,1,80)) FROM chat_messages AS first
     WHERE first.session_id=messages.session_id AND first.role='user'
-    ORDER BY first.created_at ASC LIMIT 1),'New conversation') AS title,
+    ORDER BY first.created_at ASC LIMIT 1),''),'Image') AS title,
   count(*),max(messages.created_at)
 FROM chat_messages AS messages
 GROUP BY messages.session_id

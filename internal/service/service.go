@@ -110,6 +110,13 @@ func (s *Service) ListChatMessages(ctx context.Context, sessionID string, limit 
 	return s.store.ListChatMessages(ctx, sessionID, limit)
 }
 
+func (s *Service) GetChatAttachment(ctx context.Context, sessionID, attachmentID string) (domain.ChatAttachment, error) {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(attachmentID) == "" {
+		return domain.ChatAttachment{}, store.ErrNotFound
+	}
+	return s.store.GetChatAttachment(ctx, sessionID, attachmentID)
+}
+
 func (s *Service) DeleteChatSession(ctx context.Context, sessionID, actor string) error {
 	if err := s.store.DeleteChatSession(ctx, sessionID); err != nil {
 		return err
@@ -329,6 +336,28 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 		}
 		current.SubagentTimeoutSeconds = *input.SubagentTimeoutSeconds
 	}
+	if input.ChatImageAllowedTypes != nil {
+		allowed := map[string]struct{}{
+			"image/png": {}, "image/jpeg": {}, "image/webp": {}, "image/gif": {},
+		}
+		seen := make(map[string]struct{}, len(input.ChatImageAllowedTypes))
+		normalized := make([]string, 0, len(input.ChatImageAllowedTypes))
+		for _, value := range input.ChatImageAllowedTypes {
+			value = strings.ToLower(strings.TrimSpace(value))
+			if _, ok := allowed[value]; !ok {
+				return domain.SystemSettings{}, fmt.Errorf("unsupported chat image type %q", value)
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			normalized = append(normalized, value)
+		}
+		if len(normalized) == 0 {
+			return domain.SystemSettings{}, fmt.Errorf("at least one chat image type is required")
+		}
+		current.ChatImageAllowedTypes = normalized
+	}
 	if input.WorkspaceShellMode != nil {
 		mode := strings.ToLower(strings.TrimSpace(*input.WorkspaceShellMode))
 		switch mode {
@@ -345,7 +374,8 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 	s.audit(ctx, "", "system_settings_updated", actor, map[string]any{
 		"agent_max_iterations": saved.AgentMaxIterations, "approval_explanations_enabled": saved.ApprovalExplanationsEnabled,
 		"subagent_model_provider_id": saved.SubagentModelProviderID, "subagent_timeout_seconds": saved.SubagentTimeoutSeconds,
-		"workspace_shell_mode": saved.WorkspaceShellMode,
+		"chat_image_allowed_types": saved.ChatImageAllowedTypes,
+		"workspace_shell_mode":     saved.WorkspaceShellMode,
 	})
 	return s.decorateWorkspaceShellSettings(saved), nil
 }

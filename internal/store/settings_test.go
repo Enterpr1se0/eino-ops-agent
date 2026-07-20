@@ -49,6 +49,9 @@ VALUES(1,20,1,0,'2026-01-01T00:00:00Z')`); err != nil {
 	if settings.SubagentTimeoutSeconds != domain.DefaultSubagentTimeoutSeconds || settings.SubagentModelProviderID != "" {
 		t.Fatalf("legacy settings did not receive subagent defaults: %#v", settings)
 	}
+	if len(settings.ChatImageAllowedTypes) != len(domain.DefaultChatImageAllowedTypes) {
+		t.Fatalf("legacy settings did not receive chat image formats: %#v", settings)
+	}
 	settings.ApprovalExplanationsEnabled = true
 	settings.SubagentModelProviderID = "model_fixture"
 	settings.SubagentTimeoutSeconds = 45

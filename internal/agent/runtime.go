@@ -377,6 +377,10 @@ func (r *Runtime) TestProvider(ctx context.Context, cfg config.Model) (TestResul
 }
 
 func (r *Runtime) Query(ctx context.Context, sessionID, query string, emit func(Event)) (answer string, queryErr error) {
+	return r.QueryWithAttachments(ctx, sessionID, query, nil, emit)
+}
+
+func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query string, attachments []domain.ChatAttachment, emit func(Event)) (answer string, queryErr error) {
 	if r == nil {
 		return "", ErrUnavailable
 	}
@@ -399,7 +403,11 @@ func (r *Runtime) Query(ctx context.Context, sessionID, query string, emit func(
 	reasoningSegments := 0
 	toolResults := 0
 	modelAttempts := 0
-	logger.InfoContext(ctx, "agent query started", "query_bytes", len(query))
+	var attachmentBytes int64
+	for _, attachment := range attachments {
+		attachmentBytes += int64(len(attachment.Data))
+	}
+	logger.InfoContext(ctx, "agent query started", "query_bytes", len(query), "image_count", len(attachments), "image_bytes", attachmentBytes)
 	defer func() {
 		attrs := []any{
 			"duration_ms", time.Since(started).Milliseconds(), "answer_bytes", len(answer),
@@ -423,15 +431,16 @@ func (r *Runtime) Query(ctx context.Context, sessionID, query string, emit func(
 	if err != nil {
 		return "", err
 	}
-	messages, contextStats := buildModelContext(history, query)
+	messages, contextStats := buildMultimodalModelContext(history, domain.ChatMessage{Role: "user", Content: query, Attachments: attachments})
 	contextStats.RecordLimitReached = recordLimitReached
 	logger.InfoContext(ctx, "agent model context prepared",
 		"stored_records", contextStats.StoredRecords, "stored_turns", contextStats.StoredTurns,
 		"included_turns", contextStats.IncludedTurns, "model_messages", len(messages),
 		"tool_results", contextStats.ToolResults, "context_bytes", contextStats.Bytes,
+		"images", contextStats.Images, "image_bytes", contextStats.ImageBytes,
 		"truncated", contextStats.Truncated || contextStats.RecordLimitReached,
 	)
-	userMessageID, err := r.store.AppendPendingChatMessage(ctx, sessionID, "user", query)
+	userMessageID, err := r.store.AppendPendingChatMessageWithAttachments(ctx, sessionID, "user", query, attachments)
 	if err != nil {
 		return "", err
 	}

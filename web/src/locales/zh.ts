@@ -88,6 +88,7 @@ const zh = {
     runnerReady: '可用', modelUnavailable: '不可用', commandAgent: '启用命令说明', commandAgentHelp: '说明影响、风险和回滚方法。', modelProvider: '模型', requestTimeout: '超时时间',
     subagentProvider: '命令说明模型', subagentProviderHelp: '可使用单独的模型提供商。',
     activeMain: '主模型', timeout: '超时时间', timeoutHelp: '单次请求的最长时间。', seconds: '{{count}} 秒',
+	chatImages: '会话图片格式',
     workspaceShell: 'Workspace Shell 执行', workspaceShellHelp: '选择禁用本地 Workspace Shell、使用沙盒，或经审批后调用宿主机 Shell。',
     shellDisabled: '禁用', shellSandbox: 'Bubblewrap 沙盒', shellHost: '宿主机 Shell · 每次审批', shellUnsupported: '当前主机没有可用的 Bubblewrap。',
     shellBackend: 'Workspace Shell', detecting: '检测中', sandbox: '沙盒', sandboxAvailable: 'Bubblewrap · 无网络', unavailableHost: '不可用', hostShell: '宿主机', systemShell: '系统 Shell', fullAuthority: '完整权限', noShell: '没有可用的 Shell', removeShell: '不允许执行 Shell', hostWarning: '可访问宿主机文件和网络', hostWarningText: '每次执行都需要单独审批；只读 Workspace 无法使用。', sandboxWarning: '沙盒不可用', sandboxWarningText: 'Shell 执行会失败，不会改用宿主机。',
@@ -117,6 +118,7 @@ const zh = {
     deleteConfirm: '删除会话“{{title}}”？', cannotDelete: 'Agent 仍在运行', stopFailed: '无法停止 Agent：{{message}}',
     stopped: '操作员已在完成前停止 Agent 运行。', agentError: 'Agent 错误',
     operator: '操作员', failedContext: '未进入后续上下文', processing: '处理中', blockedImage: '[已阻止图片：{{alt}}]',
+	addImages: '添加图片', removeImage: '移除图片', imageTypeRejected: '部分图片格式未启用。',
     reasoning: '思考过程', reasoningActive: '思考中', reasoningFallback: '正在思考...',
   },
   workspace: {

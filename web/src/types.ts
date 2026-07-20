@@ -137,11 +137,20 @@ export interface ChatSession {
 }
 
 export interface ChatMessage {
+	id: string
   role: 'user' | 'assistant' | 'tool' | 'reasoning'
   content: string
   tool_name?: string
   status: 'pending' | 'completed' | 'failed'
+	attachments?: ChatAttachment[]
   created_at: string
+}
+
+export interface ChatAttachment {
+	id: string
+	name: string
+	mime_type: string
+	size_bytes: number
 }
 
 export interface AgentPlanStep {
@@ -252,6 +261,7 @@ export interface SystemSettings {
   approval_explanations_enabled: boolean
   subagent_model_provider_id: string
   subagent_timeout_seconds: number
+	chat_image_allowed_types: string[]
   workspace_shell_mode: WorkspaceShellMode
   workspace_shell_platform: string
   workspace_shell_backend?: 'sandbox' | 'host'
@@ -268,6 +278,7 @@ export interface SystemSettingsInput {
   approval_explanations_enabled?: boolean
   subagent_model_provider_id?: string
   subagent_timeout_seconds?: number
+	chat_image_allowed_types?: string[]
   workspace_shell_mode?: WorkspaceShellMode
 }
 
