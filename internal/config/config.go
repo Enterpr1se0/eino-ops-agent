@@ -25,9 +25,8 @@ type Config struct {
 	Limits               Limits        `yaml:"limits"`
 	AuditRetention       time.Duration `yaml:"-"`
 	WebAuth              WebAuth       `yaml:"web_auth"`
-	DefaultWorkspaceDir  string        `yaml:"default_workspace_dir"`
+	WorkspaceDir         string        `yaml:"workspace_dir"`
 	WorkspaceSandboxPath string        `yaml:"workspace_sandbox_path"`
-	Workspaces           []Workspace   `yaml:"workspaces"`
 	Validators           []Validator   `yaml:"validators"`
 }
 
@@ -38,10 +37,9 @@ type WebAuth struct {
 }
 
 type Workspace struct {
-	ID         string `yaml:"id" json:"id"`
-	Root       string `yaml:"root" json:"-"`
-	Access     string `yaml:"access" json:"access"`
-	AutoCreate bool   `yaml:"-" json:"-"`
+	ID     string
+	Root   string
+	Access string
 }
 
 type Validator struct {
@@ -68,9 +66,12 @@ type SSH struct {
 }
 
 type Model struct {
-	APIKey  string `yaml:"-"`
-	BaseURL string `yaml:"base_url"`
-	Name    string `yaml:"name"`
+	APIKey        string `yaml:"-"`
+	BaseURL       string `yaml:"base_url"`
+	Name          string `yaml:"name"`
+	ProxyURL      string `yaml:"-"`
+	ProxyUsername string `yaml:"-"`
+	ProxyPassword string `yaml:"-"`
 }
 
 type Limits struct {
@@ -106,7 +107,7 @@ func Default() Config {
 		},
 		AuditRetention:       30 * 24 * time.Hour,
 		WebAuth:              WebAuth{SessionTTL: 12 * time.Hour},
-		DefaultWorkspaceDir:  "workspace",
+		WorkspaceDir:         "workspace",
 		WorkspaceSandboxPath: "bwrap",
 	}
 }
@@ -129,17 +130,6 @@ func Load(path string) (Config, error) {
 		}
 	}
 	applyEnv(&cfg)
-	if len(cfg.Workspaces) == 0 && strings.TrimSpace(cfg.DefaultWorkspaceDir) != "" {
-		root := filepath.Clean(strings.TrimSpace(cfg.DefaultWorkspaceDir))
-		if !filepath.IsAbs(root) {
-			absolute, err := filepath.Abs(root)
-			if err != nil {
-				return Config{}, fmt.Errorf("resolve default workspace: %w", err)
-			}
-			root = absolute
-		}
-		cfg.Workspaces = []Workspace{{ID: "default", Root: root, Access: "read_write", AutoCreate: true}}
-	}
 	if cfg.DatabasePath == "" || (cfg.DataDir != defaultDataDir && cfg.DatabasePath == defaultDatabasePath && os.Getenv("OPS_AGENT_DATABASE") == "") {
 		cfg.DatabasePath = filepath.Join(cfg.DataDir, "ops-agent.db")
 	}
@@ -149,6 +139,18 @@ func Load(path string) (Config, error) {
 	if cfg.Logging.File == "" || (cfg.DataDir != defaultDataDir && cfg.Logging.File == defaultLogFile && os.Getenv("OPS_AGENT_LOG_FILE") == "") {
 		cfg.Logging.File = filepath.Join(cfg.DataDir, "ops-agent.log")
 	}
+	workspaceDir := filepath.Clean(strings.TrimSpace(cfg.WorkspaceDir))
+	if workspaceDir == "." && strings.TrimSpace(cfg.WorkspaceDir) == "" {
+		return Config{}, fmt.Errorf("workspace_dir is required")
+	}
+	if !filepath.IsAbs(workspaceDir) {
+		absolute, err := filepath.Abs(workspaceDir)
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve workspace_dir: %w", err)
+		}
+		workspaceDir = absolute
+	}
+	cfg.WorkspaceDir = workspaceDir
 	if err := validateOperationsConfig(&cfg); err != nil {
 		return Config{}, err
 	}
@@ -157,31 +159,8 @@ func Load(path string) (Config, error) {
 
 func validateOperationsConfig(cfg *Config) error {
 	dataRoot, _ := filepath.Abs(cfg.DataDir)
-	seenWorkspaces := make(map[string]struct{}, len(cfg.Workspaces))
-	for index := range cfg.Workspaces {
-		workspace := &cfg.Workspaces[index]
-		workspace.ID = strings.TrimSpace(workspace.ID)
-		workspace.Root = filepath.Clean(strings.TrimSpace(workspace.Root))
-		workspace.Access = strings.TrimSpace(workspace.Access)
-		if workspace.Access == "" {
-			workspace.Access = "read_only"
-		}
-		if !regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`).MatchString(workspace.ID) {
-			return fmt.Errorf("workspace %d has invalid id", index+1)
-		}
-		if _, exists := seenWorkspaces[workspace.ID]; exists {
-			return fmt.Errorf("duplicate workspace id %q", workspace.ID)
-		}
-		seenWorkspaces[workspace.ID] = struct{}{}
-		if !filepath.IsAbs(workspace.Root) {
-			return fmt.Errorf("workspace %q root must be absolute", workspace.ID)
-		}
-		if workspace.Access != "read_only" && workspace.Access != "read_write" {
-			return fmt.Errorf("workspace %q access must be read_only or read_write", workspace.ID)
-		}
-		if sameOrWithin(workspace.Root, dataRoot) || sameOrWithin(dataRoot, workspace.Root) {
-			return fmt.Errorf("workspace %q cannot overlap the control-plane data directory", workspace.ID)
-		}
+	if sameOrWithin(cfg.WorkspaceDir, dataRoot) || sameOrWithin(dataRoot, cfg.WorkspaceDir) {
+		return fmt.Errorf("workspace_dir cannot overlap the application data directory")
 	}
 	seenValidators := make(map[string]struct{}, len(cfg.Validators))
 	for index := range cfg.Validators {
@@ -226,7 +205,7 @@ func applyEnv(cfg *Config) {
 	setString(&cfg.MasterKey, "OPS_AGENT_MASTER_KEY")
 	setString(&cfg.WebAuth.BootstrapPassword, "OPS_AGENT_ADMIN_PASSWORD")
 	setBool(&cfg.WebAuth.SecureCookies, "OPS_AGENT_SECURE_COOKIES")
-	setString(&cfg.DefaultWorkspaceDir, "OPS_AGENT_DEFAULT_WORKSPACE")
+	setString(&cfg.WorkspaceDir, "OPS_AGENT_WORKSPACE_DIR")
 	setString(&cfg.WorkspaceSandboxPath, "OPS_AGENT_WORKSPACE_SANDBOX")
 	setString(&cfg.Model.APIKey, "OPENAI_API_KEY")
 	setString(&cfg.Model.BaseURL, "OPENAI_BASE_URL")

@@ -21,7 +21,7 @@ import (
 func newWorkspaceService(t *testing.T, access string) (*Service, string) {
 	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
+	workspaceRoot := t.TempDir()
 	dataDir := t.TempDir()
 	st, err := store.Open(ctx, filepath.Join(dataDir, "workspace.db"))
 	if err != nil {
@@ -35,8 +35,84 @@ func newWorkspaceService(t *testing.T, access string) (*Service, string) {
 	engine, _ := policy.Load("")
 	cfg := config.Default()
 	cfg.DataDir = dataDir
-	cfg.Workspaces = []config.Workspace{{ID: "project", Root: root, Access: access}}
-	return New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg), root
+	svc := New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	if err := svc.InitializeWorkspaces(ctx, workspaceRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteAdminWorkspace(ctx, "default", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateAdminWorkspace(ctx, domain.WorkspaceInput{ID: "project", Access: access}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	return svc, filepath.Join(workspaceRoot, "project")
+}
+
+func TestWorkspaceAdminCreateUpdateAndRemove(t *testing.T) {
+	svc, projectRoot := newWorkspaceService(t, "read_write")
+	created, err := svc.CreateAdminWorkspace(context.Background(), domain.WorkspaceInput{ID: "docs", Access: "read_only"}, "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != "docs" || created.Access != "read_only" {
+		t.Fatalf("unexpected created workspace: %#v", created)
+	}
+	docsRoot := filepath.Join(filepath.Dir(projectRoot), "docs")
+	if info, err := os.Stat(docsRoot); err != nil || !info.IsDir() {
+		t.Fatalf("managed Workspace directory was not created: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(docsRoot, "preserved.txt"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := svc.UpdateAdminWorkspace(context.Background(), "project", domain.WorkspaceInput{ID: "project", Access: "read_only"}, "admin-web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Access != "read_only" {
+		t.Fatalf("workspace access was not updated: %#v", updated)
+	}
+	if _, err := svc.UploadWorkspaceFile(context.Background(), "project", "blocked.txt", "blocked.txt", strings.NewReader("x"), "admin-web"); err == nil || !strings.Contains(err.Error(), "read_only") {
+		t.Fatalf("updated read-only permission was not enforced: %v", err)
+	}
+	if err := svc.DeleteAdminWorkspace(context.Background(), "docs", "admin-web"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := svc.workspaceByID("docs"); ok {
+		t.Fatal("removed workspace remains active")
+	}
+	if _, err := os.Stat(filepath.Join(docsRoot, "preserved.txt")); err != nil {
+		t.Fatalf("removing registration deleted Workspace data: %v", err)
+	}
+	if _, err := svc.CreateAdminWorkspace(context.Background(), domain.WorkspaceInput{ID: "docs", Access: "read_write"}, "admin-web"); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(filepath.Join(docsRoot, "preserved.txt")); err != nil || string(content) != "keep" {
+		t.Fatalf("re-adding Workspace did not reuse its directory: %q err=%v", content, err)
+	}
+}
+
+func TestWorkspaceManagedDirectoriesRejectUnsafeNamesAndSymlinks(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	for _, id := range []string{".", "..", "CON", "com1.txt", "trailing."} {
+		if _, err := svc.CreateAdminWorkspace(context.Background(), domain.WorkspaceInput{ID: id, Access: "read_write"}, "admin-web"); err == nil {
+			t.Fatalf("unsafe Workspace id %q was accepted", id)
+		}
+	}
+	if _, err := svc.CreateAdminWorkspace(context.Background(), domain.WorkspaceInput{ID: "PROJECT", Access: "read_write"}, "admin-web"); err == nil {
+		t.Fatal("case-insensitive duplicate Workspace id was accepted")
+	}
+
+	target := t.TempDir()
+	linkedRoot := filepath.Join(filepath.Dir(root), "linked")
+	if err := os.Symlink(target, linkedRoot); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+	if err := svc.InitializeWorkspaces(context.Background(), linkedRoot); err == nil || !strings.Contains(err.Error(), "symbolic links") {
+		t.Fatalf("symlinked managed root was accepted: %v", err)
+	}
+	if _, err := svc.CreateAdminWorkspace(context.Background(), domain.WorkspaceInput{ID: "linked", Access: "read_write"}, "admin-web"); err == nil || !strings.Contains(err.Error(), "symbolic links") {
+		t.Fatalf("symlinked Workspace directory was accepted: %v", err)
+	}
 }
 
 func TestWorkspaceReadPatchAndTraversalProtection(t *testing.T) {
@@ -60,7 +136,7 @@ func TestWorkspaceReadPatchAndTraversalProtection(t *testing.T) {
 	if pending.Status != "approval_required" {
 		t.Fatalf("workspace write skipped approval: %#v", pending)
 	}
-	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "", "reviewed", "operator")
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
 	if err != nil || approved.Status != "completed" {
 		t.Fatalf("workspace patch failed: %#v err=%v", approved, err)
 	}
@@ -83,7 +159,7 @@ func TestWorkspacePatchDetectsVersionConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.Approve(context.Background(), pending.ApprovalID, "", "reviewed", "operator")
+	result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
 	if err == nil || result.ExitCode != 73 {
 		t.Fatalf("expected conflict, got %#v err=%v", result, err)
 	}
@@ -136,7 +212,7 @@ func TestWorkspacePostValidationFailureRestoresOriginalAtomically(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.Approve(context.Background(), pending.ApprovalID, "", "reviewed", "operator")
+	result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
 	if err == nil || result.ExitCode != 74 {
 		t.Fatalf("expected post-validation rollback, result=%#v err=%v", result, err)
 	}
@@ -186,8 +262,8 @@ func TestWorkspaceAdminUploadIsAtomicAndNeverOverwrites(t *testing.T) {
 		}
 	}
 	capabilities := svc.ListAdminWorkspaceCapabilities()
-	if len(capabilities) != 1 || capabilities[0].Root != root {
-		t.Fatalf("admin capabilities did not include the root: %#v", capabilities)
+	if len(capabilities) != 1 || capabilities[0].ID != "project" {
+		t.Fatalf("unexpected admin capabilities: %#v", capabilities)
 	}
 	preview, err := svc.PreviewAdminWorkspaceFile("project", "main.go")
 	if err != nil {
@@ -200,26 +276,22 @@ func TestWorkspaceAdminUploadIsAtomicAndNeverOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !deleted.Recoverable || deleted.TrashID == "" || deleted.Path != "main.go" || deleted.Type != "file" || deleted.SHA256 != wantSHA {
+	if deleted.Path != "main.go" || deleted.Type != "file" || deleted.SHA256 != wantSHA {
 		t.Fatalf("unexpected delete result: %#v", deleted)
 	}
 	if _, err := os.Stat(filepath.Join(root, "main.go")); !os.IsNotExist(err) {
 		t.Fatalf("deleted file remains at its original path: %v", err)
 	}
-	recovered, err := os.ReadFile(filepath.Join(root, ".opspilot-trash", deleted.TrashID))
-	if err != nil || !bytes.Equal(recovered, content) {
-		t.Fatalf("recovery copy mismatch: content=%q err=%v", recovered, err)
-	}
 	listing, err = svc.ListAdminWorkspaceFiles("project", ".")
 	if err != nil || len(listing.Entries) != 0 {
-		t.Fatalf("recovery directory leaked into listing: %#v err=%v", listing, err)
+		t.Fatalf("deleted file remains in listing: %#v err=%v", listing, err)
 	}
-	if _, err := svc.PreviewAdminWorkspaceFile("project", filepath.Join(".opspilot-trash", deleted.TrashID)); err == nil || !strings.Contains(err.Error(), "sensitive") {
-		t.Fatalf("recovery directory was accessible through Web preview: %v", err)
+	if _, err := os.Stat(filepath.Join(root, ".opspilot-trash")); !os.IsNotExist(err) {
+		t.Fatalf("delete created a recovery directory: %v", err)
 	}
 }
 
-func TestWorkspaceAdminDeleteMovesDirectoryToRecoveryArea(t *testing.T) {
+func TestWorkspaceAdminDeletePermanentlyRemovesDirectory(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
 	directory := filepath.Join(root, "build")
 	if err := os.MkdirAll(filepath.Join(directory, "assets"), 0o755); err != nil {
@@ -233,15 +305,11 @@ func TestWorkspaceAdminDeleteMovesDirectoryToRecoveryArea(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !deleted.Recoverable || deleted.TrashID == "" || deleted.Path != "build" || deleted.Type != "directory" || deleted.Size != 0 || deleted.SHA256 != "" {
+	if deleted.Path != "build" || deleted.Type != "directory" || deleted.Size != 0 || deleted.SHA256 != "" {
 		t.Fatalf("unexpected directory delete result: %#v", deleted)
 	}
 	if _, err := os.Stat(directory); !os.IsNotExist(err) {
 		t.Fatalf("deleted directory remains at its original path: %v", err)
-	}
-	recovered, err := os.ReadFile(filepath.Join(root, ".opspilot-trash", deleted.TrashID, "assets", "app.js"))
-	if err != nil || string(recovered) != "console.log('ok')\n" {
-		t.Fatalf("recovered directory content mismatch: content=%q err=%v", recovered, err)
 	}
 	if _, err := svc.DeleteAdminWorkspaceEntry(context.Background(), "project", ".", "admin-web"); err == nil || !strings.Contains(err.Error(), "root cannot be deleted") {
 		t.Fatalf("Workspace root deletion was accepted: %v", err)
@@ -288,7 +356,7 @@ func TestWorkspaceDirectUploadUsesOneVersionBoundApproval(t *testing.T) {
 	if strings.Contains(approval.RequestJSON, root) || !strings.Contains(approval.RequestJSON, digest) || !strings.Contains(approval.RequestJSON, `"mode":"workspace_upload"`) {
 		t.Fatalf("approval did not bind the safe source version without exposing its root: %s", approval.RequestJSON)
 	}
-	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "", "reviewed exact source and destination", "operator")
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed exact source and destination", "operator")
 	if err != nil || approved.Status != "completed" {
 		t.Fatalf("approved direct upload failed: result=%#v err=%v", approved, err)
 	}
@@ -303,7 +371,7 @@ func TestWorkspaceDirectUploadUsesOneVersionBoundApproval(t *testing.T) {
 	if err := os.WriteFile(localPath, []byte("version: 2\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Approve(context.Background(), stale.ApprovalID, "", "reviewed before source changed", "operator"); err == nil || !strings.Contains(err.Error(), "version conflict") {
+	if _, err := svc.Approve(context.Background(), stale.ApprovalID, "reviewed before source changed", "operator"); err == nil || !strings.Contains(err.Error(), "version conflict") {
 		t.Fatalf("changed Workspace source was uploaded after approval: %v", err)
 	}
 	if len(transport.calls) != 1 {
@@ -330,7 +398,7 @@ func TestWorkspaceShellRunsInApprovalGatedSandbox(t *testing.T) {
 	if pending.Status != "approval_required" || pending.Risk != domain.RiskChange {
 		t.Fatalf("workspace shell skipped exact approval: %#v", pending)
 	}
-	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "", "reviewed sandboxed extraction", "operator")
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed sandboxed extraction", "operator")
 	if err != nil || approved.Status != "completed" {
 		t.Fatalf("workspace shell failed: %#v err=%v", approved, err)
 	}
@@ -367,7 +435,7 @@ func TestReadOnlyWorkspaceShellCannotPersistChanges(t *testing.T) {
 	if pending.Status != "approval_required" {
 		t.Fatalf("workspace shell skipped approval: %#v", pending)
 	}
-	result, err := svc.Approve(context.Background(), pending.ApprovalID, "", "reviewed read-only test", "operator")
+	result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed read-only test", "operator")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,10 +466,10 @@ func TestHostWorkspaceShellRequiresFreshOneTimeApproval(t *testing.T) {
 	if pending.Status != "approval_required" || !containsString(pending.PolicyHits, "workspace_host_shell") {
 		t.Fatalf("host shell did not request explicit approval: %#v", pending)
 	}
-	if _, err := svc.ApproveWithScope(context.Background(), pending.ApprovalID, "", "reviewed", "session", "operator"); err == nil || !strings.Contains(err.Error(), "one-time approval") {
+	if _, err := svc.ApproveWithScope(context.Background(), pending.ApprovalID, "reviewed", "session", "operator"); err == nil || !strings.Contains(err.Error(), "one-time approval") {
 		t.Fatalf("host shell accepted session approval: %v", err)
 	}
-	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "", "reviewed once", "operator")
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed once", "operator")
 	if err != nil || approved.Status != "completed" {
 		t.Fatalf("one-time host shell approval failed: %#v err=%v", approved, err)
 	}
@@ -448,7 +516,7 @@ func TestHostWorkspaceShellRejectsReadOnlyDisabledAndBackendSwitch(t *testing.T)
 	}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "", "reviewed before setting changed", "operator"); err == nil || !strings.Contains(err.Error(), "disabled") {
+	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed before setting changed", "operator"); err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("approved host shell ran after backend was disabled: %v", err)
 	}
 	if _, err := svc.RunWorkspaceShell(context.Background(), "project", "pwd", ".", nil, 10, "inspect", "none", "none", "test"); err == nil || !strings.Contains(err.Error(), "disabled") {

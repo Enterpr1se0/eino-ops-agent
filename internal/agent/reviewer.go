@@ -44,9 +44,11 @@ func buildReadOnlySubagent(ctx context.Context, cfg config.Model, requestTimeout
 	if requestTimeout <= 0 {
 		requestTimeout = time.Duration(domain.DefaultSubagentTimeoutSeconds) * time.Second
 	}
-	chatModel, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, Timeout: requestTimeout + subagentTransportTimeoutGrace,
-	})
+	modelCfg, err := chatModelConfig(cfg, requestTimeout+subagentTransportTimeoutGrace)
+	if err != nil {
+		return nil, err
+	}
+	chatModel, err := openai.NewChatModel(ctx, modelCfg)
 	if err != nil {
 		return nil, err
 	}

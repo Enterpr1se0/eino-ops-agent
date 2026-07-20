@@ -215,6 +215,94 @@ ON CONFLICT(name) DO UPDATE SET enabled=excluded.enabled,updated_at=excluded.upd
 	return err
 }
 
+func (s *Store) InitializeWorkspaces(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var initialized int
+	err = tx.QueryRowContext(ctx, `SELECT initialized FROM workspace_state WHERE id=1`).Scan(&initialized)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if errors.Is(err, sql.ErrNoRows) || initialized == 0 {
+		now := formatTime(time.Now().UTC())
+		if _, err := tx.ExecContext(ctx, `INSERT INTO workspaces(id,access,created_at,updated_at) VALUES('default','read_write',?,?)
+ON CONFLICT(id) DO NOTHING`, now, now); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO workspace_state(id,initialized) VALUES(1,1)
+ON CONFLICT(id) DO UPDATE SET initialized=1`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ListWorkspaces(ctx context.Context) ([]domain.Workspace, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,access,created_at,updated_at FROM workspaces ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]domain.Workspace, 0)
+	for rows.Next() {
+		workspace, err := scanWorkspace(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, workspace)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) CreateWorkspace(ctx context.Context, workspace domain.Workspace) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO workspaces(id,access,created_at,updated_at) VALUES(?,?,?,?)`,
+		workspace.ID, workspace.Access, formatTime(workspace.CreatedAt), formatTime(workspace.UpdatedAt))
+	return err
+}
+
+func (s *Store) UpdateWorkspace(ctx context.Context, workspace domain.Workspace) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE workspaces SET access=?,updated_at=? WHERE id=?`,
+		workspace.Access, formatTime(workspace.UpdatedAt), workspace.ID)
+	if err != nil {
+		return err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteWorkspace(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM workspaces WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func scanWorkspace(row scanner) (domain.Workspace, error) {
+	var workspace domain.Workspace
+	var created, updated string
+	err := row.Scan(&workspace.ID, &workspace.Access, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Workspace{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+	workspace.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	workspace.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return workspace, nil
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS hosts (
@@ -268,7 +356,6 @@ CREATE TABLE IF NOT EXISTS approvals (
   request_digest TEXT NOT NULL,
   risk TEXT NOT NULL,
   status TEXT NOT NULL,
-  challenge TEXT NOT NULL DEFAULT '',
   reason TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
@@ -373,6 +460,9 @@ CREATE TABLE IF NOT EXISTS model_providers (
   base_url TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL,
   api_key_cipher TEXT NOT NULL DEFAULT '',
+  proxy_url TEXT NOT NULL DEFAULT '',
+  proxy_username TEXT NOT NULL DEFAULT '',
+  proxy_password_cipher TEXT NOT NULL DEFAULT '',
   active INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -408,8 +498,34 @@ CREATE TABLE IF NOT EXISTS agent_tool_settings (
   enabled INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS workspaces (
+  id TEXT PRIMARY KEY,
+  access TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workspace_state (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  initialized INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS web_search_settings (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  enabled INTEGER NOT NULL DEFAULT 0,
+  provider TEXT NOT NULL DEFAULT 'tavily',
+  base_url TEXT NOT NULL DEFAULT 'https://api.tavily.com',
+  api_key_cipher TEXT NOT NULL DEFAULT '',
+  proxy_url TEXT NOT NULL DEFAULT '',
+  proxy_username TEXT NOT NULL DEFAULT '',
+  proxy_password_cipher TEXT NOT NULL DEFAULT '',
+  timeout_seconds INTEGER NOT NULL DEFAULT 20,
+  max_results INTEGER NOT NULL DEFAULT 10,
+  updated_at TEXT NOT NULL
+);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	if err := s.migrateManagedWorkspaces(ctx); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name='ssh_approval_status'`); err != nil {
@@ -433,6 +549,9 @@ CREATE TABLE IF NOT EXISTS agent_tool_settings (
 		`ALTER TABLE chat_messages ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE chat_messages ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'`,
 		`ALTER TABLE runs ADD COLUMN ai_review_json TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE model_providers ADD COLUMN proxy_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE model_providers ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE model_providers ADD COLUMN proxy_password_cipher TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
@@ -467,6 +586,51 @@ CASE WHEN subagent_reviews_enabled<>0 AND beginner_explanations_enabled<>0 THEN 
 		return err
 	}
 	return s.migrateNativeOnlyHosts(ctx)
+}
+
+func (s *Store) migrateManagedWorkspaces(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(workspaces)`)
+	if err != nil {
+		return err
+	}
+	hasRoot := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		hasRoot = hasRoot || name == "root"
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !hasRoot {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`DROP TABLE workspaces`,
+		`CREATE TABLE workspaces (
+  id TEXT PRIMARY KEY,
+  access TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`,
+		`DELETE FROM workspace_state`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migrate managed workspaces: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) migrateNativeOnlyHosts(ctx context.Context) error {
@@ -566,11 +730,13 @@ func (s *Store) UpsertModelProvider(ctx context.Context, provider domain.ModelPr
 	}
 	provider.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO model_providers(id,name,kind,base_url,model,api_key_cipher,active,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?)
+INSERT INTO model_providers(id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,active,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,base_url=excluded.base_url,
-model=excluded.model,api_key_cipher=excluded.api_key_cipher,updated_at=excluded.updated_at`,
+model=excluded.model,api_key_cipher=excluded.api_key_cipher,proxy_url=excluded.proxy_url,proxy_username=excluded.proxy_username,
+proxy_password_cipher=excluded.proxy_password_cipher,updated_at=excluded.updated_at`,
 		provider.ID, provider.Name, provider.Kind, provider.BaseURL, provider.Model, provider.APIKeyCipher,
+		provider.ProxyURL, provider.ProxyUsername, provider.ProxyPasswordCipher,
 		boolInt(provider.Active), formatTime(provider.CreatedAt), formatTime(provider.UpdatedAt))
 	if err != nil {
 		return domain.ModelProvider{}, err
@@ -579,19 +745,19 @@ model=excluded.model,api_key_cipher=excluded.api_key_cipher,updated_at=excluded.
 }
 
 func (s *Store) GetModelProvider(ctx context.Context, id string) (domain.ModelProvider, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,active,created_at,updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,active,created_at,updated_at
 FROM model_providers WHERE id=?`, id)
 	return scanModelProvider(row)
 }
 
 func (s *Store) ActiveModelProvider(ctx context.Context) (domain.ModelProvider, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,active,created_at,updated_at
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,active,created_at,updated_at
 FROM model_providers WHERE active=1 LIMIT 1`)
 	return scanModelProvider(row)
 }
 
 func (s *Store) ListModelProviders(ctx context.Context) ([]domain.ModelProvider, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,active,created_at,updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,kind,base_url,model,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,active,created_at,updated_at
 FROM model_providers ORDER BY active DESC,name`)
 	if err != nil {
 		return nil, err
@@ -783,12 +949,50 @@ workspace_shell_mode=excluded.workspace_shell_mode,updated_at=excluded.updated_a
 	return settings, nil
 }
 
+func (s *Store) GetWebSearchSettings(ctx context.Context) (domain.WebSearchSettings, error) {
+	var settings domain.WebSearchSettings
+	var enabled int
+	var updated string
+	err := s.db.QueryRowContext(ctx, `SELECT enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,updated_at
+FROM web_search_settings WHERE id=1`).Scan(
+		&enabled, &settings.Provider, &settings.BaseURL, &settings.APIKeyCipher, &settings.ProxyURL, &settings.ProxyUsername,
+		&settings.ProxyPasswordCipher, &settings.TimeoutSeconds, &settings.MaxResults, &updated,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.WebSearchSettings{
+			Provider: "tavily", BaseURL: domain.DefaultWebSearchBaseURL,
+			TimeoutSeconds: domain.DefaultWebSearchTimeoutSeconds, MaxResults: domain.DefaultWebSearchMaxResults,
+		}, nil
+	}
+	if err != nil {
+		return domain.WebSearchSettings{}, err
+	}
+	settings.Enabled = enabled != 0
+	settings.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return settings, nil
+}
+
+func (s *Store) SaveWebSearchSettings(ctx context.Context, settings domain.WebSearchSettings) (domain.WebSearchSettings, error) {
+	settings.UpdatedAt = time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO web_search_settings(id,enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,updated_at)
+VALUES(1,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,provider=excluded.provider,base_url=excluded.base_url,
+api_key_cipher=excluded.api_key_cipher,proxy_url=excluded.proxy_url,proxy_username=excluded.proxy_username,
+proxy_password_cipher=excluded.proxy_password_cipher,timeout_seconds=excluded.timeout_seconds,max_results=excluded.max_results,updated_at=excluded.updated_at`,
+		boolInt(settings.Enabled), settings.Provider, settings.BaseURL, settings.APIKeyCipher, settings.ProxyURL, settings.ProxyUsername,
+		settings.ProxyPasswordCipher, settings.TimeoutSeconds, settings.MaxResults, formatTime(settings.UpdatedAt))
+	if err != nil {
+		return domain.WebSearchSettings{}, err
+	}
+	return settings, nil
+}
+
 func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 	var provider domain.ModelProvider
 	var active int
 	var created, updated string
 	err := row.Scan(&provider.ID, &provider.Name, &provider.Kind, &provider.BaseURL, &provider.Model,
-		&provider.APIKeyCipher, &active, &created, &updated)
+		&provider.APIKeyCipher, &provider.ProxyURL, &provider.ProxyUsername, &provider.ProxyPasswordCipher, &active, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.ModelProvider{}, ErrNotFound
 	}
@@ -796,6 +1000,7 @@ func scanModelProvider(row scanner) (domain.ModelProvider, error) {
 		return domain.ModelProvider{}, err
 	}
 	provider.HasAPIKey = provider.APIKeyCipher != ""
+	provider.HasProxyPassword = provider.ProxyPasswordCipher != ""
 	provider.Active = active != 0
 	provider.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	provider.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
@@ -822,15 +1027,37 @@ sudo_mode,sudo_password_cipher,created_at,updated_at FROM hosts WHERE auth_type<
 }
 
 func (s *Store) DeleteHost(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM hosts WHERE id=?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return err
+	}
+	deletions := []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM session_approval_grants WHERE session_id IN (SELECT DISTINCT session_id FROM runs WHERE host_id=? AND session_id<>'')`, []any{id}},
+		{`DELETE FROM approvals WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
+		{`DELETE FROM file_operations WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
+		{`DELETE FROM tasks WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
+		{`DELETE FROM runs WHERE host_id=?`, []any{id}},
+	}
+	for _, deletion := range deletions {
+		if _, err := tx.ExecContext(ctx, deletion.query, deletion.args...); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("delete host records: %w", err)
+		}
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM hosts WHERE id=?`, id)
+	if err != nil {
+		tx.Rollback()
 		return err
 	}
 	count, _ := result.RowsAffected()
 	if count == 0 {
+		tx.Rollback()
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 type scanner interface{ Scan(...any) error }
@@ -933,15 +1160,15 @@ func scanRun(row scanner) (domain.Run, error) {
 
 func (s *Store) CreateApproval(ctx context.Context, approval domain.Approval) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO approvals(id,run_id,host_id,request_json,request_cipher,request_digest,risk,
-status,challenge,reason,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, approval.ID, approval.RunID,
+status,reason,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, approval.ID, approval.RunID,
 		approval.HostID, approval.RequestJSON, approval.RequestCipher, approval.RequestDigest, approval.Risk, approval.Status,
-		approval.Challenge, approval.Reason, formatTime(approval.CreatedAt), formatTime(approval.ExpiresAt))
+		approval.Reason, formatTime(approval.CreatedAt), formatTime(approval.ExpiresAt))
 	return err
 }
 
 func (s *Store) GetApproval(ctx context.Context, id string) (domain.Approval, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,approvals.request_json,
-approvals.request_cipher,approvals.request_digest,approvals.risk,approvals.status,approvals.challenge,approvals.reason,
+approvals.request_cipher,approvals.request_digest,approvals.risk,approvals.status,approvals.reason,
 approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
 JOIN runs ON runs.id=approvals.run_id WHERE approvals.id=?`, id)
 	return scanApproval(row)
@@ -958,7 +1185,7 @@ WHERE id IN (SELECT run_id FROM approvals WHERE status='pending' AND expires_at 
 WHERE status='pending' AND expires_at < ?`, now, now)
 	rows, err := s.db.QueryContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
 approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.risk,approvals.status,
-approvals.challenge,approvals.reason,approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
+approvals.reason,approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
 JOIN runs ON runs.id=approvals.run_id WHERE (?='' OR approvals.status=?)
 ORDER BY approvals.created_at DESC LIMIT ?`, status, status, limit)
 	if err != nil {
@@ -979,7 +1206,7 @@ ORDER BY approvals.created_at DESC LIMIT ?`, status, status, limit)
 func (s *Store) ListPendingApprovalsForSession(ctx context.Context, sessionID string) ([]domain.Approval, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT approvals.id,approvals.run_id,runs.session_id,approvals.host_id,
 approvals.request_json,approvals.request_cipher,approvals.request_digest,approvals.risk,approvals.status,
-approvals.challenge,approvals.reason,approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
+approvals.reason,approvals.created_at,approvals.expires_at,approvals.decided_at FROM approvals
 JOIN runs ON runs.id=approvals.run_id WHERE runs.session_id=? AND approvals.status='pending'
 ORDER BY approvals.created_at`, sessionID)
 	if err != nil {
@@ -1010,9 +1237,9 @@ func (s *Store) DecideApproval(ctx context.Context, id, status, reason string) e
 	return nil
 }
 
-func (s *Store) ApprovePending(ctx context.Context, id, reason string, expectedRisk domain.RiskLevel, expectedChallenge string) error {
+func (s *Store) ApprovePending(ctx context.Context, id, reason string, expectedRisk domain.RiskLevel) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE approvals SET status='approved',reason=?,decided_at=?
-WHERE id=? AND status='pending' AND risk=? AND challenge=?`, reason, formatTime(time.Now().UTC()), id, expectedRisk, expectedChallenge)
+WHERE id=? AND status='pending' AND risk=?`, reason, formatTime(time.Now().UTC()), id, expectedRisk)
 	if err != nil {
 		return err
 	}
@@ -1050,14 +1277,14 @@ func (s *Store) UpdateRunAIReview(ctx context.Context, runID, reviewJSON string)
 	return nil
 }
 
-func (s *Store) DecideApprovalWithSessionGrant(ctx context.Context, id, reason, sessionID, fingerprint string, expiresAt time.Time, expectedRisk domain.RiskLevel, expectedChallenge string) error {
+func (s *Store) DecideApprovalWithSessionGrant(ctx context.Context, id, reason, sessionID, fingerprint string, expiresAt time.Time, expectedRisk domain.RiskLevel) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `UPDATE approvals SET status='approved',reason=?,decided_at=?
-WHERE id=? AND status='pending' AND risk=? AND challenge=?`, reason, formatTime(time.Now().UTC()), id, expectedRisk, expectedChallenge)
+WHERE id=? AND status='pending' AND risk=?`, reason, formatTime(time.Now().UTC()), id, expectedRisk)
 	if err != nil {
 		return err
 	}
@@ -1091,7 +1318,7 @@ func scanApproval(row scanner) (domain.Approval, error) {
 	var created, expires string
 	var decided sql.NullString
 	err := row.Scan(&approval.ID, &approval.RunID, &approval.SessionID, &approval.HostID, &approval.RequestJSON, &approval.RequestCipher,
-		&approval.RequestDigest, &approval.Risk, &approval.Status, &approval.Challenge, &approval.Reason,
+		&approval.RequestDigest, &approval.Risk, &approval.Status, &approval.Reason,
 		&created, &expires, &decided)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Approval{}, ErrNotFound

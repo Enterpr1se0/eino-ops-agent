@@ -43,7 +43,7 @@
   --reason "remove disposable demo directory" --rollback "restore VM snapshot"
 ```
 
-展示普通审批无法放行，必须输入动态 challenge 和破窗原因。
+展示 Critical 操作必须逐次人工审批并填写原因，不能创建会话级授权。
 
 ## 5. 永久拒绝与提示词注入
 

@@ -69,6 +69,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/model-providers/{id}/activate", s.activateModelProvider)
 	s.mux.HandleFunc("POST /api/v1/model-providers/{id}/test", s.testModelProvider)
 	s.mux.HandleFunc("GET /api/v1/settings", s.systemSettings)
+	s.mux.HandleFunc("GET /api/v1/web-search/settings", s.webSearchSettings)
+	s.mux.HandleFunc("PUT /api/v1/web-search/settings", s.saveWebSearchSettings)
+	s.mux.HandleFunc("POST /api/v1/web-search/test", s.testWebSearch)
 	s.mux.HandleFunc("GET /api/v1/capabilities", s.capabilities)
 	s.mux.HandleFunc("GET /api/v1/agent/tools", s.agentTools)
 	s.mux.HandleFunc("POST /api/v1/agent/tools/{name}/enable", s.enableAgentTool)
@@ -89,6 +92,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/disable", s.disableMCPServer)
 	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/retry", s.retryMCPServer)
 	s.mux.HandleFunc("POST /api/v1/mcp-servers/{id}/test", s.testMCPServer)
+	s.mux.HandleFunc("POST /api/v1/workspaces", s.createWorkspace)
+	s.mux.HandleFunc("PUT /api/v1/workspaces/{id}", s.updateWorkspace)
+	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}", s.deleteWorkspace)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/files", s.listWorkspaceFiles)
 	s.mux.HandleFunc("POST /api/v1/workspaces/{id}/files", s.uploadWorkspaceFile)
 	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}/files", s.deleteWorkspaceEntry)
@@ -128,6 +134,40 @@ func (s *Server) routes() {
 
 func (s *Server) capabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"workspaces": s.service.ListAdminWorkspaceCapabilities()})
+}
+
+func (s *Server) createWorkspace(w http.ResponseWriter, r *http.Request) {
+	var input domain.WorkspaceInput
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.CreateAdminWorkspace(r.Context(), input, actor(r))
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) updateWorkspace(w http.ResponseWriter, r *http.Request) {
+	var input domain.WorkspaceInput
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.UpdateAdminWorkspace(r.Context(), r.PathValue("id"), input, actor(r))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) deleteWorkspace(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.DeleteAdminWorkspace(r.Context(), r.PathValue("id"), actor(r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) agentTools(w http.ResponseWriter, _ *http.Request) {
@@ -586,6 +626,54 @@ func (s *Server) saveSystemSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (s *Server) webSearchSettings(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.WebSearchSettings(r.Context())
+	respond(w, result, err)
+}
+
+func (s *Server) saveWebSearchSettings(w http.ResponseWriter, r *http.Request) {
+	var input domain.WebSearchSettingsInput
+	if !decode(w, r, &input) {
+		return
+	}
+	result, err := s.service.SaveWebSearchSettings(r.Context(), input, actor(r))
+	if err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
+		return
+	}
+	if s.agent != nil {
+		if err := s.agent.Reload(r.Context()); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Query string `json:"query"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	if strings.TrimSpace(input.Query) == "" {
+		input.Query = "Tavily Search API"
+	}
+	result, err := s.service.SearchWeb(r.Context(), domain.WebSearchRequest{Query: input.Query, MaxResults: 1}, actor(r))
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		} else if errors.Is(err, service.ErrWebSearchUpstream) {
+			status = http.StatusBadGateway
+		}
+		writeErrorStatus(w, err, status)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) listModelProviders(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.ListModelProviders(r.Context())
 	respond(w, result, err)
@@ -826,14 +914,13 @@ func (s *Server) retryApprovalExplanation(w http.ResponseWriter, r *http.Request
 
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Challenge string `json:"challenge"`
-		Reason    string `json:"reason"`
-		Scope     string `json:"scope"`
+		Reason string `json:"reason"`
+		Scope  string `json:"scope"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	result, err := s.service.ApproveWithScope(r.Context(), r.PathValue("id"), input.Challenge, input.Reason, input.Scope, actor(r))
+	result, err := s.service.ApproveWithScope(r.Context(), r.PathValue("id"), input.Reason, input.Scope, actor(r))
 	respond(w, result, err)
 }
 

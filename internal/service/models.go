@@ -15,6 +15,7 @@ import (
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
+	"eino-ops-agent/internal/proxyx"
 )
 
 var (
@@ -31,10 +32,13 @@ type modelCatalogEntry struct {
 }
 
 type resolvedModelProvider struct {
-	ID      string
-	Kind    string
-	BaseURL string
-	APIKey  string
+	ID            string
+	Kind          string
+	BaseURL       string
+	APIKey        string
+	ProxyURL      string
+	ProxyUsername string
+	ProxyPassword string
 }
 
 func normalizeProviderBaseURL(value, kind string) (string, error) {
@@ -88,10 +92,20 @@ func normalizeProviderBaseURL(value, kind string) (string, error) {
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
-func (s *Service) resolveModelProvider(ctx context.Context, providerID, kind string, inputBaseURL *string, inputAPIKey string) (resolvedModelProvider, error) {
+func (s *Service) resolveModelProvider(
+	ctx context.Context,
+	providerID, kind string,
+	inputBaseURL *string,
+	inputAPIKey string,
+	inputProxyURL, inputProxyUsername *string,
+	inputProxyPassword string,
+	clearProxyPassword bool,
+) (resolvedModelProvider, error) {
 	result := resolvedModelProvider{
 		ID: strings.TrimSpace(providerID), Kind: strings.TrimSpace(kind), APIKey: strings.TrimSpace(inputAPIKey),
 	}
+	storedProxyURL := ""
+	storedProxyUsername := ""
 	providerID = result.ID
 	if providerID != "" {
 		cfg, provider, err := s.ModelProviderConfig(ctx, providerID)
@@ -102,12 +116,38 @@ func (s *Service) resolveModelProvider(ctx context.Context, providerID, kind str
 			result.Kind = provider.Kind
 		}
 		result.BaseURL = cfg.BaseURL
+		result.ProxyURL = cfg.ProxyURL
+		result.ProxyUsername = cfg.ProxyUsername
+		result.ProxyPassword = cfg.ProxyPassword
+		storedProxyURL = cfg.ProxyURL
+		storedProxyUsername = cfg.ProxyUsername
 		if result.APIKey == "" {
 			result.APIKey = cfg.APIKey
 		}
 	}
 	if inputBaseURL != nil {
 		result.BaseURL = strings.TrimSpace(*inputBaseURL)
+	}
+	if inputProxyURL != nil {
+		result.ProxyURL = strings.TrimSpace(*inputProxyURL)
+	}
+	if inputProxyUsername != nil {
+		result.ProxyUsername = strings.TrimSpace(*inputProxyUsername)
+	}
+	normalizedProxyURL, err := proxyx.NormalizeURL(result.ProxyURL)
+	if err != nil {
+		return resolvedModelProvider{}, err
+	}
+	result.ProxyURL = normalizedProxyURL
+	if len(result.ProxyURL) > 2048 {
+		return resolvedModelProvider{}, fmt.Errorf("proxy URL is too long")
+	}
+	if clearProxyPassword {
+		result.ProxyPassword = ""
+	} else if inputProxyPassword != "" {
+		result.ProxyPassword = inputProxyPassword
+	} else if result.ProxyURL != storedProxyURL || result.ProxyUsername != storedProxyUsername {
+		result.ProxyPassword = ""
 	}
 	if result.Kind == "" {
 		result.Kind = "openai_compatible"
@@ -120,11 +160,26 @@ func (s *Service) resolveModelProvider(ctx context.Context, providerID, kind str
 		return resolvedModelProvider{}, err
 	}
 	result.BaseURL = normalizedBaseURL
+	if containsCredentialControl(result.ProxyUsername) || containsCredentialControl(result.ProxyPassword) {
+		return resolvedModelProvider{}, fmt.Errorf("proxy credentials cannot contain NUL, carriage return, or newline characters")
+	}
+	if len(result.ProxyUsername) > 255 || len(result.ProxyPassword) > 255 {
+		return resolvedModelProvider{}, fmt.Errorf("proxy credentials are too long")
+	}
+	if result.ProxyURL == "" {
+		result.ProxyUsername = ""
+		result.ProxyPassword = ""
+	} else if result.ProxyUsername == "" {
+		result.ProxyPassword = ""
+	}
 	return result, nil
 }
 
 func (s *Service) ModelTestConfig(ctx context.Context, input domain.ModelTestInput) (config.Model, error) {
-	resolved, err := s.resolveModelProvider(ctx, input.ID, input.Kind, input.BaseURL, input.APIKey)
+	resolved, err := s.resolveModelProvider(
+		ctx, input.ID, input.Kind, input.BaseURL, input.APIKey,
+		input.ProxyURL, input.ProxyUsername, input.ProxyPassword, input.ClearProxyPassword,
+	)
 	if err != nil {
 		return config.Model{}, err
 	}
@@ -132,11 +187,17 @@ func (s *Service) ModelTestConfig(ctx context.Context, input domain.ModelTestInp
 	if model == "" {
 		return config.Model{}, fmt.Errorf("model is required")
 	}
-	return config.Model{APIKey: resolved.APIKey, BaseURL: resolved.BaseURL, Name: model}, nil
+	return config.Model{
+		APIKey: resolved.APIKey, BaseURL: resolved.BaseURL, Name: model,
+		ProxyURL: resolved.ProxyURL, ProxyUsername: resolved.ProxyUsername, ProxyPassword: resolved.ProxyPassword,
+	}, nil
 }
 
 func (s *Service) DiscoverModels(ctx context.Context, input domain.ModelDiscoveryInput, actor string) (domain.ModelCatalog, error) {
-	resolved, err := s.resolveModelProvider(ctx, input.ID, input.Kind, input.BaseURL, input.APIKey)
+	resolved, err := s.resolveModelProvider(
+		ctx, input.ID, input.Kind, input.BaseURL, input.APIKey,
+		input.ProxyURL, input.ProxyUsername, input.ProxyPassword, input.ClearProxyPassword,
+	)
 	if err != nil {
 		return domain.ModelCatalog{}, err
 	}
@@ -149,15 +210,17 @@ func (s *Service) DiscoverModels(ctx context.Context, input domain.ModelDiscover
 	if resolved.APIKey != "" {
 		request.Header.Set("Authorization", "Bearer "+resolved.APIKey)
 	}
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	client := &http.Client{Timeout: 15 * time.Second}
+	if resolved.ProxyURL != "" {
+		client, err = proxyx.NewHTTPClient(resolved.ProxyURL, resolved.ProxyUsername, resolved.ProxyPassword, 15*time.Second)
+		if err != nil {
+			return domain.ModelCatalog{}, err
+		}
 	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := client.Do(request)
 	if err != nil {
-		return domain.ModelCatalog{}, fmt.Errorf("%w: %v", ErrModelProviderUpstream, err)
+		return domain.ModelCatalog{}, fmt.Errorf("%w: %s", ErrModelProviderUpstream, s.scrubModelProviderText(err.Error(), resolved))
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxModelCatalogBytes+1))
@@ -169,10 +232,7 @@ func (s *Service) DiscoverModels(ctx context.Context, input domain.ModelDiscover
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		detail := strings.TrimSpace(string(body))
-		if resolved.APIKey != "" {
-			detail = strings.ReplaceAll(detail, resolved.APIKey, "[REDACTED]")
-		}
-		detail = s.redactor.Redact(detail)
+		detail = s.scrubModelProviderText(detail, resolved)
 		if len(detail) > 500 {
 			detail = detail[:500]
 		}
@@ -213,4 +273,16 @@ func (s *Service) DiscoverModels(ctx context.Context, input domain.ModelDiscover
 		"provider_id": resolved.ID, "kind": resolved.Kind, "model_count": len(models),
 	})
 	return domain.ModelCatalog{Models: models, Count: len(models)}, nil
+}
+
+func (s *Service) scrubModelProviderText(value string, provider resolvedModelProvider) string {
+	for _, secret := range []string{provider.APIKey, provider.ProxyPassword} {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[REDACTED]")
+		}
+	}
+	if s.redactor != nil {
+		value = s.redactor.Redact(value)
+	}
+	return value
 }

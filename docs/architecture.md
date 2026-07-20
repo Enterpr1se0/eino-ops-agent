@@ -22,6 +22,7 @@ Web/API 位于单管理员认证边界之后。首次密码由环境变量初始
 ## Packages
 
 - `internal/sshx`：进程内 SSH 认证、严格 host key、SFTP、SOCKS5/HTTP 代理、ProxyJump、输出上限和连接探测。
+- `internal/service/websearch.go`：Tavily 请求、HTTP/HTTPS/SOCKS5 代理、凭据解密、响应限额与外部内容脱敏。
 - `internal/policy`：Shell AST、内置风险集和 YAML 扩展规则。
 - `internal/service`：审批状态机、摘要绑定、执行并发、任务、审计事务，以及外部 MCP Client Session 与动态工具生命周期。
 - `internal/store`：SQLite hosts、runs、approvals、events、chat、加密模型/MCP 配置与 Eino checkpoints。
@@ -53,9 +54,11 @@ stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamab
 
 `ssh_file_read` 在同一次受审计操作中返回有界内容、mode/owner/mtime 与 SHA256。`ssh_config_apply` 把 expected SHA256、目标内容或单文件 diff、validator 和回滚绑定进审批摘要；执行时重新验证版本，在同目录写入并同步临时文件，保存 `0600` 备份，运行白名单 argv validator，原子 rename，并在后置校验失败时恢复。成功操作写入 `file_operations`，`ssh_config_restore` 只能引用该 ID。
 
-Workspace 根只能来自启动配置。未声明显式列表时，控制面创建启动目录下的 `workspace/` 并注册为 `default/read_write`；可通过启动配置或环境变量改位置，也可显式关闭。受 Cookie/CSRF 保护的管理员 API 可以显示真实根目录、上传、预览和删除文件或目录，但 LLM 的 `workspace_list` 使用独立的安全能力视图，不包含根路径。上传限制为 100 MiB，拒绝敏感路径和覆盖，通过同目录临时文件、`fsync` 与原子 hard-link 提交；预览限制为 1 MiB 并识别二进制内容；Web 删除使用原子重命名将单个文件或完整目录移动到不可浏览的 `.opspilot-trash`，Workspace 根目录不可删除，并保留摘要与审计证据供人工恢复。Workspace 文件到远端只使用 `workspace_file_upload`：审批同时绑定 Workspace ID、相对路径、读取所得 SHA256、目标主机和远端路径，执行前重新解析白名单路径并校验 SHA256，绝对本地路径通过 `json:"-"` 的内部字段传给内置 SFTP transport。每个 Workspace 使用隐藏的受管目标复用 Run/Approval/Audit 状态机；真实根路径不会进入模型请求或输出。
+Workspace 在 `workspace_dir` 下按 ID 托管，SQLite 只保存 ID、权限和时间戳。数据库第一次初始化时创建 `default/read_write`，之后由受 Cookie/CSRF 保护的管理员 API 新增、修改权限和移除登记；目录固定派生为 `<workspace_dir>/<id>`，API、审计和模型上下文均不返回真实根路径。移除登记保留目录数据，重新添加同一 ID 会复用目录。上传限制为 100 MiB，拒绝敏感路径和覆盖，通过同目录临时文件、`fsync` 与原子 hard-link 提交；预览限制为 1 MiB 并识别二进制内容；Web 删除直接删除目标，Workspace 根目录不可删除，并保留摘要与审计证据。Workspace 文件到远端只使用 `workspace_file_upload`：审批同时绑定 Workspace ID、相对路径、读取所得 SHA256、目标主机和远端路径，执行前重新解析白名单路径并校验 SHA256，绝对本地路径通过 `json:"-"` 的内部字段传给内置 SFTP transport。每个 Workspace 使用隐藏的受管目标复用 Run/Approval/Audit 状态机。
 
 `workspace_shell` 是唯一开放给模型的本地 Shell。管理员在 SQLite 持久化的 System 设置中明确选择 `sandbox`、`host` 或 `disabled`，默认 `sandbox`。提交时解析出的实际后端写入 `ExecRequest.workspace_shell_backend`，和完整脚本、Workspace ID、相对 cwd、环境与超时一起进入加密审批摘要；执行前再次读取设置，后端不一致即拒绝，从而避免审批后切换权限边界。它复用确定性 Policy、Run、Approval 与 Audit，每个请求最低风险固定为 Change，危险脚本仍升级为 Critical。
+
+`web_search` 是唯一内置网络搜索 Tool，目前提供方为 Tavily。管理员设置独立保存于 `web_search_settings`，API Key 和代理密码用主密钥加密，HTTP API 与 Tool schema 均不暴露密文。请求禁用环境代理，只使用设置中明确选择的 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理；查询和域名过滤条件会离开本机。响应限制为 2 MiB，每项内容再做长度限制和当前凭据精确脱敏，并标记为不可信外部内容。审计保存查询 SHA256，不保存查询正文、凭据或结果正文。
 
 Sandbox 后端仅在 Linux 使用配置的 Bubblewrap；不存在或 namespace 创建失败时关闭失败，绝不回退到 Host Shell。沙箱新建 user/mount/PID/network namespace、丢弃 capabilities、禁用嵌套 user namespace 和网络，只读挂载 `/usr` 与动态链接库目录，创建独立 `/proc`、`/dev`、`/tmp`，并按 Workspace access 只读或读写挂载到 `/workspace`。预存的 `.env*`、`.ssh`、`.opspilot-*`、`.data`、`master.key` 与 credential 命名路径，以及 socket、FIFO 和 device 等特殊文件，在 mount namespace 内被遮蔽。
 
@@ -81,7 +84,7 @@ created ── ReadOnly ──> running ──> completed / failed
    └── Forbidden ──> denied
 ```
 
-Critical 审批除摘要外还需要动态 challenge 和原因。审批写入后，服务再次解密原始载荷并重新计算摘要，避免 TOCTOU 或载荷替换。
+Critical 审批除摘要外还要求逐次确认并填写原因，不能创建会话级授权。审批写入后，服务再次解密原始载荷并重新计算摘要，避免 TOCTOU 或载荷替换。
 
 Eino Agent 请求会在 context 中启用 blocking approval。Service 创建审批后先通过 SSE notifier 立即通知 Web，再让原 Tool goroutine 轮询持久化的 approval/run 状态；批准接口负责执行精确载荷，完成后结果回到原 Tool Call，拒绝说明则以 `operator_instruction` 回到模型。CLI、MCP 和直接 HTTP 执行保持非阻塞的 `approval_required` 返回契约。等待期间每 15 秒发送一次 SSE approval heartbeat。
 
@@ -113,7 +116,7 @@ Runner 在调用工具前通过 Go context 绑定当前 session ID，Service 创
 
 ## Model provider routing
 
-模型提供商统一映射为 Eino 的 OpenAI-compatible ChatModel，可保存 OpenAI、DeepSeek、Ollama 和自定义兼容端点。API Key 在进入 SQLite 前使用与审计数据相同的 AES-256-GCM 主密钥加密，对外只返回 `has_api_key`。
+模型提供商统一映射为 Eino 的 OpenAI-compatible ChatModel，可保存 OpenAI、DeepSeek、Ollama 和自定义兼容端点。API Key 在进入 SQLite 前使用与审计数据相同的 AES-256-GCM 主密钥加密，对外只返回 `has_api_key`。每条提供商记录还可独立保存 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理；代理密码加密后只通过 `has_proxy_password` 暴露状态。模型发现、配置测试、主 Agent 和选择该记录的 subagent 共用同一显式代理客户端，不从其他提供商继承代理。
 
 SQLite 使用部分唯一索引保证最多只有一个 active provider。切换时服务更新 active route，构建新的 ChatModelAgent 与 Runner，再通过互斥锁原子替换运行时指针；已经取得旧 Runner 的请求可以正常结束，新请求使用新配置。没有 active provider 时才回退到 `OPENAI_*` 环境变量。
 

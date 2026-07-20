@@ -99,6 +99,10 @@ const zh = {
     title: '管理员密码', subtitle: '修改后会退出所有会话。无法登录时使用', current: '当前密码', replacement: '新密码', confirmation: '确认新密码',
     mismatch: '两次输入的新密码不一致。', minimum: '至少 12 个字符', change: '修改密码', changing: '修改中...',
   },
+  webSearch: {
+    title: 'Web Search', baseURL: 'API 地址', apiKey: 'API Key', proxyURL: '代理地址', proxyUsername: '代理用户名', proxyPassword: '代理密码',
+    timeout: '超时时间（秒）', maxResults: '默认 / 上限结果数', savedSecret: '已保存，留空不变', saved: 'Web Search 设置已保存。', testPassed: '连接正常，返回 {{count}} 条结果。', clearKey: '清除 Key', clearProxyPassword: '清除代理密码',
+  },
   chat: {
     session: 'OpsPilot 会话', newSession: '新会话', conversations: '会话记录', openConversations: '打开会话记录', closeConversations: '关闭会话记录',
     newConversation: '新建会话', noSaved: '还没有保存的会话。', saved: '已保存', hosts: '主机',
@@ -116,11 +120,13 @@ const zh = {
     reasoning: '思考过程', reasoningActive: '思考中', reasoningFallback: '正在思考...',
   },
   workspace: {
-    noConfigured: '未配置 Workspace', localFiles: '本地文件', parent: '上级目录', uploadFile: '上传文件', refreshFiles: '刷新文件',
+    noConfigured: '未配置 Workspace', localFiles: '本地文件', parent: '上级目录', uploadFile: '上传文件', refreshFiles: '刷新文件', switchWorkspace: '切换 Workspace',
+    registeredCount: '{{count}} 个', add: '新增 Workspace', id: '名称', permission: '权限', readOnly: '只读', readWrite: '读写', remove: '移除',
+    settingsCreated: 'Workspace {{id}} 已新增。', settingsUpdated: 'Workspace {{id}} 已更新。', settingsRemoved: 'Workspace {{id}} 已移除。', removeConfirm: '移除 Workspace“{{id}}”？\n\n宿主机目录不会被删除。',
     relativePath: '相对上传路径', cancelUpload: '取消上传', previewFile: '预览文件', openDirectory: '打开目录', deleteEntry: '删除{{type}}',
     emptyDirectory: '此目录为空，可在这里上传文件。', previewHint: '点击文件预览；不会加入会话。',
-    uploaded: '已上传 · {{path}}', deleted: '已删除{{type}} · 可通过 {{trash}} 恢复', deleteFolderTarget: '文件夹及其全部内容', deleteFileTarget: '文件',
-    deleteConfirm: '删除{{target}}“{{path}}”？\n\n文件会移动到 OpsPilot 恢复区。', closePreview: '关闭预览', binary: '二进制文件',
+    uploaded: '已上传 · {{path}}', deleted: '已彻底删除 · {{type}}', deleteFolderTarget: '文件夹及其全部内容', deleteFileTarget: '文件',
+    deleteConfirm: '删除{{target}}“{{path}}”？\n\n将从宿主机直接删除，无法恢复。', closePreview: '关闭预览', binary: '二进制文件',
     binaryText: '此文件无法按文本显示，上方提供了大小和校验值。', truncated: '预览仅显示前 1 MiB，原文件未被修改。',
     uploadTo: '上传到 Workspace {{id}}', uploadedShort: '已上传', uploadFailed: '上传失败',
     file: '文件', directory: '目录',
@@ -153,7 +159,7 @@ const zh = {
     explanationUnavailable: '命令说明不可用。',
     plainExplanation: '命令说明', effects: '影响', risks: '风险', tips: '注意事项', rollbackGuide: '回滚', degradedInfo: '错误信息',
     retryPending: '正在生成说明...', retryText: '重新生成只会更新说明。', retrying: '生成中...', retryExplanation: '重新生成',
-    challenge: '高风险确认码', challengePlaceholder: '输入上方确认码', guidance: '拒绝原因或后续要求',
+    guidance: '拒绝原因或后续要求',
     guidancePlaceholder: '例如：不要重启服务，只读取最近 100 行日志。', requestDetails: '请求详情', executing: '正在执行...', allowSudo: '允许本次', allowOnce: '允许本次',
     allowSudoText: '以 root 身份执行', allowOnceText: '仅限当前请求', authorizing: '正在授权...', allowSessionSudo: '本会话允许同一 sudo 命令',
     allowSession: '本会话允许同一操作', hostUnavailable: '宿主机命令不可用', criticalUnavailable: '高风险操作不可用', exactMatch: '目标、内容和参数须完全一致',
@@ -170,7 +176,7 @@ const zh = {
     proxyJump: 'SSH 跳板机', direct: '直连', proxy: '网络代理', proxyURL: '代理地址', proxyUsername: '代理用户名', proxyPassword: '代理密码', knownHosts: 'Known hosts 文件', useDefault: '使用系统默认值', sudoPolicy: 'Sudo 策略', sudoPasswordLabel: 'Sudo 密码',
     credentialNote: '私钥和密码在本机加密保存；sudo 操作需要额外审批。',
     update: '更新主机', save: '保存主机', saved: '{{name}} 已{{action}}。', updated: '更新', registered: '注册',
-    trustConfirm: '信任 {{name}}？', trusted: '已信任 {{fingerprint}}', state: '已注册', encrypted: '已加密', hostId: '主机 ID', probe: '探测', trustKey: '信任密钥', deleteConfirm: '删除 {{name}}？',
+    trustConfirm: '信任 {{name}}？', trusted: '已信任 {{fingerprint}}', state: '已注册', encrypted: '已加密', hostId: '主机 ID', probe: '探测', trustKey: '信任密钥', deleteConfirm: '删除 {{name}}？\n\n相关运行和审批记录也会被删除。', deleted: '{{name}} 已删除。',
     emptyTitle: '没有 SSH 主机', emptyText: '注册目标并验证指纹后，OpsPilot 才能进行检查。',
   },
   models: {
@@ -183,6 +189,8 @@ const zh = {
     displayName: '显示名称', namePlaceholder: '生产模型', providerType: '提供商类型', modelId: '模型 ID', fetching: '获取中...', fetchModels: '获取模型', selectModel: '选择模型...',
     modelPlaceholder: '获取模型或手动输入 ID', available: '有 {{count}} 个模型可用', enterManually: '手动输入', apiKey: 'API Key', keepKey: '留空以保留当前 Key', localOptional: '本地端点可不填',
     baseUrl: 'Base URL', officialEndpoint: '留空使用 OpenAI 官方地址', urlPlaceholder: '127.0.0.1:11434/v1 或 api.example.com/v1', urlHelp: '可填写域名、Base URL 或完整接口地址。',
+		proxyUrl: '代理地址', proxySchemes: '支持 HTTP、HTTPS、SOCKS5、SOCKS5H', proxyUsername: '代理用户名', proxyPassword: '代理密码',
+		keepProxyPassword: '留空保留当前密码', clearProxyPassword: '清除已保存密码', proxy: '代理', noProxy: '未配置', proxyAuth: '已保存认证',
     sendingHello: '发送 Hello...', testModel: '测试模型', saveProvider: '保存提供商', active: '活动', endpoint: '端点', providerDefault: '提供商默认值', credential: '凭据',
     encryptedKey: '已保存加密 Key', noApiKey: '无 API Key', switching: '切换中...', useModel: '使用此模型', emptyTitle: '没有已保存的模型提供商',
     environmentText: 'Agent 当前使用 OPENAI_API_KEY。添加提供商后可在 Web 中切换。', emptyText: '添加 OpenAI、DeepSeek、Ollama 或其他 OpenAI 兼容端点。',
@@ -202,7 +210,7 @@ const zh = {
   },
   statusLabels: { pending: '待处理', completed: '已完成', failed: '失败', active: '进行中', blocked: '已阻塞', in_progress: '执行中', ready: '就绪', error: '错误', connecting: '连接中', interrupted: '已中断', rejected: '已拒绝', approval_required: '待审批' },
   riskLabels: { read_only: '只读', change: '变更', critical: '高风险', forbidden: '禁止' },
-  toolCategories: { planning: '任务计划', execution: '命令执行', hosts: 'SSH 主机', tasks: '长任务', remote_files: '远程文件', workspace: 'Workspace', history: '审计历史', approvals: '审批', skills: '运维 Skills', mcp: '外部 MCP' },
+  toolCategories: { planning: '任务计划', execution: '命令执行', hosts: 'SSH 主机', tasks: '长任务', remote_files: '远程文件', workspace: 'Workspace', web: '网络搜索', history: '审计历史', approvals: '审批', skills: '运维 Skills', mcp: '外部 MCP' },
   toolGuards: { read_only: '只读', policy_checked: '动态策略', approval_required: '人工审批', agent_state: 'Agent 状态', audited_control: '审计控制', external_mcp: '外部 MCP' },
   toolNames: {
     ssh_exec: '执行远程命令', ssh_run_script: '执行 Bash 脚本', ssh_file_read: '读取远程文件', ssh_file_search: '搜索远程文件', ssh_file_list: '列出远程目录', ssh_file_stat: '读取文件信息',
@@ -210,7 +218,7 @@ const zh = {
     ssh_task_start: '启动远程任务', ssh_task_status: '查看任务状态', ssh_task_tail: '查看任务输出', ssh_task_list: '列出持久任务', ssh_host_list: '列出主机', ssh_host_inspect: '检查主机',
     workspace_list: '列出 Workspace', workspace_file_list: '列出 Workspace 目录', workspace_file_read: '读取 Workspace 文件', workspace_file_search: '搜索 Workspace 文件', workspace_file_apply_patch: '应用 Workspace 补丁',
     workspace_file_upload: '上传 Workspace 文件', workspace_shell: '在 Workspace 运行 Shell', ssh_history_search: '搜索执行历史', ssh_history_get: '读取执行历史', ops_skill_list: '列出 Skills', ops_skill_get: '加载 Skill',
-    ops_plan_create: '创建任务计划', ops_plan_get: '读取任务计划', ops_plan_step_update: '推进任务步骤',
+    ops_plan_create: '创建任务计划', ops_plan_get: '读取任务计划', ops_plan_step_update: '推进任务步骤', web_search: '搜索网络',
   },
 }
 

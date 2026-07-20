@@ -48,7 +48,6 @@ type Event struct {
 	ApprovalID string `json:"approval_id,omitempty"`
 	Status     string `json:"status,omitempty"`
 	Risk       string `json:"risk,omitempty"`
-	Challenge  string `json:"challenge,omitempty"`
 }
 
 type Runtime struct {
@@ -117,7 +116,10 @@ func New(ctx context.Context, cfg config.Model, svc *service.Service, st *store.
 }
 
 func buildRunner(ctx context.Context, cfg config.Model, svc *service.Service, st *store.Store, maxIterations int) (*adk.Runner, []ToolDescriptor, error) {
-	modelCfg := &openai.ChatModelConfig{APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, Timeout: 90 * time.Second}
+	modelCfg, err := chatModelConfig(cfg, 90*time.Second)
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure model HTTP client: %w", err)
+	}
 	chatModel, err := openai.NewChatModel(ctx, modelCfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create OpenAI-compatible model: %w", err)
@@ -338,9 +340,14 @@ func (r *Runtime) TestProvider(ctx context.Context, cfg config.Model) (TestResul
 	started := time.Now()
 	logger := observability.FromContext(ctx).With("component", "agent", "model", cfg.Name)
 	logger.InfoContext(ctx, "model connection test started")
-	modelCfg := &openai.ChatModelConfig{APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Name, Timeout: 30 * time.Second}
+	modelCfg, err := chatModelConfig(cfg, 30*time.Second)
+	if err != nil {
+		logger.ErrorContext(ctx, "model connection test failed", "duration_ms", time.Since(started).Milliseconds(), "error", err)
+		return TestResult{}, fmt.Errorf("configure model client: %w", err)
+	}
 	chatModel, err := openai.NewChatModel(ctx, modelCfg)
 	if err != nil {
+		err = redactModelError(cfg, err)
 		logger.ErrorContext(ctx, "model connection test failed", "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return TestResult{}, fmt.Errorf("create model client: %w", err)
 	}
@@ -348,6 +355,7 @@ func (r *Runtime) TestProvider(ctx context.Context, cfg config.Model) (TestResul
 	defer cancel()
 	message, err := chatModel.Generate(testCtx, []*schema.Message{schema.UserMessage("Hello")})
 	if err != nil {
+		err = redactModelError(cfg, err)
 		logger.ErrorContext(ctx, "model connection test failed", "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return TestResult{}, fmt.Errorf("model connection test failed: %w", err)
 	}
@@ -458,7 +466,7 @@ func (r *Runtime) Query(ctx context.Context, sessionID, query string, emit func(
 			markActivity()
 			emit(Event{
 				Type: "approval", SessionID: sessionID, ApprovalID: result.ApprovalID,
-				Status: result.Status, Risk: string(result.Risk), Challenge: result.Challenge,
+				Status: result.Status, Risk: string(result.Risk),
 			})
 		})
 

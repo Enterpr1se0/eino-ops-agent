@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -119,6 +120,58 @@ func TestProviderRejectsEmptyResponse(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("empty model response was accepted")
+	}
+}
+
+func TestProviderUsesConfiguredHTTPProxy(t *testing.T) {
+	const proxyPassword = "runtime-proxy-secret"
+	wantProxyAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("proxy-user:"+proxyPassword))
+	proxyHits := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits++
+		if r.Method != http.MethodPost || r.URL.Host != "model.invalid" || r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("unexpected proxied model request: %s %s", r.Method, r.URL.String())
+		}
+		if got := r.Header.Get("Proxy-Authorization"); got != wantProxyAuth {
+			t.Errorf("unexpected proxy authorization: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "id":"chatcmpl-proxy","object":"chat.completion","created":1,"model":"fixture-model",
+  "choices":[{"index":0,"message":{"role":"assistant","content":"Hello through proxy"},"finish_reason":"stop"}]
+}`))
+	}))
+	defer proxy.Close()
+
+	result, err := (&Runtime{}).TestProvider(context.Background(), config.Model{
+		BaseURL: "http://model.invalid/v1", Name: "fixture-model", ProxyURL: proxy.URL,
+		ProxyUsername: "proxy-user", ProxyPassword: proxyPassword,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxyHits != 1 || result.Response != "Hello through proxy" {
+		t.Fatalf("model test did not use the configured proxy: hits=%d result=%#v", proxyHits, result)
+	}
+}
+
+func TestProviderRedactsCredentialEchoFromUpstreamError(t *testing.T) {
+	const apiKey = "api-secret-value"
+	const proxyPassword = "proxy-secret-value"
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, apiKey+" "+proxyPassword, http.StatusUnauthorized)
+	}))
+	defer proxy.Close()
+
+	_, err := (&Runtime{}).TestProvider(context.Background(), config.Model{
+		APIKey: apiKey, BaseURL: "http://model.invalid/v1", Name: "fixture-model", ProxyURL: proxy.URL,
+		ProxyUsername: "proxy-user", ProxyPassword: proxyPassword,
+	})
+	if err == nil {
+		t.Fatal("upstream error was accepted")
+	}
+	if strings.Contains(err.Error(), apiKey) || strings.Contains(err.Error(), proxyPassword) {
+		t.Fatalf("model error exposed credentials: %v", err)
 	}
 }
 

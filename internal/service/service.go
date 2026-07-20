@@ -20,6 +20,7 @@ import (
 	"eino-ops-agent/internal/ids"
 	"eino-ops-agent/internal/observability"
 	"eino-ops-agent/internal/policy"
+	"eino-ops-agent/internal/proxyx"
 	"eino-ops-agent/internal/security"
 	"eino-ops-agent/internal/skills"
 	"eino-ops-agent/internal/sshx"
@@ -34,7 +35,9 @@ type Service struct {
 	redactor             *security.Redactor
 	limits               config.Limits
 	dataDir              string
+	workspaceRoot        string
 	workspaceSandboxPath string
+	workspaceMu          sync.RWMutex
 	workspaces           map[string]config.Workspace
 	validators           map[string]config.Validator
 	skills               *skills.Registry
@@ -86,9 +89,6 @@ func New(st *store.Store, engine *policy.Engine, transport sshx.Transport, encry
 		result.dataDir = runtimeConfig[0].DataDir
 		result.workspaceSandboxPath = runtimeConfig[0].WorkspaceSandboxPath
 		result.skills = skills.NewRegistry(filepath.Join(result.dataDir, "skills"))
-		for _, workspace := range runtimeConfig[0].Workspaces {
-			result.workspaces[workspace.ID] = workspace
-		}
 		for _, validator := range runtimeConfig[0].Validators {
 			result.validators[validator.ID] = validator
 		}
@@ -200,6 +200,7 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 	input.Kind = strings.TrimSpace(input.Kind)
 	input.BaseURL = strings.TrimSpace(input.BaseURL)
 	input.Model = strings.TrimSpace(input.Model)
+	input.ProxyUsername = strings.TrimSpace(input.ProxyUsername)
 	if input.Name == "" {
 		return domain.ModelProvider{}, fmt.Errorf("provider name is required")
 	}
@@ -219,8 +220,28 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 		return domain.ModelProvider{}, err
 	}
 	input.BaseURL = normalizedBaseURL
+	input.ProxyURL, err = proxyx.NormalizeURL(input.ProxyURL)
+	if err != nil {
+		return domain.ModelProvider{}, err
+	}
+	if len(input.ProxyURL) > 2048 {
+		return domain.ModelProvider{}, fmt.Errorf("proxy URL is too long")
+	}
+	if containsCredentialControl(input.ProxyUsername) || containsCredentialControl(input.ProxyPassword) {
+		return domain.ModelProvider{}, fmt.Errorf("proxy credentials cannot contain NUL, carriage return, or newline characters")
+	}
+	if len(input.ProxyUsername) > 255 || len(input.ProxyPassword) > 255 {
+		return domain.ModelProvider{}, fmt.Errorf("proxy credentials are too long")
+	}
+	if input.ProxyURL == "" {
+		input.ProxyUsername = ""
+		input.ProxyPassword = ""
+	}
 
-	provider := domain.ModelProvider{ID: input.ID, Name: input.Name, Kind: input.Kind, BaseURL: input.BaseURL, Model: input.Model}
+	provider := domain.ModelProvider{
+		ID: input.ID, Name: input.Name, Kind: input.Kind, BaseURL: input.BaseURL, Model: input.Model,
+		ProxyURL: input.ProxyURL, ProxyUsername: input.ProxyUsername,
+	}
 	if input.ID != "" {
 		existing, err := s.store.GetModelProvider(ctx, input.ID)
 		if err != nil {
@@ -229,6 +250,9 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 		provider.CreatedAt = existing.CreatedAt
 		provider.Active = existing.Active
 		provider.APIKeyCipher = existing.APIKeyCipher
+		if provider.ProxyURL == existing.ProxyURL && provider.ProxyUsername == existing.ProxyUsername {
+			provider.ProxyPasswordCipher = existing.ProxyPasswordCipher
+		}
 	}
 	if key := strings.TrimSpace(input.APIKey); key != "" {
 		cipher, err := s.encryptor.Encrypt([]byte(key))
@@ -240,6 +264,15 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 	if (provider.Kind == "openai" || provider.Kind == "deepseek") && provider.APIKeyCipher == "" {
 		return domain.ModelProvider{}, fmt.Errorf("api_key is required for %s", provider.Kind)
 	}
+	if input.ClearProxyPassword || provider.ProxyURL == "" || provider.ProxyUsername == "" {
+		provider.ProxyPasswordCipher = ""
+	} else if input.ProxyPassword != "" {
+		cipher, err := s.encryptor.Encrypt([]byte(input.ProxyPassword))
+		if err != nil {
+			return domain.ModelProvider{}, fmt.Errorf("encrypt model provider proxy password: %w", err)
+		}
+		provider.ProxyPasswordCipher = cipher
+	}
 	saved, err := s.store.UpsertModelProvider(ctx, provider)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique constraint") {
@@ -249,6 +282,7 @@ func (s *Service) SaveModelProvider(ctx context.Context, input domain.ModelProvi
 	}
 	s.audit(ctx, "", "model_provider_saved", actor, map[string]any{
 		"provider_id": saved.ID, "name": saved.Name, "kind": saved.Kind, "model": saved.Model,
+		"proxy_configured": saved.ProxyURL != "",
 	})
 	return saved, nil
 }
@@ -337,7 +371,14 @@ func (s *Service) ModelProviderConfig(ctx context.Context, id string) (config.Mo
 	if err != nil {
 		return config.Model{}, domain.ModelProvider{}, fmt.Errorf("decrypt model provider API key: %w", err)
 	}
-	return config.Model{APIKey: string(key), BaseURL: provider.BaseURL, Name: provider.Model}, provider, nil
+	proxyPassword, err := s.encryptor.Decrypt(provider.ProxyPasswordCipher)
+	if err != nil {
+		return config.Model{}, domain.ModelProvider{}, fmt.Errorf("decrypt model provider proxy password: %w", err)
+	}
+	return config.Model{
+		APIKey: string(key), BaseURL: provider.BaseURL, Name: provider.Model,
+		ProxyURL: provider.ProxyURL, ProxyUsername: provider.ProxyUsername, ProxyPassword: string(proxyPassword),
+	}, provider, nil
 }
 
 func (s *Service) ActiveModelConfig(ctx context.Context) (config.Model, domain.ModelProvider, error) {
@@ -713,7 +754,7 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 	sessionID := SessionIDFromContext(ctx)
 	sessionGrantUsed := false
 	// A session grant can only remove repeated Change-level prompts. Critical
-	// requests always require a fresh break-glass challenge, even if policy is
+	// requests always require a fresh one-time approval, even if policy is
 	// tightened after an earlier grant was created for the same request shape.
 	if decision.Action == domain.ActionApprove && decision.Risk == domain.RiskChange && sessionID != "" && !isHostWorkspaceShell(req) {
 		fingerprint, fingerprintErr := approvalFingerprint(req)
@@ -801,13 +842,9 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		if err := s.store.CreateRun(ctx, run); err != nil {
 			return domain.ExecResult{}, err
 		}
-		challenge := ""
-		if decision.Action == domain.ActionBreakGlass {
-			challenge = host.Name + "-" + digest[:8]
-		}
 		approval := domain.Approval{
 			ID: ids.New("approval"), RunID: run.ID, HostID: host.ID, RequestJSON: requestRedacted, RequestCipher: requestCipher,
-			RequestDigest: digest, Risk: decision.Risk, Status: "pending", Challenge: challenge,
+			RequestDigest: digest, Risk: decision.Risk, Status: "pending",
 			CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute),
 		}
 		if err := s.store.CreateApproval(ctx, approval); err != nil {
@@ -818,7 +855,7 @@ func (s *Service) submit(ctx context.Context, req domain.ExecRequest, actor stri
 		if explanationInput != nil && explainer != nil {
 			s.startPendingApprovalExplanation(ctx, approval, *explanationInput, explainer, settings.SubagentTimeoutSeconds)
 		}
-		return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: decision.Risk, ApprovalID: approval.ID, Challenge: challenge, PolicyHits: decision.RuleHits}, nil
+		return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: decision.Risk, ApprovalID: approval.ID, PolicyHits: decision.RuleHits}, nil
 	case domain.ActionAllow:
 		run.Status = "running"
 		if err := s.store.CreateRun(ctx, run); err != nil {
@@ -896,7 +933,7 @@ func (s *Service) startPendingApprovalExplanation(parent context.Context, approv
 		logger.InfoContext(baseCtx, "approval explanation completed", "status", review.Status, "duration_ms", time.Since(started).Milliseconds())
 		notifyApproval(baseCtx, domain.ExecResult{
 			RunID: approval.RunID, Status: "approval_required", Risk: approval.Risk,
-			ApprovalID: approval.ID, Challenge: approval.Challenge,
+			ApprovalID: approval.ID,
 		})
 	}()
 }
@@ -939,11 +976,11 @@ func effectiveSubagentTimeoutSeconds(timeoutSeconds int) int {
 	return timeoutSeconds
 }
 
-func (s *Service) Approve(ctx context.Context, approvalID, challenge, reason, actor string) (domain.ExecResult, error) {
-	return s.ApproveWithScope(ctx, approvalID, challenge, reason, "once", actor)
+func (s *Service) Approve(ctx context.Context, approvalID, reason, actor string) (domain.ExecResult, error) {
+	return s.ApproveWithScope(ctx, approvalID, reason, "once", actor)
 }
 
-func (s *Service) ApproveWithScope(ctx context.Context, approvalID, challenge, reason, scope, actor string) (domain.ExecResult, error) {
+func (s *Service) ApproveWithScope(ctx context.Context, approvalID, reason, scope, actor string) (domain.ExecResult, error) {
 	logger := observability.FromContext(ctx).With("component", "approval", "approval_id", approvalID, "actor", actor)
 	if scope == "" {
 		scope = "once"
@@ -969,12 +1006,8 @@ func (s *Service) ApproveWithScope(ctx context.Context, approvalID, challenge, r
 		if scope == "session" {
 			return domain.ExecResult{}, fmt.Errorf("critical operations cannot be approved for an entire session")
 		}
-		if challenge == "" || challenge != approval.Challenge {
-			logger.WarnContext(ctx, "break-glass challenge mismatch", "run_id", approval.RunID)
-			return domain.ExecResult{}, fmt.Errorf("break-glass challenge does not match")
-		}
 		if strings.TrimSpace(reason) == "" {
-			return domain.ExecResult{}, fmt.Errorf("break-glass reason is required")
+			return domain.ExecResult{}, fmt.Errorf("approval reason is required for critical operations")
 		}
 	}
 	requestData, err := s.encryptor.Decrypt(approval.RequestCipher)
@@ -1011,10 +1044,10 @@ func (s *Service) ApproveWithScope(ctx context.Context, approvalID, challenge, r
 		if err != nil {
 			return domain.ExecResult{}, err
 		}
-		if err := s.store.DecideApprovalWithSessionGrant(ctx, approval.ID, reason, approval.SessionID, fingerprint, time.Now().UTC().Add(8*time.Hour), approval.Risk, approval.Challenge); err != nil {
+		if err := s.store.DecideApprovalWithSessionGrant(ctx, approval.ID, reason, approval.SessionID, fingerprint, time.Now().UTC().Add(8*time.Hour), approval.Risk); err != nil {
 			return domain.ExecResult{}, err
 		}
-	} else if err := s.store.ApprovePending(ctx, approval.ID, reason, approval.Risk, approval.Challenge); err != nil {
+	} else if err := s.store.ApprovePending(ctx, approval.ID, reason, approval.Risk); err != nil {
 		return domain.ExecResult{}, err
 	}
 	run.Status = "running"

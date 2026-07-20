@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -196,7 +197,7 @@ func testSSHPrivateKey(t *testing.T) []byte {
 	return pem.EncodeToMemory(block)
 }
 
-func TestElevatedExecutionUsesManagedSecretAfterBreakGlass(t *testing.T) {
+func TestElevatedExecutionUsesManagedSecretAfterApproval(t *testing.T) {
 	svc, transport, _ := newTestService(t)
 	host, err := svc.SaveHost(context.Background(), domain.HostInput{
 		Name: "sudo-host", Address: "192.0.2.11", Port: 22, User: "ops", AuthType: "password",
@@ -211,13 +212,10 @@ func TestElevatedExecutionUsesManagedSecretAfterBreakGlass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Risk != domain.RiskCritical || result.Status != "approval_required" || result.Challenge == "" {
-		t.Fatalf("elevated request bypassed break-glass: %#v", result)
+	if result.Risk != domain.RiskCritical || result.Status != "approval_required" {
+		t.Fatalf("elevated request bypassed approval: %#v", result)
 	}
-	if strings.Contains(result.Challenge, "secret") {
-		t.Fatal("credential leaked into challenge")
-	}
-	if _, err := svc.Approve(context.Background(), result.ApprovalID, result.Challenge, "root access reviewed", "operator"); err != nil {
+	if _, err := svc.Approve(context.Background(), result.ApprovalID, "root access reviewed", "operator"); err != nil {
 		t.Fatal(err)
 	}
 	if len(transport.hosts) != 1 || transport.hosts[0].Password != "ssh-secret" || transport.hosts[0].SudoPassword != "sudo-secret" {
@@ -274,7 +272,7 @@ func TestApprovedRequestRejectsChangedSSHConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approved, err := svc.Approve(context.Background(), result.ApprovalID, "", "connection reviewed", "operator")
+	approved, err := svc.Approve(context.Background(), result.ApprovalID, "connection reviewed", "operator")
 	if err == nil || !strings.Contains(err.Error(), "changed after submission") {
 		t.Fatalf("changed SSH connection was executed: result=%#v error=%v", approved, err)
 	}
@@ -466,7 +464,7 @@ func TestCommandExplainerPersistsAdviceWithoutChangingPolicyRisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "approval_required" || result.Risk != domain.RiskChange || result.Challenge != "" {
+	if result.Status != "approval_required" || result.Risk != domain.RiskChange {
 		t.Fatalf("explainer changed deterministic approval: %#v", result)
 	}
 	waitForApproval(t, svc, result.ApprovalID, func(approval domain.Approval) bool {
@@ -531,7 +529,7 @@ func TestApprovalIsCreatedWithoutWaitingForCommandExplanation(t *testing.T) {
 	pending := waitForApproval(t, svc, submitted.result.ApprovalID, func(approval domain.Approval) bool {
 		return approval.AIReview != nil && approval.AIReview.Status == "pending"
 	})
-	if pending.Risk != domain.RiskChange || pending.Challenge != "" {
+	if pending.Risk != domain.RiskChange {
 		t.Fatalf("pending advisory review changed deterministic approval: %#v", pending)
 	}
 
@@ -567,7 +565,7 @@ func TestLateCommandExplanationCannotOverrideAnApprovalDecision(t *testing.T) {
 		close(explainer.release)
 		t.Fatal("background explanation did not start")
 	}
-	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "", "deterministic policy reviewed", "operator"); err != nil {
+	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "deterministic policy reviewed", "operator"); err != nil {
 		close(explainer.release)
 		t.Fatal(err)
 	}
@@ -578,7 +576,7 @@ func TestLateCommandExplanationCannotOverrideAnApprovalDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if approval.Status != "approved" || approval.Risk != domain.RiskChange || approval.Challenge != "" {
+	if approval.Status != "approved" || approval.Risk != domain.RiskChange {
 		t.Fatalf("late explanation overwrote the approval decision: %#v", approval)
 	}
 	run, err := svc.store.GetRun(context.Background(), pending.RunID)
@@ -603,7 +601,7 @@ func TestRetryApprovalExplanationKeepsPolicyRiskAndDoesNotExecute(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pending.Risk != domain.RiskChange || pending.Challenge != "" {
+	if pending.Risk != domain.RiskChange {
 		t.Fatalf("unexpected initial approval: %#v", pending)
 	}
 	explainer := &fakeCommandExplainer{review: domain.CommandReview{
@@ -618,7 +616,7 @@ func TestRetryApprovalExplanationKeepsPolicyRiskAndDoesNotExecute(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status != "pending" || updated.Risk != domain.RiskChange || updated.Challenge != "" || updated.AIReview == nil || updated.AIReview.Explanation == nil {
+	if updated.Status != "pending" || updated.Risk != domain.RiskChange || updated.AIReview == nil || updated.AIReview.Explanation == nil {
 		t.Fatalf("explanation retry changed the policy-owned approval: %#v", updated)
 	}
 	if len(transport.calls) != 0 {
@@ -628,7 +626,7 @@ func TestRetryApprovalExplanationKeepsPolicyRiskAndDoesNotExecute(t *testing.T) 
 	if len(inputs) != 1 || inputs[0].RequestDigest != updated.RequestDigest {
 		t.Fatalf("explanation retry did not receive the exact pending request: %#v", inputs)
 	}
-	if _, err := svc.Approve(ctx, updated.ID, "", "reviewed deterministic policy", "operator"); err != nil {
+	if _, err := svc.Approve(ctx, updated.ID, "reviewed deterministic policy", "operator"); err != nil {
 		t.Fatal(err)
 	}
 	if len(transport.calls) != 1 {
@@ -747,7 +745,7 @@ func TestChangeRequiresApprovalThenExecutes(t *testing.T) {
 	if result.Status != "approval_required" || result.ApprovalID == "" || len(transport.calls) != 0 {
 		t.Fatalf("unexpected pending result %#v calls=%d", result, len(transport.calls))
 	}
-	approved, err := svc.Approve(context.Background(), result.ApprovalID, "", "reviewed", "operator")
+	approved, err := svc.Approve(context.Background(), result.ApprovalID, "reviewed", "operator")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,7 +791,7 @@ func TestBlockingApprovalSuspendsToolAndResumesWithExecutionResult(t *testing.T)
 	case <-time.After(75 * time.Millisecond):
 	}
 
-	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "", "reviewed", "operator")
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -928,7 +926,7 @@ func TestSessionApprovalGrantMatchesOnlyTheExactOperation(t *testing.T) {
 	if err != nil || len(approvals) != 1 || approvals[0].SessionID != "session_grant_test" {
 		t.Fatalf("approval session association missing: %#v err=%v", approvals, err)
 	}
-	if _, err := svc.ApproveWithScope(context.Background(), result.ApprovalID, "", "allow this exact operation in this session", "session", "operator"); err != nil {
+	if _, err := svc.ApproveWithScope(context.Background(), result.ApprovalID, "allow this exact operation in this session", "session", "operator"); err != nil {
 		t.Fatal(err)
 	}
 	req.Reason = "same operation with a different explanation"
@@ -956,27 +954,27 @@ func TestCriticalApprovalCannotCreateSessionGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ApproveWithScope(context.Background(), result.ApprovalID, result.Challenge, "reviewed", "session", "operator"); err == nil || !strings.Contains(err.Error(), "cannot be approved") {
+	if _, err := svc.ApproveWithScope(context.Background(), result.ApprovalID, "reviewed", "session", "operator"); err == nil || !strings.Contains(err.Error(), "cannot be approved") {
 		t.Fatalf("critical session grant was accepted: %v", err)
 	}
 }
 
-func TestCriticalRequiresExactBreakGlassChallenge(t *testing.T) {
+func TestCriticalRequiresApprovalReason(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	result, err := svc.Submit(context.Background(), domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "rm", Args: []string{"-rf", "/tmp/demo"}, Reason: "clean fixture", Rollback: "restore snapshot"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Risk != domain.RiskCritical || result.Challenge == "" {
+	if result.Risk != domain.RiskCritical || result.Status != "approval_required" {
 		t.Fatalf("unexpected critical result %#v", result)
 	}
-	if _, err := svc.Approve(context.Background(), result.ApprovalID, "wrong", "reviewed", "operator"); err == nil {
-		t.Fatal("wrong challenge was accepted")
+	if _, err := svc.Approve(context.Background(), result.ApprovalID, "", "operator"); err == nil {
+		t.Fatal("critical approval without a reason was accepted")
 	}
 	if len(transport.calls) != 0 {
-		t.Fatal("critical command executed before valid break-glass")
+		t.Fatal("critical command executed before approval")
 	}
-	approved, err := svc.Approve(context.Background(), result.ApprovalID, result.Challenge, "fixture cleanup reviewed", "operator")
+	approved, err := svc.Approve(context.Background(), result.ApprovalID, "fixture cleanup reviewed", "operator")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1056,6 +1054,81 @@ func TestModelProvidersEncryptKeysAndSwitchActiveProvider(t *testing.T) {
 	}
 	if updatedCfg.APIKey != "sk-super-secret" {
 		t.Fatal("blank API key update did not preserve the encrypted key")
+	}
+}
+
+func TestModelProviderProxyIsEncryptedPreservedAndUsedForDiscovery(t *testing.T) {
+	const proxyPassword = "model-proxy-secret"
+	wantProxyAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("proxy-user:"+proxyPassword))
+	proxyHits := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits++
+		if r.Method != http.MethodGet || r.URL.Host != "model.invalid" || r.URL.Path != "/v1/models" {
+			t.Errorf("unexpected proxied model request: %s %s", r.Method, r.URL.String())
+		}
+		if got := r.Header.Get("Proxy-Authorization"); got != wantProxyAuth {
+			t.Errorf("unexpected proxy authorization %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"proxied-model"}]}`))
+	}))
+	defer proxy.Close()
+
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	provider, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		Name: "proxied", Kind: "openai_compatible", BaseURL: "http://model.invalid/v1", Model: "proxied-model",
+		ProxyURL: proxy.URL + "/", ProxyUsername: "proxy-user", ProxyPassword: proxyPassword,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.ProxyURL != proxy.URL || provider.ProxyUsername != "proxy-user" || !provider.HasProxyPassword {
+		t.Fatalf("unexpected public proxy configuration: %#v", provider)
+	}
+	serialized, err := json.Marshal(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(serialized), proxyPassword) || strings.Contains(string(serialized), "cipher") {
+		t.Fatalf("provider JSON exposed proxy credentials: %s", serialized)
+	}
+	stored, err := svc.store.GetModelProvider(ctx, provider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ProxyPasswordCipher == "" || strings.Contains(stored.ProxyPasswordCipher, proxyPassword) {
+		t.Fatalf("proxy password was not encrypted: %#v", stored)
+	}
+	cfg, _, err := svc.ModelProviderConfig(ctx, provider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProxyURL != proxy.URL || cfg.ProxyUsername != "proxy-user" || cfg.ProxyPassword != proxyPassword {
+		t.Fatalf("proxy credentials did not round-trip: %#v", cfg)
+	}
+
+	catalog, err := svc.DiscoverModels(ctx, domain.ModelDiscoveryInput{ID: provider.ID}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxyHits != 1 || catalog.Count != 1 || catalog.Models[0] != "proxied-model" {
+		t.Fatalf("model discovery did not use the configured proxy: hits=%d catalog=%#v", proxyHits, catalog)
+	}
+
+	preserved, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		ID: provider.ID, Name: provider.Name, Kind: provider.Kind, BaseURL: provider.BaseURL, Model: provider.Model,
+		ProxyURL: provider.ProxyURL, ProxyUsername: provider.ProxyUsername,
+	}, "test")
+	if err != nil || !preserved.HasProxyPassword {
+		t.Fatalf("blank proxy password did not preserve the stored password: provider=%#v err=%v", preserved, err)
+	}
+	changed, err := svc.SaveModelProvider(ctx, domain.ModelProviderInput{
+		ID: provider.ID, Name: provider.Name, Kind: provider.Kind, BaseURL: provider.BaseURL, Model: provider.Model,
+		ProxyURL: provider.ProxyURL, ProxyUsername: "different-user",
+	}, "test")
+	if err != nil || changed.HasProxyPassword {
+		t.Fatalf("changed proxy identity reused the stored password: provider=%#v err=%v", changed, err)
 	}
 }
 

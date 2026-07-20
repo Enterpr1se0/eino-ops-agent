@@ -99,6 +99,10 @@ const en = {
     title: 'Administrator password', subtitle: 'All sessions will be signed out. If you cannot sign in, use', current: 'Current password', replacement: 'New password', confirmation: 'Confirm new password',
     mismatch: 'New password confirmation does not match.', minimum: 'At least 12 characters', change: 'Change password', changing: 'Changing...',
   },
+  webSearch: {
+    title: 'Web Search', baseURL: 'API URL', apiKey: 'API Key', proxyURL: 'Proxy URL', proxyUsername: 'Proxy username', proxyPassword: 'Proxy password',
+    timeout: 'Timeout (seconds)', maxResults: 'Default / max results', savedSecret: 'Saved; leave blank to keep', saved: 'Web Search settings saved.', testPassed: 'Connection passed with {{count}} result.', clearKey: 'Clear Key', clearProxyPassword: 'Clear proxy password',
+  },
   chat: {
     session: 'OpsPilot session', newSession: 'NEW SESSION', conversations: 'Conversations', openConversations: 'Open conversations', closeConversations: 'Close conversations',
     newConversation: 'New conversation', noSaved: 'No saved conversations yet.', saved: 'Saved', hosts: 'Hosts',
@@ -116,11 +120,13 @@ const en = {
     reasoning: 'Reasoning', reasoningActive: 'Reasoning...', reasoningFallback: 'Thinking...',
   },
   workspace: {
-    noConfigured: 'No Workspace configured', localFiles: 'Local files', parent: 'Parent directory', uploadFile: 'Upload file', refreshFiles: 'Refresh files',
+    noConfigured: 'No Workspace configured', localFiles: 'Local files', parent: 'Parent directory', uploadFile: 'Upload file', refreshFiles: 'Refresh files', switchWorkspace: 'Switch Workspace',
+    registeredCount: '{{count}} registered', add: 'Add Workspace', id: 'Name', permission: 'Permission', readOnly: 'Read only', readWrite: 'Read and write', remove: 'Remove',
+    settingsCreated: 'Workspace {{id}} added.', settingsUpdated: 'Workspace {{id}} updated.', settingsRemoved: 'Workspace {{id}} removed.', removeConfirm: 'Remove Workspace "{{id}}"?\n\nThe host directory will not be deleted.',
     relativePath: 'Relative upload path', cancelUpload: 'Cancel upload', previewFile: 'Preview file', openDirectory: 'Open directory', deleteEntry: 'Delete {{type}}',
     emptyDirectory: 'This directory is empty. Upload a file here.', previewHint: 'Click a file to preview it. It will not be added to the conversation.',
-    uploaded: 'Uploaded · {{path}}', deleted: 'Deleted {{type}} · recoverable as {{trash}}', deleteFolderTarget: 'folder and all of its contents', deleteFileTarget: 'file',
-    deleteConfirm: 'Delete {{target}} "{{path}}"?\n\nIt will be moved to OpsPilot\'s recovery area.', closePreview: 'Close preview', binary: 'Binary file',
+    uploaded: 'Uploaded · {{path}}', deleted: 'Deleted permanently · {{type}}', deleteFolderTarget: 'folder and all of its contents', deleteFileTarget: 'file',
+    deleteConfirm: 'Delete {{target}} "{{path}}"?\n\nIt will be deleted directly from the host and cannot be recovered.', closePreview: 'Close preview', binary: 'Binary file',
     binaryText: 'This file cannot be rendered as text. Its size and checksum are shown above.', truncated: 'Preview is limited to the first 1 MiB. The original file was not modified.',
     uploadTo: 'Upload to Workspace {{id}}', uploadedShort: 'Uploaded', uploadFailed: 'Upload failed',
     file: 'file', directory: 'directory',
@@ -153,7 +159,7 @@ const en = {
     explanationUnavailable: 'Command details unavailable.',
     plainExplanation: 'Command details', effects: 'Effects', risks: 'Risks', tips: 'Notes', rollbackGuide: 'Rollback', degradedInfo: 'Errors',
     retryPending: 'Generating details...', retryText: 'Regeneration updates the details only.', retrying: 'Generating...', retryExplanation: 'Regenerate',
-    challenge: 'High-risk confirmation code', challengePlaceholder: 'Enter the code above', guidance: 'Rejection reason or next step',
+    guidance: 'Rejection reason or next step',
     guidancePlaceholder: 'Example: Do not restart the service. Read the latest 100 log lines only.', requestDetails: 'Request details', executing: 'Executing...', allowSudo: 'Allow once', allowOnce: 'Allow once',
     allowSudoText: 'Run as root', allowOnceText: 'Current request only', authorizing: 'Authorizing...', allowSessionSudo: 'Allow the same sudo command in this session',
     allowSession: 'Allow the same operation in this session', hostUnavailable: 'Unavailable for host commands', criticalUnavailable: 'Unavailable for high-risk operations', exactMatch: 'Target, content, and arguments must match',
@@ -170,7 +176,7 @@ const en = {
     proxyJump: 'SSH jump host', direct: 'Direct connection', proxy: 'Network proxy', proxyURL: 'Proxy URL', proxyUsername: 'Proxy username', proxyPassword: 'Proxy password', knownHosts: 'Known hosts file', useDefault: 'Use system default', sudoPolicy: 'Sudo policy', sudoPasswordLabel: 'Sudo password',
     credentialNote: 'Keys and passwords are encrypted locally. Sudo operations require additional approval.',
     update: 'Update host', save: 'Save host', saved: '{{name}} {{action}}.', updated: 'updated', registered: 'registered',
-    trustConfirm: 'Trust {{name}}?', trusted: 'Trusted {{fingerprint}}', state: 'REGISTERED', encrypted: 'encrypted', hostId: 'Host ID', probe: 'Probe', trustKey: 'Trust key', deleteConfirm: 'Delete {{name}}?',
+    trustConfirm: 'Trust {{name}}?', trusted: 'Trusted {{fingerprint}}', state: 'REGISTERED', encrypted: 'encrypted', hostId: 'Host ID', probe: 'Probe', trustKey: 'Trust key', deleteConfirm: 'Delete {{name}}?\n\nRelated runs and approvals will also be deleted.', deleted: '{{name}} deleted.',
     emptyTitle: 'No SSH hosts', emptyText: 'Register a target, verify its fingerprint, then let OpsPilot inspect it.',
   },
   models: {
@@ -183,6 +189,8 @@ const en = {
     displayName: 'Display name', namePlaceholder: 'Production model', providerType: 'Provider type', modelId: 'Model ID', fetching: 'Fetching...', fetchModels: 'Fetch models', selectModel: 'Select a model...',
     modelPlaceholder: 'Fetch models or enter an ID', available: '{{count}} models available', enterManually: 'enter manually', apiKey: 'API key', keepKey: 'Leave blank to keep current key', localOptional: 'Optional for local endpoints',
     baseUrl: 'Base URL', officialEndpoint: 'Blank uses the official OpenAI endpoint', urlPlaceholder: '127.0.0.1:11434/v1 or api.example.com/v1', urlHelp: 'Enter a domain, Base URL, or full API endpoint.',
+		proxyUrl: 'Proxy URL', proxySchemes: 'HTTP, HTTPS, SOCKS5, or SOCKS5H', proxyUsername: 'Proxy username', proxyPassword: 'Proxy password',
+		keepProxyPassword: 'Blank keeps the current password', clearProxyPassword: 'Clear saved password', proxy: 'Proxy', noProxy: 'Not configured', proxyAuth: 'Authentication saved',
     sendingHello: 'Sending Hello...', testModel: 'Test model', saveProvider: 'Save provider', active: 'ACTIVE', endpoint: 'Endpoint', providerDefault: 'Provider default', credential: 'Credential',
     encryptedKey: 'Encrypted key stored', noApiKey: 'No API key', switching: 'Switching...', useModel: 'Use model', emptyTitle: 'No saved model providers',
     environmentText: 'The agent currently uses OPENAI_API_KEY. Add a provider to enable Web switching.', emptyText: 'Add OpenAI, DeepSeek, Ollama, or another OpenAI-compatible endpoint.',
@@ -202,7 +210,7 @@ const en = {
   },
   statusLabels: { pending: 'pending', completed: 'completed', failed: 'failed', active: 'active', blocked: 'blocked', in_progress: 'in progress', ready: 'ready', error: 'error', connecting: 'connecting', interrupted: 'interrupted', rejected: 'rejected', approval_required: 'approval required' },
   riskLabels: { read_only: 'read only', change: 'change', critical: 'critical', forbidden: 'forbidden' },
-  toolCategories: { planning: 'Task planning', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', history: 'Audit history', approvals: 'Approvals', skills: 'Ops skills', mcp: 'External MCP' },
+  toolCategories: { planning: 'Task planning', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', web: 'Web search', history: 'Audit history', approvals: 'Approvals', skills: 'Ops skills', mcp: 'External MCP' },
   toolGuards: { read_only: 'Read only', policy_checked: 'Dynamic policy', approval_required: 'Human approval', agent_state: 'Agent state', audited_control: 'Audited control', external_mcp: 'External MCP' },
   toolNames: {
     ssh_exec: 'Run remote command', ssh_run_script: 'Run Bash script', ssh_file_read: 'Read remote file', ssh_file_search: 'Search remote file', ssh_file_list: 'List remote directory', ssh_file_stat: 'Read file metadata',
@@ -210,7 +218,7 @@ const en = {
     ssh_task_start: 'Start remote task', ssh_task_status: 'Get task status', ssh_task_tail: 'Read task output', ssh_task_list: 'List persisted tasks', ssh_host_list: 'List hosts', ssh_host_inspect: 'Inspect host',
     workspace_list: 'List Workspaces', workspace_file_list: 'List Workspace directory', workspace_file_read: 'Read Workspace file', workspace_file_search: 'Search Workspace file', workspace_file_apply_patch: 'Apply Workspace patch',
     workspace_file_upload: 'Upload Workspace file', workspace_shell: 'Run Workspace Shell', ssh_history_search: 'Search execution history', ssh_history_get: 'Read execution history', ops_skill_list: 'List Skills', ops_skill_get: 'Load Skill',
-    ops_plan_create: 'Create task plan', ops_plan_get: 'Read task plan', ops_plan_step_update: 'Advance task step',
+    ops_plan_create: 'Create task plan', ops_plan_get: 'Read task plan', ops_plan_step_update: 'Advance task step', web_search: 'Search the Web',
   },
 }
 

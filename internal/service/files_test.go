@@ -19,7 +19,7 @@ func TestRemoteConfigTransactionBindsVersionBackupAndValidator(t *testing.T) {
 	if pending.Status != "approval_required" || len(transport.calls) != 0 {
 		t.Fatalf("transaction did not wait for approval: %#v", pending)
 	}
-	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "", "reviewed", "operator"); err != nil {
+	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
 		t.Fatal(err)
 	}
 	if len(transport.calls) != 1 {

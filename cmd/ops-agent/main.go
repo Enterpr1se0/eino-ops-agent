@@ -100,20 +100,6 @@ func run(ctx context.Context, args []string) error {
 
 func newApplication(ctx context.Context, cfg config.Config) (*application, error) {
 	started := time.Now()
-	for _, workspace := range cfg.Workspaces {
-		if !workspace.AutoCreate {
-			continue
-		}
-		if info, err := os.Lstat(workspace.Root); err == nil {
-			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-				return nil, fmt.Errorf("default workspace %q must be a real directory, not a file or symbolic link", workspace.Root)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("inspect default workspace: %w", err)
-		} else if err := os.MkdirAll(workspace.Root, 0o700); err != nil {
-			return nil, fmt.Errorf("create default workspace: %w", err)
-		}
-	}
 	st, err := store.Open(ctx, cfg.DatabasePath)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -130,6 +116,10 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 	}
 	transport := sshx.NewNativeSSHTransport(cfg.SSH, cfg.Limits)
 	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	if err := svc.InitializeWorkspaces(ctx, cfg.WorkspaceDir); err != nil {
+		st.Close()
+		return nil, fmt.Errorf("initialize workspaces: %w", err)
+	}
 	if err := svc.InitializeSkills(); err != nil {
 		st.Close()
 		return nil, fmt.Errorf("initialize skill registry: %w", err)
@@ -321,7 +311,6 @@ func approvalCommand(ctx context.Context, app *application, args []string) error
 		return printJSON(value, err)
 	case "approve":
 		fs := flag.NewFlagSet("approval approve", flag.ContinueOnError)
-		challenge := fs.String("challenge", "", "break-glass challenge")
 		reason := fs.String("reason", "approved by local operator", "approval reason")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -329,7 +318,7 @@ func approvalCommand(ctx context.Context, app *application, args []string) error
 		if fs.NArg() != 1 {
 			return fmt.Errorf("approval ID is required")
 		}
-		value, err := app.service.Approve(ctx, fs.Arg(0), *challenge, *reason, "local-cli")
+		value, err := app.service.Approve(ctx, fs.Arg(0), *reason, "local-cli")
 		return printJSON(value, err)
 	case "reject":
 		if len(args) < 2 {

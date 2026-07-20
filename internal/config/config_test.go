@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestLoadAddsDefaultWorkspaceRelativeToStartupDirectory(t *testing.T) {
+func TestLoadResolvesWorkspaceDirectoryRelativeToStartupDirectory(t *testing.T) {
 	root := t.TempDir()
 	previous, err := os.Getwd()
 	if err != nil {
@@ -21,29 +21,29 @@ func TestLoadAddsDefaultWorkspaceRelativeToStartupDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Workspaces) != 1 {
-		t.Fatalf("default workspace count = %d", len(cfg.Workspaces))
-	}
-	workspace := cfg.Workspaces[0]
-	if workspace.ID != "default" || workspace.Access != "read_write" || workspace.Root != filepath.Join(root, "workspace") || !workspace.AutoCreate {
-		t.Fatalf("unexpected default workspace: %#v", workspace)
+	if cfg.WorkspaceDir != filepath.Join(root, "workspace") {
+		t.Fatalf("workspace directory = %q", cfg.WorkspaceDir)
 	}
 	if cfg.WorkspaceSandboxPath != "bwrap" {
 		t.Fatalf("default workspace sandbox = %q", cfg.WorkspaceSandboxPath)
 	}
 }
 
-func TestLoadCanDisableDefaultWorkspace(t *testing.T) {
+func TestLoadRejectsWorkspaceDirectoryOverlappingDataDirectory(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
-	if err := os.WriteFile(path, []byte("default_workspace_dir: \"\"\nworkspaces: []\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("data_dir: runtime\nworkspace_dir: runtime/workspaces\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load(path)
+	previous, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Workspaces) != 0 {
-		t.Fatalf("disabled default workspace was still configured: %#v", cfg.Workspaces)
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+	if _, err := Load(path); err == nil {
+		t.Fatal("overlapping workspace directory was accepted")
 	}
 }

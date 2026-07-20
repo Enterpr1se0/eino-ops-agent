@@ -38,7 +38,6 @@ type WorkspaceCapability struct {
 
 type AdminWorkspaceCapability struct {
 	WorkspaceCapability
-	Root string `json:"root"`
 }
 
 type WorkspaceUploadResult struct {
@@ -77,16 +76,239 @@ type WorkspaceDeleteResult struct {
 	Type        string `json:"type"`
 	Size        int64  `json:"size,omitempty"`
 	SHA256      string `json:"sha256,omitempty"`
-	TrashID     string `json:"trash_id"`
-	Recoverable bool   `json:"recoverable"`
 }
 
 const maxWorkspaceUploadBytes = 100 << 20
 
+var workspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+
+func (s *Service) InitializeWorkspaces(ctx context.Context, workspaceRoot string) error {
+	workspaceRoot = filepath.Clean(strings.TrimSpace(workspaceRoot))
+	if workspaceRoot == "." || !filepath.IsAbs(workspaceRoot) {
+		return fmt.Errorf("workspace root must be absolute")
+	}
+	if filepath.Dir(workspaceRoot) == workspaceRoot {
+		return fmt.Errorf("a filesystem root cannot be used as the workspace directory")
+	}
+	if s.dataDir != "" {
+		dataRoot, err := filepath.Abs(s.dataDir)
+		if err != nil {
+			return err
+		}
+		if localPathContains(workspaceRoot, dataRoot) || localPathContains(dataRoot, workspaceRoot) {
+			return fmt.Errorf("workspace directory cannot overlap the application data directory")
+		}
+	}
+	if err := ensureWorkspaceDirectory(workspaceRoot); err != nil {
+		return fmt.Errorf("prepare workspace directory: %w", err)
+	}
+	if err := s.store.InitializeWorkspaces(ctx); err != nil {
+		return err
+	}
+	stored, err := s.store.ListWorkspaces(ctx)
+	if err != nil {
+		return err
+	}
+	loaded := make(map[string]config.Workspace, len(stored))
+	for _, workspace := range stored {
+		candidate := config.Workspace{ID: workspace.ID, Root: filepath.Join(workspaceRoot, workspace.ID), Access: workspace.Access}
+		if err := validateWorkspaceIdentity(candidate.ID, candidate.Access); err != nil {
+			return fmt.Errorf("stored workspace %q is invalid: %w", workspace.ID, err)
+		}
+		if err := ensureWorkspaceDirectory(candidate.Root); err != nil {
+			return fmt.Errorf("prepare workspace %q: %w", candidate.ID, err)
+		}
+		loaded[candidate.ID] = candidate
+	}
+	s.workspaceMu.Lock()
+	s.workspaceRoot = workspaceRoot
+	s.workspaces = loaded
+	s.workspaceMu.Unlock()
+	return nil
+}
+
+func (s *Service) CreateAdminWorkspace(ctx context.Context, input domain.WorkspaceInput, actor string) (AdminWorkspaceCapability, error) {
+	workspace := config.Workspace{ID: strings.TrimSpace(input.ID), Access: strings.TrimSpace(input.Access)}
+	if workspace.Access == "" {
+		workspace.Access = "read_only"
+	}
+	s.workspaceMu.RLock()
+	_, exists := s.workspaces[workspace.ID]
+	for id := range s.workspaces {
+		exists = exists || strings.EqualFold(id, workspace.ID)
+	}
+	workspace.Root = filepath.Join(s.workspaceRoot, workspace.ID)
+	s.workspaceMu.RUnlock()
+	if exists {
+		return AdminWorkspaceCapability{}, fmt.Errorf("workspace %q already exists", workspace.ID)
+	}
+	if err := validateWorkspaceIdentity(workspace.ID, workspace.Access); err != nil {
+		return AdminWorkspaceCapability{}, err
+	}
+	if err := ensureWorkspaceDirectory(workspace.Root); err != nil {
+		return AdminWorkspaceCapability{}, err
+	}
+	now := time.Now().UTC()
+	if err := s.store.CreateWorkspace(ctx, domain.Workspace{ID: workspace.ID, Access: workspace.Access, CreatedAt: now, UpdatedAt: now}); err != nil {
+		return AdminWorkspaceCapability{}, err
+	}
+	s.workspaceMu.Lock()
+	s.workspaces[workspace.ID] = workspace
+	s.workspaceMu.Unlock()
+	s.audit(ctx, "", "workspace_created", actor, map[string]any{"workspace_id": workspace.ID, "access": workspace.Access})
+	return s.adminWorkspaceCapability(workspace), nil
+}
+
+func (s *Service) UpdateAdminWorkspace(ctx context.Context, id string, input domain.WorkspaceInput, actor string) (AdminWorkspaceCapability, error) {
+	id = strings.TrimSpace(id)
+	workspace := config.Workspace{ID: id, Access: strings.TrimSpace(input.Access)}
+	if input.ID != "" && strings.TrimSpace(input.ID) != id {
+		return AdminWorkspaceCapability{}, fmt.Errorf("workspace id cannot be changed")
+	}
+	s.workspaceMu.RLock()
+	current, exists := s.workspaces[id]
+	s.workspaceMu.RUnlock()
+	if !exists {
+		return AdminWorkspaceCapability{}, fmt.Errorf("workspace %q not found", id)
+	}
+	workspace.Root = current.Root
+	if err := validateWorkspaceIdentity(workspace.ID, workspace.Access); err != nil {
+		return AdminWorkspaceCapability{}, err
+	}
+	if err := ensureWorkspaceDirectory(workspace.Root); err != nil {
+		return AdminWorkspaceCapability{}, err
+	}
+	if err := s.store.UpdateWorkspace(ctx, domain.Workspace{ID: id, Access: workspace.Access, UpdatedAt: time.Now().UTC()}); err != nil {
+		return AdminWorkspaceCapability{}, err
+	}
+	s.workspaceMu.Lock()
+	s.workspaces[id] = workspace
+	s.workspaceMu.Unlock()
+	s.audit(ctx, "", "workspace_updated", actor, map[string]any{"workspace_id": id, "access": workspace.Access})
+	return s.adminWorkspaceCapability(workspace), nil
+}
+
+func (s *Service) DeleteAdminWorkspace(ctx context.Context, id, actor string) error {
+	id = strings.TrimSpace(id)
+	if _, ok := s.workspaceByID(id); !ok {
+		return fmt.Errorf("workspace %q not found", id)
+	}
+	if err := s.store.DeleteWorkspace(ctx, id); err != nil {
+		return err
+	}
+	s.workspaceMu.Lock()
+	delete(s.workspaces, id)
+	s.workspaceMu.Unlock()
+	s.audit(ctx, "", "workspace_removed", actor, map[string]any{"workspace_id": id})
+	return nil
+}
+
+func validateWorkspaceIdentity(id, access string) error {
+	if !workspaceIDPattern.MatchString(id) || id == "." || id == ".." || strings.HasSuffix(id, ".") || isReservedWindowsWorkspaceID(id) {
+		return fmt.Errorf("workspace id must use 1-64 letters, numbers, dots, underscores, or hyphens")
+	}
+	if access != "read_only" && access != "read_write" {
+		return fmt.Errorf("workspace access must be read_only or read_write")
+	}
+	return nil
+}
+
+func isReservedWindowsWorkspaceID(id string) bool {
+	base := strings.ToUpper(strings.SplitN(id, ".", 2)[0])
+	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" {
+		return true
+	}
+	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) {
+		return base[3] >= '1' && base[3] <= '9'
+	}
+	return false
+}
+
+func ensureWorkspaceDirectory(path string) error {
+	if err := rejectWorkspaceSymlinks(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return fmt.Errorf("create directory: %w", err)
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("path must be a real directory, not a file or symbolic link")
+	}
+	return rejectWorkspaceSymlinks(path)
+}
+
+func rejectWorkspaceSymlinks(path string) error {
+	clean := filepath.Clean(path)
+	volume := filepath.VolumeName(clean)
+	current := volume
+	remainder := strings.TrimPrefix(clean, volume)
+	if filepath.IsAbs(clean) {
+		current += string(filepath.Separator)
+		remainder = strings.TrimLeft(remainder, `/\\`)
+	}
+	for _, component := range strings.Split(remainder, string(filepath.Separator)) {
+		if component == "" {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect path component: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("workspace directories cannot contain symbolic links")
+		}
+	}
+	return nil
+}
+
+func localPathContains(path, root string) bool {
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		relative = strings.ToLower(relative)
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func cloneWorkspaces(source map[string]config.Workspace) map[string]config.Workspace {
+	result := make(map[string]config.Workspace, len(source))
+	for id, workspace := range source {
+		result[id] = workspace
+	}
+	return result
+}
+
+func (s *Service) workspaceByID(id string) (config.Workspace, bool) {
+	s.workspaceMu.RLock()
+	defer s.workspaceMu.RUnlock()
+	workspace, ok := s.workspaces[strings.TrimSpace(id)]
+	return workspace, ok
+}
+
+func (s *Service) workspaceSnapshot() map[string]config.Workspace {
+	s.workspaceMu.RLock()
+	defer s.workspaceMu.RUnlock()
+	return cloneWorkspaces(s.workspaces)
+}
+
 func (s *Service) ListWorkspaceCapabilities() []WorkspaceCapability {
-	result := make([]WorkspaceCapability, 0, len(s.workspaces))
+	workspaces := s.workspaceSnapshot()
+	result := make([]WorkspaceCapability, 0, len(workspaces))
 	settings, settingsErr := s.SystemSettings(context.Background())
-	for _, workspace := range s.workspaces {
+	for _, workspace := range workspaces {
 		shellEnabled := settingsErr == nil && settings.WorkspaceShellBackend != ""
 		if settings.WorkspaceShellBackend == domain.WorkspaceShellModeHost && workspace.Access != "read_write" {
 			shellEnabled = false
@@ -111,14 +333,22 @@ func (s *Service) ListAdminWorkspaceCapabilities() []AdminWorkspaceCapability {
 	public := s.ListWorkspaceCapabilities()
 	result := make([]AdminWorkspaceCapability, 0, len(public))
 	for _, capability := range public {
-		workspace := s.workspaces[capability.ID]
-		result = append(result, AdminWorkspaceCapability{WorkspaceCapability: capability, Root: workspace.Root})
+		result = append(result, AdminWorkspaceCapability{WorkspaceCapability: capability})
 	}
 	return result
 }
 
+func (s *Service) adminWorkspaceCapability(workspace config.Workspace) AdminWorkspaceCapability {
+	for _, capability := range s.ListWorkspaceCapabilities() {
+		if capability.ID == workspace.ID {
+			return AdminWorkspaceCapability{WorkspaceCapability: capability}
+		}
+	}
+	return AdminWorkspaceCapability{WorkspaceCapability: WorkspaceCapability{ID: workspace.ID, Access: workspace.Access}}
+}
+
 func (s *Service) ListAdminWorkspaceFiles(workspaceID, relativePath string) (WorkspaceFileList, error) {
-	workspace, ok := s.workspaces[strings.TrimSpace(workspaceID)]
+	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return WorkspaceFileList{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -165,7 +395,7 @@ func (s *Service) ListAdminWorkspaceFiles(workspaceID, relativePath string) (Wor
 }
 
 func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (WorkspaceFilePreview, error) {
-	workspace, ok := s.workspaces[strings.TrimSpace(workspaceID)]
+	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return WorkspaceFilePreview{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -211,7 +441,7 @@ func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (W
 }
 
 func (s *Service) DeleteAdminWorkspaceEntry(ctx context.Context, workspaceID, relativePath, actor string) (WorkspaceDeleteResult, error) {
-	workspace, ok := s.workspaces[strings.TrimSpace(workspaceID)]
+	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return WorkspaceDeleteResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -253,44 +483,33 @@ func (s *Service) DeleteAdminWorkspaceEntry(ctx context.Context, workspaceID, re
 	} else if !info.IsDir() {
 		return WorkspaceDeleteResult{}, fmt.Errorf("only regular Workspace files and directories can be deleted from Web")
 	}
-	trashDirectory := filepath.Join(workspace.Root, ".opspilot-trash")
-	if trashInfo, err := os.Lstat(trashDirectory); err == nil {
-		if trashInfo.Mode()&os.ModeSymlink != 0 || !trashInfo.IsDir() {
-			return WorkspaceDeleteResult{}, fmt.Errorf("Workspace recovery directory is invalid")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return WorkspaceDeleteResult{}, err
-	} else if err := os.Mkdir(trashDirectory, 0o700); err != nil {
-		return WorkspaceDeleteResult{}, err
+	normalizedPath := filepath.ToSlash(filepath.Clean(relativePath))
+	if info.IsDir() {
+		err = os.RemoveAll(path)
+	} else {
+		err = os.Remove(path)
 	}
-	trashID := ids.New("deleted")
-	trashPath := filepath.Join(trashDirectory, trashID)
-	if err := os.Rename(path, trashPath); err != nil {
+	if err != nil {
 		return WorkspaceDeleteResult{}, err
 	}
 	if err := syncLocalDirectory(filepath.Dir(path)); err != nil {
-		_ = os.Rename(trashPath, path)
-		return WorkspaceDeleteResult{}, err
-	}
-	if err := syncLocalDirectory(trashDirectory); err != nil {
-		_ = os.Rename(trashPath, path)
 		return WorkspaceDeleteResult{}, err
 	}
 	result := WorkspaceDeleteResult{
-		WorkspaceID: workspace.ID, Path: relativePath, Type: entryType, Size: size, SHA256: sha256Sum, TrashID: trashID, Recoverable: true,
+		WorkspaceID: workspace.ID, Path: normalizedPath, Type: entryType, Size: size, SHA256: sha256Sum,
 	}
 	eventType := "workspace_file_deleted"
 	if entryType == "directory" {
 		eventType = "workspace_directory_deleted"
 	}
 	s.audit(ctx, "", eventType, actor, map[string]any{
-		"workspace_id": workspace.ID, "path": relativePath, "type": entryType, "size": size, "sha256": result.SHA256, "trash_id": trashID, "recoverable": true,
+		"workspace_id": workspace.ID, "path": normalizedPath, "type": entryType, "size": size, "sha256": result.SHA256, "permanent": true,
 	})
 	return result, nil
 }
 
 func (s *Service) UploadWorkspaceFile(ctx context.Context, workspaceID, targetPath, originalFilename string, source io.Reader, actor string) (WorkspaceUploadResult, error) {
-	workspace, ok := s.workspaces[strings.TrimSpace(workspaceID)]
+	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return WorkspaceUploadResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -409,7 +628,7 @@ func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath
 }
 
 func (s *Service) ApplyWorkspacePatch(ctx context.Context, workspaceID, relativePath, patchContent, expectedSHA256, validatorID, reason, rollback, actor string) (domain.ExecResult, error) {
-	workspace, ok := s.workspaces[workspaceID]
+	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -470,7 +689,7 @@ func (s *Service) UploadWorkspaceFileToHost(ctx context.Context, hostID, workspa
 // submission so the exact host or sandbox boundary is approval-bound.
 func (s *Service) RunWorkspaceShell(ctx context.Context, workspaceID, script, cwd string, env map[string]string, timeoutSeconds int, reason, expectedChanges, rollback, actor string) (domain.ExecResult, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
-	workspace, ok := s.workspaces[workspaceID]
+	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}
@@ -505,7 +724,7 @@ func (s *Service) RunWorkspaceShell(ctx context.Context, workspaceID, script, cw
 }
 
 func (s *Service) prepareWorkspaceUpload(req domain.ExecRequest) (domain.ExecRequest, error) {
-	workspace, ok := s.workspaces[strings.TrimSpace(req.WorkspaceID)]
+	workspace, ok := s.workspaceByID(req.WorkspaceID)
 	if !ok {
 		return req, fmt.Errorf("workspace %q not found", req.WorkspaceID)
 	}
@@ -558,7 +777,7 @@ func isWorkspaceMode(mode domain.ExecMode) bool {
 
 func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest) (sshx.RawResult, error) {
 	started := time.Now()
-	workspace, ok := s.workspaces[req.WorkspaceID]
+	workspace, ok := s.workspaceByID(req.WorkspaceID)
 	if !ok {
 		return sshx.RawResult{}, fmt.Errorf("workspace %q not found", req.WorkspaceID)
 	}
@@ -986,7 +1205,7 @@ func workspaceExitCode(err error) int {
 }
 
 func (s *Service) workspaceHost(ctx context.Context, workspaceID string) (domain.Host, error) {
-	_, ok := s.workspaces[workspaceID]
+	_, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return domain.Host{}, fmt.Errorf("workspace %q not found", workspaceID)
 	}

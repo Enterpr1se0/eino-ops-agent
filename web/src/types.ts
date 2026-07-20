@@ -50,7 +50,6 @@ export interface Approval {
   request_digest: string
   risk: Risk
   status: string
-  challenge?: string
   reason?: string
   ai_review?: CommandReview
   created_at: string
@@ -127,7 +126,6 @@ export interface AgentEvent {
   approval_id?: string
   status?: string
   risk?: Risk
-  challenge?: string
 }
 
 export interface ChatSession {
@@ -178,6 +176,9 @@ export interface ModelProvider {
   base_url?: string
   model: string
   has_api_key: boolean
+	proxy_url?: string
+	proxy_username?: string
+	has_proxy_password: boolean
   active: boolean
   created_at: string
   updated_at: string
@@ -190,6 +191,10 @@ export interface ModelProviderInput {
   base_url: string
   model: string
   api_key: string
+	proxy_url: string
+	proxy_username: string
+	proxy_password: string
+	clear_proxy_password?: boolean
 }
 
 export interface ModelDiscoveryInput {
@@ -197,6 +202,10 @@ export interface ModelDiscoveryInput {
   kind: ModelProviderKind
   base_url: string
   api_key: string
+	proxy_url: string
+	proxy_username: string
+	proxy_password: string
+	clear_proxy_password?: boolean
 }
 
 export interface ModelTestInput extends ModelDiscoveryInput {
@@ -262,6 +271,41 @@ export interface SystemSettingsInput {
   workspace_shell_mode?: WorkspaceShellMode
 }
 
+export interface WebSearchSettings {
+  enabled: boolean
+  provider: 'tavily'
+  base_url: string
+  has_api_key: boolean
+  proxy_url?: string
+  proxy_username?: string
+  has_proxy_password: boolean
+  timeout_seconds: number
+  max_results: number
+  updated_at?: string
+}
+
+export interface WebSearchSettingsInput {
+  enabled: boolean
+  base_url: string
+  api_key?: string
+  clear_api_key?: boolean
+  proxy_url?: string
+  proxy_username?: string
+  proxy_password?: string
+  clear_proxy_password?: boolean
+  timeout_seconds: number
+  max_results: number
+}
+
+export interface WebSearchResponse {
+  ok?: boolean
+  query: string
+  provider: string
+  results: Array<{title:string;url:string;content:string;score?:number;published_date?:string}>
+  response_time?: number
+  content_is_untrusted: boolean
+}
+
 export interface AuthSession {
   authenticated: boolean
   csrf_token: string
@@ -293,7 +337,11 @@ export interface WorkspaceCapability {
   shell_backend?: 'sandbox' | 'host'
   shell_name?: string
   validators?: string[]
-  root?: string
+}
+
+export interface WorkspaceInput {
+  id: string
+  access: 'read_only' | 'read_write'
 }
 
 export interface WorkspaceUploadResult {
@@ -332,8 +380,6 @@ export interface WorkspaceDeleteResult {
   type: 'file' | 'directory'
   size?: number
   sha256?: string
-  trash_id: string
-  recoverable: boolean
 }
 
 export interface ToolCapabilities {

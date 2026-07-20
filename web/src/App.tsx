@@ -8,7 +8,7 @@ import {
 } from 'lucide-react'
 import { api, streamChat } from './api'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
-import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, ToolCapabilities, WorkspaceCapability, WorkspaceFilePreview, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'config' | 'extensions' | 'audit' | 'logs'
 type ChatEntry = { id: string; kind: 'user' | 'assistant' | 'tool' | 'reasoning' | 'error'; content: string; tool?: string; active?: boolean; streaming?: boolean; status?: 'pending' | 'completed' | 'failed' }
@@ -362,11 +362,42 @@ function SystemSettingsPage({settings,providers,capabilities,modelStatus,refresh
 	      <div className="iteration-presets"><span>{t('settings.quickPresets')}</span>{[20,50,100].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b><small>{value===20?t('settings.shortDiagnosis'):value===50?t('settings.recommended'):t('settings.longDeployment')}</small></button>)}</div>
 		      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>{t('settings.explanationSection')}</b></div><em className={modelStatus?.explanation_agent_available?'ready':'offline'}><CircleDot size={9}/>{modelStatus?.explanation_agent_available?t('settings.runnerReady'):t('settings.modelUnavailable')}</em></div><label className="subagent-toggle"><span><b>{t('settings.commandAgent')}</b><small>{t('settings.commandAgentHelp')}</small></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label><div className="subagent-config-grid"><label><span><b>{t('settings.modelProvider')}</b><small>{subagentRoute}</small></span><select value={subagentProvider} onChange={event=>selectSubagentProvider(event.target.value)}><option value="">{t('settings.followMain')}</option>{providers.map(provider=><option value={provider.id} key={provider.id}>{provider.name} · {provider.model}</option>)}</select></label><label><span><b>{t('settings.requestTimeout')}</b></span><div className="subagent-timeout-input"><input aria-label={t('settings.timeout')} type="number" min="5" max="120" step="1" value={subagentTimeout} onChange={event=>updateSubagentTimeout(Number(event.target.value))}/><em>{t('settings.seconds',{count:subagentTimeout})}</em></div></label></div>{modelStatus?.explanation_error&&<div className="subagent-runtime-error"><ShieldAlert size={14}/><span>{modelStatus.explanation_error}</span></div>}</div>
 			  <div className="workspace-shell-settings"><div className="workspace-shell-settings-head"><TerminalSquare size={18}/><div><b>{t('settings.shellBackend')}</b></div><em>{settings?.workspace_shell_platform||t('settings.detecting')}</em></div><div className="workspace-shell-modes" role="group" aria-label={t('settings.shellBackend')}><button type="button" className={shellMode==='sandbox'?'active':''} disabled={!settings?.workspace_sandbox_available} onClick={()=>selectShellMode('sandbox')}><ShieldCheck size={16}/><span><b>{t('settings.sandbox')}</b><small>{settings?.workspace_sandbox_available?t('settings.sandboxAvailable'):t('settings.unavailableHost')}</small></span></button><button type="button" className={`${shellMode==='host'?'active ':''}host`} disabled={!settings?.workspace_host_shell_available} onClick={()=>selectShellMode('host')}><TerminalSquare size={16}/><span><b>{t('settings.hostShell')}</b><small>{settings?.workspace_host_shell_available?`${settings.workspace_shell_name||t('settings.systemShell')} · ${t('settings.fullAuthority')}`:t('settings.noShell')}</small></span></button><button type="button" className={shellMode==='disabled'?'active':''} onClick={()=>selectShellMode('disabled')}><Power size={16}/><span><b>{t('settings.shellDisabled')}</b><small>{t('settings.removeShell')}</small></span></button></div>{shellMode==='host'&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><span><b>{t('settings.hostWarning')}</b><small>{t('settings.hostWarningText')}</small></span></div>}{shellMode==='sandbox'&&!settings?.workspace_sandbox_available&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><span><b>{t('settings.sandboxWarning')}</b><small>{t('settings.sandboxWarningText')}</small></span></div>}</div>
-			  <div className="workspace-capabilities"><div><FileText size={17}/><span><b>{t('settings.capabilities')}</b></span><em>{capabilities.workspaces.length}</em></div>{capabilities.workspaces.length?capabilities.workspaces.map(workspace=><section className="workspace-summary-row" key={workspace.id}><div><code>{workspace.id}</code><span className={workspace.access}>{workspace.access.replace('_',' ')}</span></div><code title={workspace.root}>{workspace.root}</code><small>{workspace.validators?.length?t('settings.validators',{values:workspace.validators.join(', ')}):t('settings.noValidators')}</small></section>):<p>{t('settings.noWorkspace')}</p>}</div>
+			  <WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refresh} onNotice={setNotice}/>
 	      <div className="settings-footer"><span>{settings?.updated_at?t('settings.lastUpdated',{date:new Date(settings.updated_at).toLocaleString(localeFor(instance.language))}):t('settings.systemDefault')}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setShellMode(savedShellMode);setDirty(false);setNotice('')}}>{t('settings.discard')}</button><button className="primary" disabled={!dirty||saving}>{saving?t('settings.applying'):t('settings.apply')}</button></div>
-    </form>
+	    </form>
+	<WebSearchSettingsPanel refresh={refresh}/>
 	<AdminPasswordPanel/>
   </div>
+}
+
+function WorkspaceSettingsPanel({workspaces,refresh,onNotice}:{workspaces:WorkspaceCapability[];refresh:()=>Promise<void>;onNotice:(value:string)=>void}){
+	const {t}=useTranslation()
+	const empty:WorkspaceInput={id:'',access:'read_only'}
+	const [open,setOpen]=useState(false),[editing,setEditing]=useState(''),[input,setInput]=useState<WorkspaceInput>(empty),[busy,setBusy]=useState('')
+	const beginCreate=()=>{setEditing('');setInput(empty);setOpen(true);onNotice('')}
+	const beginEdit=(workspace:WorkspaceCapability)=>{setEditing(workspace.id);setInput({id:workspace.id,access:workspace.access});setOpen(true);onNotice('')}
+	const close=()=>{setOpen(false);setEditing('');setInput(empty)}
+	const save=async()=>{if(!input.id.trim())return;setBusy('save');onNotice('');try{if(editing)await api.updateWorkspace(editing,{...input,id:editing});else await api.createWorkspace({...input,id:input.id.trim()});await refresh();onNotice(editing?t('workspace.settingsUpdated',{id:editing}):t('workspace.settingsCreated',{id:input.id.trim()}));close()}catch(err){onNotice(errorText(err))}finally{setBusy('')}}
+	const remove=async(workspace:WorkspaceCapability)=>{if(!confirm(t('workspace.removeConfirm',{id:workspace.id})))return;setBusy(`delete-${workspace.id}`);onNotice('');try{await api.deleteWorkspace(workspace.id);await refresh();onNotice(t('workspace.settingsRemoved',{id:workspace.id}));if(editing===workspace.id)close()}catch(err){onNotice(errorText(err))}finally{setBusy('')}}
+	return <div className="workspace-settings"><div className="workspace-settings-title"><div><FolderOpen size={17}/><span><b>{t('settings.capabilities')}</b><small>{t('workspace.registeredCount',{count:workspaces.length})}</small></span></div><button type="button" onClick={beginCreate}><Plus size={13}/>{t('workspace.add')}</button></div>{open&&<div className="workspace-settings-editor"><label><span>{t('workspace.id')}</span><input value={input.id} disabled={!!editing} maxLength={64} placeholder="project" onChange={event=>setInput(current=>({...current,id:event.target.value}))}/></label><label><span>{t('workspace.permission')}</span><select value={input.access} onChange={event=>setInput(current=>({...current,access:event.target.value as WorkspaceInput['access']}))}><option value="read_only">{t('workspace.readOnly')}</option><option value="read_write">{t('workspace.readWrite')}</option></select></label><div><button type="button" onClick={close}>{t('common.cancel')}</button><button type="button" className="primary" disabled={busy==='save'||!input.id.trim()} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></div></div>}<div className="workspace-settings-list">{workspaces.map(workspace=><div className="workspace-settings-row" key={workspace.id}><code>{workspace.id}</code><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em><button type="button" title={t('common.edit')} onClick={()=>beginEdit(workspace)}><Edit3 size={13}/></button><button type="button" className="danger" disabled={busy===`delete-${workspace.id}`} title={t('workspace.remove')} onClick={()=>void remove(workspace)}>{busy===`delete-${workspace.id}`?<LoaderCircle className="spin" size={13}/>:<Trash2 size={13}/>}</button></div>)}{!workspaces.length&&<div className="workspace-settings-empty">{t('settings.noWorkspace')}</div>}</div></div>
+}
+
+const defaultWebSearchInput:WebSearchSettingsInput={enabled:false,base_url:'https://api.tavily.com',api_key:'',proxy_url:'',proxy_username:'',proxy_password:'',timeout_seconds:20,max_results:10}
+
+function WebSearchSettingsPanel({refresh}:{refresh:()=>Promise<void>}){
+	const {t}=useTranslation()
+	const [stored,setStored]=useState<WebSearchSettings|null>(null),[input,setInput]=useState<WebSearchSettingsInput>(defaultWebSearchInput)
+	const [loading,setLoading]=useState(true),[busy,setBusy]=useState(''),[dirty,setDirty]=useState(false),[notice,setNotice]=useState('')
+	const hasEffectiveAPIKey=!!input.api_key?.trim()||!!stored?.has_api_key&&!input.clear_api_key
+	const applyStored=(value:WebSearchSettings)=>{setStored(value);setInput({enabled:value.enabled,base_url:value.base_url,api_key:'',proxy_url:value.proxy_url||'',proxy_username:value.proxy_username||'',proxy_password:'',timeout_seconds:value.timeout_seconds,max_results:value.max_results});setDirty(false)}
+	useEffect(()=>{let active=true;api.webSearchSettings().then(value=>{if(active)applyStored(value)}).catch(err=>{if(active)setNotice(errorText(err))}).finally(()=>{if(active)setLoading(false)});return()=>{active=false}},[])
+	const update=<K extends keyof WebSearchSettingsInput>(key:K,value:WebSearchSettingsInput[K])=>{setInput(current=>({...current,[key]:value}));setDirty(true);setNotice('')}
+	const save=async()=>{setBusy('save');setNotice('');try{const value=await api.saveWebSearchSettings(input);applyStored(value);setNotice(t('webSearch.saved'));await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
+	const test=async()=>{setBusy('test');setNotice('');try{const result=await api.testWebSearch();setNotice(t('webSearch.testPassed',{count:result.results.length}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
+	const clearKey=()=>{setInput(current=>({...current,enabled:false,api_key:'',clear_api_key:true}));setDirty(true);setNotice('')}
+	const clearProxyPassword=()=>{setInput(current=>({...current,proxy_password:'',clear_proxy_password:true}));setDirty(true);setNotice('')}
+	if(loading)return <section className="web-search-settings panel loading"><LoaderCircle className="spin" size={16}/>{t('common.loading')}</section>
+	return <section className="web-search-settings panel"><header><div><Search size={18}/><span><b>{t('webSearch.title')}</b><small>Tavily</small></span></div><label><input type="checkbox" checked={input.enabled} onChange={event=>update('enabled',event.target.checked)}/><i/><span>{input.enabled?t('common.enabled'):t('common.disabled')}</span></label></header><div className="web-search-grid"><label><span>{t('webSearch.baseURL')}</span><input value={input.base_url} onChange={event=>update('base_url',event.target.value)} placeholder="https://api.tavily.com"/></label><label><span>{t('webSearch.apiKey')}</span><input type="password" value={input.api_key||''} onChange={event=>update('api_key',event.target.value)} placeholder={stored?.has_api_key?t('webSearch.savedSecret'):''}/></label><label><span>{t('webSearch.proxyURL')}</span><input value={input.proxy_url||''} onChange={event=>update('proxy_url',event.target.value)} placeholder="socks5h://127.0.0.1:1080"/></label><label><span>{t('webSearch.proxyUsername')}</span><input value={input.proxy_username||''} onChange={event=>update('proxy_username',event.target.value)}/></label><label><span>{t('webSearch.proxyPassword')}</span><input type="password" value={input.proxy_password||''} onChange={event=>update('proxy_password',event.target.value)} placeholder={stored?.has_proxy_password?t('webSearch.savedSecret'):''}/></label><label><span>{t('webSearch.timeout')}</span><input type="number" min="5" max="120" value={input.timeout_seconds} onChange={event=>update('timeout_seconds',Number(event.target.value))}/></label><label><span>{t('webSearch.maxResults')}</span><input type="number" min="1" max="20" value={input.max_results} onChange={event=>update('max_results',Number(event.target.value))}/></label></div>{notice&&<p>{notice}</p>}<footer><div>{stored?.has_api_key&&<button type="button" className="danger" onClick={clearKey}>{t('webSearch.clearKey')}</button>}{stored?.has_proxy_password&&<button type="button" className="danger" onClick={clearProxyPassword}>{t('webSearch.clearProxyPassword')}</button>}</div><button type="button" disabled={busy!==''||dirty||!stored?.enabled||!stored.has_api_key} onClick={()=>void test()}>{busy==='test'?<LoaderCircle className="spin" size={13}/>:<Search size={13}/>} {t('common.test')}</button><button type="button" className="primary" disabled={busy!==''||!dirty||input.enabled&&!hasEffectiveAPIKey} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></section>
 }
 
 function AdminPasswordPanel(){
@@ -614,10 +645,10 @@ function ChatWorkspacePanel({workspaces,workspaceID,onSelect,refresh}:{workspace
 	const choose=(event:React.ChangeEvent<HTMLInputElement>)=>{const selected=event.target.files?.[0]||null;setFile(selected);setTarget(selected?(path==='.'?selected.name:`${path}/${selected.name}`):'');setNotice('')}
 	const upload=async()=>{if(!workspace||!file||!target.trim())return;setUploading(true);setNotice('');try{const result=await api.uploadWorkspaceFile(workspace.id,file,target.trim());setNotice(t('workspace.uploaded',{path:result.path}));setFile(null);setTarget('');setInputKey(value=>value+1);await load();await refresh()}catch(err){setNotice(errorText(err))}finally{setUploading(false)}}
 	const openEntry=async(name:string,type:'file'|'directory')=>{const next=path==='.'?name:`${path}/${name}`;if(type==='directory'){setPath(next);return}if(!workspace)return;setPreviewLoading(next);setNotice('');try{setPreview(await api.previewWorkspaceFile(workspace.id,next))}catch(err){setNotice(errorText(err))}finally{setPreviewLoading('')}}
-	const removeEntry=async(name:string,type:'file'|'directory')=>{if(!workspace)return;const next=path==='.'?name:`${path}/${name}`;const target=type==='directory'?t('workspace.deleteFolderTarget'):t('workspace.deleteFileTarget');if(!confirm(t('workspace.deleteConfirm',{target,path:next})))return;setDeleting(next);setNotice('');try{const result=await api.deleteWorkspaceEntry(workspace.id,next);if(preview?.path===next)setPreview(null);setNotice(t('workspace.deleted',{type:t(`workspace.${result.type}`,{defaultValue:result.type}),trash:result.trash_id}));await load();await refresh()}catch(err){setNotice(errorText(err))}finally{setDeleting('')}}
+	const removeEntry=async(name:string,type:'file'|'directory')=>{if(!workspace)return;const next=path==='.'?name:`${path}/${name}`;const target=type==='directory'?t('workspace.deleteFolderTarget'):t('workspace.deleteFileTarget');if(!confirm(t('workspace.deleteConfirm',{target,path:next})))return;setDeleting(next);setNotice('');try{const result=await api.deleteWorkspaceEntry(workspace.id,next);if(preview?.path===next)setPreview(null);setNotice(t('workspace.deleted',{type:t(`workspace.${result.type}`,{defaultValue:result.type})}));await load();await refresh()}catch(err){setNotice(errorText(err))}finally{setDeleting('')}}
 	const up=()=>{if(path==='.')return;const parts=path.split('/');parts.pop();setPath(parts.join('/')||'.')}
 	if(!workspace)return <aside className="workspace-browser-panel panel empty"><div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div></div><div className="workspace-empty"><FolderOpen size={23}/><span>{t('workspace.noConfigured')}</span></div></aside>
-	return <><aside className="workspace-browser-panel panel"><div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div>{workspaces.length>1?<select value={workspace.id} onChange={event=>onSelect(event.target.value)}>{workspaces.map(item=><option value={item.id} key={item.id}>{item.id}</option>)}</select>:<code>{workspace.id}</code>}</div><div className="chat-workspace-head"><span><b>{t('workspace.localFiles')}</b><small title={workspace.root}>{workspace.root}</small></span><em className={workspace.access}>{workspace.access.replace('_',' ')}</em></div><div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" onChange={choose}/></label>}<button onClick={()=>void load()} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>{file&&<div className="chat-upload-row"><input value={target} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=path==='.'?entry.name:`${path}/${entry.name}`;return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>void removeEntry(entry.name,entry.type)} disabled={deleting===fullPath} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>{notice&&<div className="chat-workspace-notice">{notice}</div>}<div className="workspace-browser-hint"><FileText size={12}/><span>{t('workspace.previewHint')}</span></div></aside>{preview&&<div className="workspace-preview-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)setPreview(null)}}><section className="workspace-preview-dialog" role="dialog" aria-modal="true" aria-label={`${t('workspace.previewFile')} ${preview.path}`}><header><div><FileText size={18}/><span><b>{preview.path}</b><small>{formatFileSize(preview.size)} · SHA-256 {preview.sha256}</small></span></div><button onClick={()=>setPreview(null)} title={t('workspace.closePreview')}><X size={16}/></button></header>{preview.binary?<div className="workspace-binary-preview"><FileText size={30}/><b>{t('workspace.binary')}</b><span>{t('workspace.binaryText')}</span></div>:<pre>{preview.content||''}</pre>}{preview.truncated&&<footer>{t('workspace.truncated')}</footer>}</section></div>}</>
+	return <><aside className="workspace-browser-panel panel"><div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div><select value={workspace.id} disabled={workspaces.length<2} onChange={event=>onSelect(event.target.value)} aria-label={t('workspace.switchWorkspace')}>{workspaces.map(item=><option value={item.id} key={item.id}>{item.id}</option>)}</select></div><div className="chat-workspace-head"><span><b>{workspace.id}</b></span><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em></div><div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" onChange={choose}/></label>}<button onClick={()=>void load()} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>{file&&<div className="chat-upload-row"><input value={target} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=path==='.'?entry.name:`${path}/${entry.name}`;return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>void removeEntry(entry.name,entry.type)} disabled={deleting===fullPath} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>{notice&&<div className="chat-workspace-notice">{notice}</div>}<div className="workspace-browser-hint"><FileText size={12}/><span>{t('workspace.previewHint')}</span></div></aside>{preview&&<div className="workspace-preview-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)setPreview(null)}}><section className="workspace-preview-dialog" role="dialog" aria-modal="true" aria-label={`${t('workspace.previewFile')} ${preview.path}`}><header><div><FileText size={18}/><span><b>{preview.path}</b><small>{formatFileSize(preview.size)} · SHA-256 {preview.sha256}</small></span></div><button onClick={()=>setPreview(null)} title={t('workspace.closePreview')}><X size={16}/></button></header>{preview.binary?<div className="workspace-binary-preview"><FileText size={30}/><b>{t('workspace.binary')}</b><span>{t('workspace.binaryText')}</span></div>:<pre>{preview.content||''}</pre>}{preview.truncated&&<footer>{t('workspace.truncated')}</footer>}</section></div>}</>
 }
 
 function QuickWorkspaceUpload({workspace,refresh}:{workspace:WorkspaceCapability;refresh:()=>Promise<void>}){
@@ -795,64 +826,428 @@ function CommandExplanationPanel({review}:{review?:CommandReview}){
 	  return <details className={`command-review-panel ${review.status}`}><summary><span className="review-agent-icon"><BrainCircuit size={17}/></span><span><b>{t('approval.explanationAgent')}</b><small>{review.status==='completed'?t('approval.explanationCompleted'):review.status==='degraded'?t('approval.explanationPartial'):t('approval.explanationUnavailable')}</small></span><em>{t(`riskLabels.${review.deterministic_risk}`,{defaultValue:review.deterministic_risk.replace('_',' ')})}</em><ChevronRight size={14}/></summary><div className="command-review-body">{explanation&&<section className="review-explanation"><div className="review-section-title"><span>AI</span><div><b>{t('approval.plainExplanation')}</b><small>{explanation.summary}</small></div></div><p>{explanation.mechanism}</p><div className="review-list-grid"><ReviewList title={t('approval.effects')} items={explanation.effects}/><ReviewList title={t('approval.risks')} items={explanation.risks} tone="warn"/><ReviewList title={t('approval.tips')} items={explanation.beginner_tips}/></div>{explanation.rollback_guide&&<div className="review-rollback"><b>{t('approval.rollbackGuide')}</b><p>{explanation.rollback_guide}</p></div>}</section>}{review.errors&&review.errors.length>0&&<div className="review-errors"><b>{t('approval.degradedInfo')}</b>{review.errors.map((item,index)=><code key={index}>{item}</code>)}</div>}<div className="review-meta">{t('common.model')} {review.model||t('common.unavailable')} · {new Date(review.reviewed_at).toLocaleString(localeFor(instance.language))}</div></div></details>
 }
 
-function ApprovalDialog({approval,pendingCount,hosts,running,stopping,onStop,refresh,onNotice}:{approval:Approval;pendingCount:number;hosts:Host[];running:boolean;stopping:boolean;onStop:()=>void;refresh:()=>Promise<void>;onNotice:(message:string)=>void}) {
-	const {t,i18n:instance}=useTranslation()
-  const [challenge,setChallenge]=useState('')
-  const [note,setNote]=useState('')
-  const [decisionBusy,setDecisionBusy]=useState<''|'once'|'session'|'reject'>('')
-  const [explanationBusy,setExplanationBusy]=useState(false)
-  const [error,setError]=useState('')
-  let request:Record<string,unknown>={}
-  try{request=JSON.parse(approval.request_json)}catch{request={request:approval.request_json}}
-  const script=textValue(request.script)
-	const workspaceID=textValue(request.workspace_id)
-	const filePath=textValue(request.remote_path)||textValue(request.relative_path)
-	const requestMode=textValue(request.mode),relativePath=textValue(request.relative_path),remotePath=textValue(request.remote_path)
-	const workspaceShellBackend=textValue(request.workspace_shell_backend)
-	const hostWorkspaceShell=requestMode==='workspace_shell'&&workspaceShellBackend==='host'
-	const workspaceTransfer=requestMode==='workspace_upload'
-	const elevated=request.elevated===true
-	const actionKind=script?t('approval.actionScript'):t('approval.actionCommand')
-	const approvalTitle=elevated?(filePath?t('approval.sudoFileTitle'):t('approval.sudoTitle',{kind:actionKind})):workspaceTransfer?t('approval.uploadTitle'):hostWorkspaceShell?t('approval.hostShellTitle'):filePath?t('approval.fileTitle'):t('approval.executeTitle',{kind:actionKind})
-	const commandLabel=workspaceTransfer?t('approval.uploadLabel'):elevated?(filePath?t('approval.rootFileLabel'):t('approval.rootCommandLabel',{kind:actionKind})):filePath?t('approval.fileLabel'):t('approval.commandLabel',{kind:actionKind})
-  const operation=workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:fullProgram(request)||script||`${requestMode} ${filePath}`.trim()||t('approval.pendingOperation')
-	const target=hosts.find(host=>host.id===approval.host_id)
-	const targetHost=target?.name||approval.host_id
-	const hostName=workspaceTransfer?targetHost:workspaceID?`Workspace / ${workspaceID}`:targetHost
-	const executionIdentity=elevated?t('approval.rootViaSudo'):target?.user||t('approval.serviceUser')
-	const expectedSHA=textValue(request.expected_sha256),validator=textValue(request.validator)
-	const explanationPending=approval.ai_review?.status==='pending'
-  const decide=async(scope:'once'|'session')=>{
-    setDecisionBusy(scope);setError('')
-    try{const result=await api.approve(approval.id,challenge,note.trim()||'Reviewed and approved in the current Agent session.',scope);onNotice(t('approval.approved',{status:t(`statusLabels.${result.status}`,{defaultValue:result.status}),run:result.run_id}));await refresh()}
-    catch(err){setError(errorText(err))}finally{setDecisionBusy('')}
+function ApprovalDialog({
+  approval,
+  pendingCount,
+  hosts,
+  running,
+  stopping,
+  onStop,
+  refresh,
+  onNotice,
+}: {
+  approval: Approval;
+  pendingCount: number;
+  hosts: Host[];
+  running: boolean;
+  stopping: boolean;
+  onStop: () => void;
+  refresh: () => Promise<void>;
+  onNotice: (message: string) => void;
+}) {
+  const { t, i18n: instance } = useTranslation();
+  const [note, setNote] = useState("");
+  const [decisionBusy, setDecisionBusy] = useState<
+    "" | "once" | "session" | "reject"
+  >("");
+  const [explanationBusy, setExplanationBusy] = useState(false);
+  const [error, setError] = useState("");
+  let request: Record<string, unknown> = {};
+  try {
+    request = JSON.parse(approval.request_json);
+  } catch {
+    request = { request: approval.request_json };
   }
-  const reject=async()=>{
-    const instruction=note.trim();if(!instruction){setError(t('approval.replacementRequired'));return}
-    setDecisionBusy('reject');setError('')
-    try{await api.reject(approval.id,instruction);onNotice(t('approval.rejected'));await refresh()}catch(err){setError(errorText(err))}finally{setDecisionBusy('')}
-  }
-  const retryExplanation=async()=>{
-    setExplanationBusy(true);setError('')
-    try{
-      const updated=await api.retryApprovalExplanation(approval.id)
-      const status=updated.ai_review?.status
-      onNotice(status==='completed'?t('approval.explanationReady'):t('approval.explanationDegraded'))
-      await refresh()
-    }catch(err){setError(errorText(err))}finally{setExplanationBusy(false)}
-  }
-  const decisionDisabled=!!decisionBusy
-	return <div className="approval-modal-backdrop"><section className={`approval-dialog ${approval.risk} ${elevated?'elevated':''}`} role="dialog" aria-modal="true" aria-labelledby="approval-dialog-title"><div className="approval-dialog-head"><div className="approval-dialog-icon"><ShieldAlert size={20}/></div><div><span>{t('approval.confirmation',{queue:pendingCount>1?t('approval.queue',{count:pendingCount}):t('approval.currentSession')})}</span><h2 id="approval-dialog-title">{approvalTitle}</h2></div><em className={`risk ${approval.risk}`}>{t(`riskLabels.${approval.risk}`,{defaultValue:approval.risk.replace('_',' ')})}</em></div><div className="approval-operation"><span className="approval-command-label">{commandLabel}{elevated&&<em><ShieldAlert size={12}/>sudo / root</em>}</span>{elevated&&<div className="approval-root-warning"><ShieldAlert size={18}/><div><b>{t('approval.rootWarning')}</b><span>{t('approval.rootWarningText')}</span></div></div>}{filePath&&<div className="approval-file-target"><FileText size={15}/><div><b>{workspaceTransfer?`${workspaceID}:${relativePath} -> ${remotePath}`:filePath}</b><span>{expectedSHA?`Expected SHA256 · ${expectedSHA}`:t('approval.unboundVersion')}{validator?` · Validator ${validator}`:''}</span></div></div>}<pre className="approval-command-preview">{script||`$ ${operation}`}</pre><dl><div><dt>{workspaceTransfer?t('approval.targetHost'):workspaceID?t('common.workspace'):t('approval.targetHost')}</dt><dd>{hostName}</dd></div><div><dt>{t('approval.identity')}</dt><dd>{executionIdentity}</dd></div>{workspaceShellBackend&&<div><dt>{t('approval.environment')}</dt><dd>{hostWorkspaceShell?t('approval.hostShell'):t('tool.sandbox')}</dd></div>}<div><dt>{t('approval.deadline')}</dt><dd><Clock3 size={12}/>{new Date(approval.expires_at).toLocaleTimeString(localeFor(instance.language))}</dd></div><div><dt>{t('approval.digest')}</dt><dd>{approval.request_digest.slice(0,12)}</dd></div></dl>{hostWorkspaceShell&&<div className="approval-host-shell-warning"><ShieldAlert size={14}/><span>{t('approval.hostShellWarning')}</span></div>}{typeof request.reason==='string'&&<p>{request.reason}</p>}</div><CommandExplanationPanel review={approval.ai_review}/><div className="review-retry-row"><span>{explanationPending||explanationBusy?t('approval.retryPending'):t('approval.retryText')}</span><button disabled={decisionDisabled||explanationPending||explanationBusy} onClick={retryExplanation}><RefreshCw className={explanationBusy||explanationPending?'spin':''} size={13}/>{explanationPending?t('approval.explanationWorking'):explanationBusy?t('approval.retrying'):t('approval.retryExplanation')}</button></div>{approval.challenge&&<label className="approval-challenge-input"><span>{t('approval.challenge')} <code>{approval.challenge}</code></span><input value={challenge} onChange={event=>setChallenge(event.target.value)} placeholder={t('approval.challengePlaceholder')} autoComplete="off" autoFocus/></label>}<label className="approval-guidance"><span>{t('approval.guidance')}</span><textarea value={note} maxLength={2000} onChange={event=>setNote(event.target.value)} placeholder={t('approval.guidancePlaceholder')} autoFocus={!approval.challenge}/></label>{error&&<div className="approval-dialog-error"><ShieldAlert size={14}/>{error}</div>}<details className="approval-request-detail"><summary>{t('approval.requestDetails')}</summary><pre>{JSON.stringify(request,null,2)}</pre></details><div className="approval-choice-grid"><button className="allow-once" disabled={decisionDisabled||stopping} onClick={()=>decide('once')}><Check size={16}/><span><b>{decisionBusy==='once'?t('approval.executing'):elevated?t('approval.allowSudo'):t('approval.allowOnce')}</b><small>{elevated?t('approval.allowSudoText'):t('approval.allowOnceText')}</small></span></button><button className="allow-session" disabled={decisionDisabled||stopping||approval.risk==='critical'||hostWorkspaceShell} onClick={()=>decide('session')} title={hostWorkspaceShell?t('approval.hostUnavailable'):approval.risk==='critical'?t('approval.criticalUnavailable'):''}><ShieldCheck size={16}/><span><b>{decisionBusy==='session'?t('approval.authorizing'):elevated?t('approval.allowSessionSudo'):t('approval.allowSession')}</b><small>{hostWorkspaceShell?t('approval.hostUnavailable'):approval.risk==='critical'?t('approval.criticalUnavailable'):t('approval.exactMatch')}</small></span></button><button className="reject-guidance" disabled={decisionDisabled||stopping||!note.trim()} onClick={reject}><X size={16}/><span><b>{decisionBusy==='reject'?t('approval.rejecting'):t('approval.reject')}</b><small>{t('approval.rejectText')}</small></span></button><button className="stop-agent-run" disabled={decisionDisabled||stopping||!running} onClick={onStop}><Square size={14} fill="currentColor"/><span><b>{stopping?t('approval.stopping'):t('approval.stopAgent')}</b><small>{t('approval.stopText')}</small></span></button></div><p className="approval-wait">{running?t('approval.waiting'):t('approval.detached')}</p></section></div>
+  const script = textValue(request.script);
+  const workspaceID = textValue(request.workspace_id);
+  const filePath =
+    textValue(request.remote_path) || textValue(request.relative_path);
+  const requestMode = textValue(request.mode),
+    relativePath = textValue(request.relative_path),
+    remotePath = textValue(request.remote_path);
+  const workspaceShellBackend = textValue(request.workspace_shell_backend);
+  const hostWorkspaceShell =
+    requestMode === "workspace_shell" && workspaceShellBackend === "host";
+  const workspaceTransfer = requestMode === "workspace_upload";
+  const elevated = request.elevated === true;
+  const actionKind = script
+    ? t("approval.actionScript")
+    : t("approval.actionCommand");
+  const approvalTitle = elevated
+    ? filePath
+      ? t("approval.sudoFileTitle")
+      : t("approval.sudoTitle", { kind: actionKind })
+    : workspaceTransfer
+      ? t("approval.uploadTitle")
+      : hostWorkspaceShell
+        ? t("approval.hostShellTitle")
+        : filePath
+          ? t("approval.fileTitle")
+          : t("approval.executeTitle", { kind: actionKind });
+  const commandLabel = workspaceTransfer
+    ? t("approval.uploadLabel")
+    : elevated
+      ? filePath
+        ? t("approval.rootFileLabel")
+        : t("approval.rootCommandLabel", { kind: actionKind })
+      : filePath
+        ? t("approval.fileLabel")
+        : t("approval.commandLabel", { kind: actionKind });
+  const operation = workspaceTransfer
+    ? `${workspaceID}:${relativePath} → ${remotePath}`
+    : fullProgram(request) ||
+      script ||
+      `${requestMode} ${filePath}`.trim() ||
+      t("approval.pendingOperation");
+  const target = hosts.find((host) => host.id === approval.host_id);
+  const targetHost = target?.name || approval.host_id;
+  const hostName = workspaceTransfer
+    ? targetHost
+    : workspaceID
+      ? `Workspace / ${workspaceID}`
+      : targetHost;
+  const executionIdentity = elevated
+    ? t("approval.rootViaSudo")
+    : target?.user || t("approval.serviceUser");
+  const expectedSHA = textValue(request.expected_sha256),
+    validator = textValue(request.validator);
+  const explanationPending = approval.ai_review?.status === "pending";
+  const decide = async (scope: "once" | "session") => {
+    setDecisionBusy(scope);
+    setError("");
+    try {
+      const result = await api.approve(
+        approval.id,
+        note.trim() || "Reviewed and approved in the current Agent session.",
+        scope,
+      );
+      onNotice(
+        t("approval.approved", {
+          status: t(`statusLabels.${result.status}`, {
+            defaultValue: result.status,
+          }),
+          run: result.run_id,
+        }),
+      );
+      await refresh();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setDecisionBusy("");
+    }
+  };
+  const reject = async () => {
+    const instruction = note.trim();
+    if (!instruction) {
+      setError(t("approval.replacementRequired"));
+      return;
+    }
+    setDecisionBusy("reject");
+    setError("");
+    try {
+      await api.reject(approval.id, instruction);
+      onNotice(t("approval.rejected"));
+      await refresh();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setDecisionBusy("");
+    }
+  };
+  const retryExplanation = async () => {
+    setExplanationBusy(true);
+    setError("");
+    try {
+      const updated = await api.retryApprovalExplanation(approval.id);
+      const status = updated.ai_review?.status;
+      onNotice(
+        status === "completed"
+          ? t("approval.explanationReady")
+          : t("approval.explanationDegraded"),
+      );
+      await refresh();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setExplanationBusy(false);
+    }
+  };
+  const decisionDisabled = !!decisionBusy;
+  return (
+    <div className="approval-modal-backdrop">
+      <section
+        className={`approval-dialog ${approval.risk} ${elevated ? "elevated" : ""}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="approval-dialog-title"
+      >
+        <div className="approval-dialog-head">
+          <div className="approval-dialog-icon">
+            <ShieldAlert size={20} />
+          </div>
+          <div>
+            <span>
+              {t("approval.confirmation", {
+                queue:
+                  pendingCount > 1
+                    ? t("approval.queue", { count: pendingCount })
+                    : t("approval.currentSession"),
+              })}
+            </span>
+            <h2 id="approval-dialog-title">{approvalTitle}</h2>
+          </div>
+          <em className={`risk ${approval.risk}`}>
+            {t(`riskLabels.${approval.risk}`, {
+              defaultValue: approval.risk.replace("_", " "),
+            })}
+          </em>
+        </div>
+        <div className="approval-operation">
+          <span className="approval-command-label">
+            {commandLabel}
+            {elevated && (
+              <em>
+                <ShieldAlert size={12} />
+                sudo / root
+              </em>
+            )}
+          </span>
+          {elevated && (
+            <div className="approval-root-warning">
+              <ShieldAlert size={18} />
+              <div>
+                <b>{t("approval.rootWarning")}</b>
+                <span>{t("approval.rootWarningText")}</span>
+              </div>
+            </div>
+          )}
+          {filePath && (
+            <div className="approval-file-target">
+              <FileText size={15} />
+              <div>
+                <b>
+                  {workspaceTransfer
+                    ? `${workspaceID}:${relativePath} -> ${remotePath}`
+                    : filePath}
+                </b>
+                <span>
+                  {expectedSHA
+                    ? `Expected SHA256 · ${expectedSHA}`
+                    : t("approval.unboundVersion")}
+                  {validator ? ` · Validator ${validator}` : ""}
+                </span>
+              </div>
+            </div>
+          )}
+          <pre className="approval-command-preview">
+            {script || `$ ${operation}`}
+          </pre>
+          <dl>
+            <div>
+              <dt>
+                {workspaceTransfer
+                  ? t("approval.targetHost")
+                  : workspaceID
+                    ? t("common.workspace")
+                    : t("approval.targetHost")}
+              </dt>
+              <dd>{hostName}</dd>
+            </div>
+            <div>
+              <dt>{t("approval.identity")}</dt>
+              <dd>{executionIdentity}</dd>
+            </div>
+            {workspaceShellBackend && (
+              <div>
+                <dt>{t("approval.environment")}</dt>
+                <dd>
+                  {hostWorkspaceShell
+                    ? t("approval.hostShell")
+                    : t("tool.sandbox")}
+                </dd>
+              </div>
+            )}
+            <div>
+              <dt>{t("approval.deadline")}</dt>
+              <dd>
+                <Clock3 size={12} />
+                {new Date(approval.expires_at).toLocaleTimeString(
+                  localeFor(instance.language),
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>{t("approval.digest")}</dt>
+              <dd>{approval.request_digest.slice(0, 12)}</dd>
+            </div>
+          </dl>
+          {hostWorkspaceShell && (
+            <div className="approval-host-shell-warning">
+              <ShieldAlert size={14} />
+              <span>{t("approval.hostShellWarning")}</span>
+            </div>
+          )}
+          {typeof request.reason === "string" && <p>{request.reason}</p>}
+        </div>
+        <CommandExplanationPanel review={approval.ai_review} />
+        <div className="review-retry-row">
+          <span>
+            {explanationPending || explanationBusy
+              ? t("approval.retryPending")
+              : t("approval.retryText")}
+          </span>
+          <button
+            disabled={decisionDisabled || explanationPending || explanationBusy}
+            onClick={retryExplanation}
+          >
+            <RefreshCw
+              className={explanationBusy || explanationPending ? "spin" : ""}
+              size={13}
+            />
+            {explanationPending
+              ? t("approval.explanationWorking")
+              : explanationBusy
+                ? t("approval.retrying")
+                : t("approval.retryExplanation")}
+          </button>
+        </div>
+        <label className="approval-guidance">
+          <span>{t("approval.guidance")}</span>
+          <textarea
+            value={note}
+            maxLength={2000}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder={t("approval.guidancePlaceholder")}
+            autoFocus
+          />
+        </label>
+        {error && (
+          <div className="approval-dialog-error">
+            <ShieldAlert size={14} />
+            {error}
+          </div>
+        )}
+        <details className="approval-request-detail">
+          <summary>{t("approval.requestDetails")}</summary>
+          <pre>{JSON.stringify(request, null, 2)}</pre>
+        </details>
+        <div className="approval-choice-grid">
+          <button
+            className="allow-once"
+            disabled={decisionDisabled || stopping}
+            onClick={() => decide("once")}
+          >
+            <Check size={16} />
+            <span>
+              <b>
+                {decisionBusy === "once"
+                  ? t("approval.executing")
+                  : elevated
+                    ? t("approval.allowSudo")
+                    : t("approval.allowOnce")}
+              </b>
+              <small>
+                {elevated
+                  ? t("approval.allowSudoText")
+                  : t("approval.allowOnceText")}
+              </small>
+            </span>
+          </button>
+          <button
+            className="allow-session"
+            disabled={
+              decisionDisabled ||
+              stopping ||
+              approval.risk === "critical" ||
+              hostWorkspaceShell
+            }
+            onClick={() => decide("session")}
+            title={
+              hostWorkspaceShell
+                ? t("approval.hostUnavailable")
+                : approval.risk === "critical"
+                  ? t("approval.criticalUnavailable")
+                  : ""
+            }
+          >
+            <ShieldCheck size={16} />
+            <span>
+              <b>
+                {decisionBusy === "session"
+                  ? t("approval.authorizing")
+                  : elevated
+                    ? t("approval.allowSessionSudo")
+                    : t("approval.allowSession")}
+              </b>
+              <small>
+                {hostWorkspaceShell
+                  ? t("approval.hostUnavailable")
+                  : approval.risk === "critical"
+                    ? t("approval.criticalUnavailable")
+                    : t("approval.exactMatch")}
+              </small>
+            </span>
+          </button>
+          <button
+            className="reject-guidance"
+            disabled={decisionDisabled || stopping || !note.trim()}
+            onClick={reject}
+          >
+            <X size={16} />
+            <span>
+              <b>
+                {decisionBusy === "reject"
+                  ? t("approval.rejecting")
+                  : t("approval.reject")}
+              </b>
+              <small>{t("approval.rejectText")}</small>
+            </span>
+          </button>
+          <button
+            className="stop-agent-run"
+            disabled={decisionDisabled || stopping || !running}
+            onClick={onStop}
+          >
+            <Square size={14} fill="currentColor" />
+            <span>
+              <b>
+                {stopping ? t("approval.stopping") : t("approval.stopAgent")}
+              </b>
+              <small>{t("approval.stopText")}</small>
+            </span>
+          </button>
+        </div>
+        <p className="approval-wait">
+          {running ? t("approval.waiting") : t("approval.detached")}
+        </p>
+      </section>
+    </div>
+  );
 }
 
-const maxPrivateKeyBytes=1<<20
-const emptyHostForm: HostInput = {name:'',address:'',port:22,user:'',auth_type:'agent',private_key:'',known_hosts_file:'',proxy_jump_host_id:'',proxy_url:'',proxy_username:'',proxy_password:'',password:'',sudo_mode:'none',sudo_password:''}
+const maxPrivateKeyBytes = 1 << 20;
+const emptyHostForm: HostInput = {
+  name: "",
+  address: "",
+  port: 22,
+  user: "",
+  auth_type: "agent",
+  private_key: "",
+  known_hosts_file: "",
+  proxy_jump_host_id: "",
+  proxy_url: "",
+  proxy_username: "",
+  proxy_password: "",
+  password: "",
+  sudo_mode: "none",
+  sudo_password: "",
+};
 function authLabel(value:HostAuthType){return i18n.t(value==='agent'?'hosts.authAgent':value==='key'?'hosts.authKey':'hosts.authPassword')}
 function sudoLabel(value:HostSudoMode){return i18n.t(value==='none'?'hosts.sudoNone':value==='nopasswd'?'hosts.sudoNopasswd':'hosts.sudoPassword')}
 
 function HostsPage({ hosts, refresh }: {hosts:Host[];refresh:()=>Promise<void>}) {
 	const {t}=useTranslation()
-  const [showForm, setShowForm] = useState(false); const [notice, setNotice] = useState(''); const [saving,setSaving]=useState(false)
+  const [showForm, setShowForm] = useState(false); const [notice, setNotice] = useState(''); const [saving,setSaving]=useState(false);const [deletingHost,setDeletingHost]=useState('')
   const [form, setForm] = useState<HostInput>(emptyHostForm)
 	const [privateKeyName,setPrivateKeyName]=useState(''),[privateKeyError,setPrivateKeyError]=useState(''),[existingPrivateKey,setExistingPrivateKey]=useState(false),[privateKeyInputKey,setPrivateKeyInputKey]=useState(0)
   const editing=!!form.id
@@ -865,6 +1260,7 @@ function HostsPage({ hosts, refresh }: {hosts:Host[];refresh:()=>Promise<void>})
 	const save = async (event:FormEvent) => { event.preventDefault(); if(missingPrivateKey)return;setSaving(true); try { const saved=await api.saveHost(form); setShowForm(false); setForm(emptyHostForm);resetPrivateKey(); setNotice(t('hosts.saved',{name:saved.name,action:editing?t('hosts.updated'):t('hosts.registered')})); await refresh() } catch(err){setNotice(errorText(err))} finally{setSaving(false)} }
 	const scan = async (host:Host) => { try { const key = await api.scanKey(host.id); if (confirm(`${t('hosts.trustConfirm',{name:host.name})}\n\n${key.algorithm?`${key.algorithm}\n`:''}${key.fingerprint}`)) { await api.trustKey(host.id, key.fingerprint); setNotice(t('hosts.trusted',{fingerprint:key.fingerprint})) } } catch(err){setNotice(errorText(err))} }
   const probe = async (host:Host) => { try { const info = await api.probe(host.id); setNotice(`${host.name}: ${Object.values(info).join(' · ')}`) } catch(err){setNotice(errorText(err))} }
+	const remove=async(host:Host)=>{if(!confirm(t('hosts.deleteConfirm',{name:host.name})))return;setDeletingHost(host.id);setNotice('');try{await api.deleteHost(host.id);setNotice(t('hosts.deleted',{name:host.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setDeletingHost('')}}
 	return <div className="page-stack"><div className="page-actions"><div><p>{t('hosts.title')}</p><span>{t('hosts.subtitle')}</span></div><button className="primary" onClick={openCreate}><Plus size={16}/>{t('hosts.add')}</button></div>
     {notice && <div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
 	{showForm && <form className="host-form panel" onSubmit={save}><div className="host-form-head"><div><h3>{editing?t('hosts.editTitle'):t('hosts.createTitle')}</h3><p>{editing?t('hosts.editHelp'):t('hosts.createHelp')}</p></div><button type="button" className="close-button" title={t('common.close')} onClick={()=>setShowForm(false)}><X size={16}/></button></div><div className="form-grid host-fields">
@@ -883,12 +1279,12 @@ function HostsPage({ hosts, refresh }: {hosts:Host[];refresh:()=>Promise<void>})
 	  <label><span>{t('hosts.sudoPolicy')}</span><select value={form.sudo_mode} onChange={event=>setForm({...form,sudo_mode:event.target.value as HostSudoMode,sudo_password:''})}>{(['none','nopasswd','password'] as HostSudoMode[]).map(mode=><option value={mode} key={mode}>{sudoLabel(mode)}</option>)}</select></label>
 	  {form.sudo_mode==='password'&&<label><span>{t('hosts.sudoPasswordLabel')}</span><input type="password" autoComplete="new-password" value={form.sudo_password} onChange={event=>setForm({...form,sudo_password:event.target.value})} placeholder={editing?t('hosts.keepPassword'):t('common.required')} required={!editing}/></label>}
 	</div><div className="credential-note"><ShieldCheck size={15}/><span>{t('hosts.credentialNote')}</span></div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button className="primary" disabled={saving||!!privateKeyError||missingPrivateKey}>{saving?t('common.saving'):editing?t('hosts.update'):t('hosts.save')}</button></div></form>}
-	<div className="host-grid">{hosts.map(host=>{const encryptedCredential=(host.auth_type==='password'&&host.has_password)||(host.auth_type==='key'&&host.has_private_key);return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${host.address}:${host.port}`}</span></div><span className="host-state">{t('hosts.state')}</span></div><dl><div><dt>{t('hosts.authentication')}</dt><dd>{authLabel(host.auth_type||'agent')}{encryptedCredential?` · ${t('hosts.encrypted')}`:''}</dd></div>{host.proxy_url&&<div><dt>{t('hosts.proxy')}</dt><dd>{host.proxy_url}{host.has_proxy_password?` · ${t('hosts.encrypted')}`:''}</dd></div>}<div><dt>Sudo</dt><dd>{sudoLabel(host.sudo_mode||'none')}{host.sudo_mode==='password'&&host.has_sudo_password?` · ${t('hosts.encrypted')}`:''}</dd></div><div><dt>{t('hosts.hostId')}</dt><dd>{host.id}</dd></div></dl><div className="card-actions"><button onClick={()=>probe(host)}><Activity size={15}/>{t('hosts.probe')}</button><button onClick={()=>scan(host)}><KeyRound size={15}/>{t('hosts.trustKey')}</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>{t('common.edit')}</button><button className="danger" title={t('common.delete')} onClick={async()=>{if(confirm(t('hosts.deleteConfirm',{name:host.name}))){await api.deleteHost(host.id);await refresh()}}}><Trash2 size={15}/></button></div></article>})}</div>
+	<div className="host-grid">{hosts.map(host=>{const encryptedCredential=(host.auth_type==='password'&&host.has_password)||(host.auth_type==='key'&&host.has_private_key);return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${host.address}:${host.port}`}</span></div><span className="host-state">{t('hosts.state')}</span></div><dl><div><dt>{t('hosts.authentication')}</dt><dd>{authLabel(host.auth_type||'agent')}{encryptedCredential?` · ${t('hosts.encrypted')}`:''}</dd></div>{host.proxy_url&&<div><dt>{t('hosts.proxy')}</dt><dd>{host.proxy_url}{host.has_proxy_password?` · ${t('hosts.encrypted')}`:''}</dd></div>}<div><dt>Sudo</dt><dd>{sudoLabel(host.sudo_mode||'none')}{host.sudo_mode==='password'&&host.has_sudo_password?` · ${t('hosts.encrypted')}`:''}</dd></div><div><dt>{t('hosts.hostId')}</dt><dd>{host.id}</dd></div></dl><div className="card-actions"><button onClick={()=>probe(host)}><Activity size={15}/>{t('hosts.probe')}</button><button onClick={()=>scan(host)}><KeyRound size={15}/>{t('hosts.trustKey')}</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>{t('common.edit')}</button><button className="danger" disabled={deletingHost===host.id} title={t('common.delete')} onClick={()=>void remove(host)}>{deletingHost===host.id?<LoaderCircle className="spin" size={15}/>:<Trash2 size={15}/>}</button></div></article>})}</div>
 	{!hosts.length && <Empty icon={<Server/>} title={t('hosts.emptyTitle')} text={t('hosts.emptyText')}/>}
   </div>
 }
 
-const emptyProviderForm: ModelProviderInput = {name:'',kind:'openai',base_url:'',model:'gpt-4o-mini',api_key:''}
+const emptyProviderForm: ModelProviderInput = {name:'',kind:'openai',base_url:'',model:'gpt-4o-mini',api_key:'',proxy_url:'',proxy_username:'',proxy_password:''}
 const providerLabels: Record<ModelProviderKind,string> = {
   openai: 'OpenAI', deepseek: 'DeepSeek', openai_compatible: 'OpenAI-compatible', ollama: 'Ollama',
 }
@@ -908,12 +1304,13 @@ function ModelsPage({providers,health,refresh}:{providers:ModelProvider[];health
   const [catalog,setCatalog]=useState<string[]>([])
   const [discovering,setDiscovering]=useState(false)
   const editing=!!form.id
+	const editingProvider=providers.find(provider=>provider.id===form.id)
 
   const openCreate=()=>{setForm(emptyProviderForm);setCatalog([]);setShowForm(true);setNotice('')}
-  const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,api_key:''});setCatalog([]);setShowForm(true);setNotice('')}
+  const openEdit=(provider:ModelProvider)=>{setForm({id:provider.id,name:provider.name,kind:provider.kind,base_url:provider.base_url||'',model:provider.model,api_key:'',proxy_url:provider.proxy_url||'',proxy_username:provider.proxy_username||'',proxy_password:''});setCatalog([]);setShowForm(true);setNotice('')}
   const changeKind=(kind:ModelProviderKind)=>{setCatalog([]);setForm({...form,kind,...providerDefaults[kind]})}
-	const discover=async()=>{setDiscovering(true);try{const result=await api.discoverModels({id:form.id,kind:form.kind,base_url:form.base_url,api_key:form.api_key});setCatalog(result.models);setForm(current=>({...current,model:result.models.includes(current.model)?current.model:''}));setNotice(t('models.found',{count:result.count}))}catch(err){setCatalog([]);setNotice(errorText(err))}finally{setDiscovering(false)}}
-	const testForm=async()=>{setBusy('test-form');try{const result=await api.testModelConfiguration({id:form.id,kind:form.kind,base_url:form.base_url,model:form.model,api_key:form.api_key});setNotice(t('models.healthy',{name:result.model,response:result.response,latency:result.latency_ms}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
+	const discover=async()=>{setDiscovering(true);try{const result=await api.discoverModels({id:form.id,kind:form.kind,base_url:form.base_url,api_key:form.api_key,proxy_url:form.proxy_url,proxy_username:form.proxy_username,proxy_password:form.proxy_password,clear_proxy_password:form.clear_proxy_password});setCatalog(result.models);setForm(current=>({...current,model:result.models.includes(current.model)?current.model:''}));setNotice(t('models.found',{count:result.count}))}catch(err){setCatalog([]);setNotice(errorText(err))}finally{setDiscovering(false)}}
+	const testForm=async()=>{setBusy('test-form');try{const result=await api.testModelConfiguration({id:form.id,kind:form.kind,base_url:form.base_url,model:form.model,api_key:form.api_key,proxy_url:form.proxy_url,proxy_username:form.proxy_username,proxy_password:form.proxy_password,clear_proxy_password:form.clear_proxy_password});setNotice(t('models.healthy',{name:result.model,response:result.response,latency:result.latency_ms}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
 	const save=async(event:FormEvent)=>{event.preventDefault();setBusy('save');try{const saved=await api.saveModelProvider(form);setNotice(t('models.saved',{name:saved.name}));setShowForm(false);setForm(emptyProviderForm);await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
 	const activate=async(provider:ModelProvider)=>{setBusy(provider.id);try{await api.activateModelProvider(provider.id);setNotice(t('models.activated',{name:provider.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
 	const test=async(provider:ModelProvider)=>{setBusy(`test-${provider.id}`);try{const result=await api.testModelProvider(provider.id);setNotice(t('models.healthy',{name:provider.name,response:result.response,latency:result.latency_ms}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
@@ -931,13 +1328,16 @@ function ModelsPage({providers,health,refresh}:{providers:ModelProvider[];health
 		<label className="model-id-field"><span className="field-title"><span>{t('models.modelId')}</span><button type="button" onClick={discover} disabled={discovering}><RefreshCw size={12}/>{discovering?t('models.fetching'):t('models.fetchModels')}</button></span>{catalog.length>0?<select value={form.model} onChange={event=>setForm({...form,model:event.target.value})} required><option value="">{t('models.selectModel')}</option>{catalog.map(model=><option value={model} key={model}>{model}</option>)}</select>:<input value={form.model} onChange={event=>setForm({...form,model:event.target.value})} placeholder={t('models.modelPlaceholder')} required/>}{catalog.length>0&&<small>{t('models.available',{count:catalog.length})} · <button type="button" onClick={()=>setCatalog([])}>{t('models.enterManually')}</button></small>}</label>
 		<label><span>{t('models.apiKey')}</span><input type="password" autoComplete="new-password" value={form.api_key} onChange={event=>{setCatalog([]);setForm({...form,api_key:event.target.value})}} placeholder={editing?t('models.keepKey'):t('models.localOptional')}/></label>
 		<label className="base-url-field"><span>{t('models.baseUrl')}</span><input value={form.base_url} onChange={event=>{setCatalog([]);setForm({...form,base_url:event.target.value})}} placeholder={form.kind==='openai'?t('models.officialEndpoint'):t('models.urlPlaceholder')}/><small>{t('models.urlHelp')}</small></label>
+		<label className="proxy-url-field"><span>{t('models.proxyUrl')}</span><input value={form.proxy_url} onChange={event=>{setCatalog([]);setForm({...form,proxy_url:event.target.value,clear_proxy_password:false})}} placeholder="socks5h://127.0.0.1:1080"/><small>{t('models.proxySchemes')}</small></label>
+		<label className="proxy-credential-field"><span>{t('models.proxyUsername')}</span><input value={form.proxy_username} onChange={event=>{setCatalog([]);setForm({...form,proxy_username:event.target.value,clear_proxy_password:false})}}/></label>
+		<label className="proxy-credential-field"><span>{t('models.proxyPassword')}</span><input type="password" autoComplete="new-password" value={form.proxy_password} onChange={event=>{setCatalog([]);setForm({...form,proxy_password:event.target.value,clear_proxy_password:false})}} placeholder={editingProvider?.has_proxy_password&&!form.clear_proxy_password?t('models.keepProxyPassword'):''}/>{editingProvider?.has_proxy_password&&!form.clear_proxy_password&&<small><button type="button" onClick={()=>setForm({...form,proxy_password:'',clear_proxy_password:true})}>{t('models.clearProxyPassword')}</button></small>}</label>
       </div>
 	  <div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button type="button" className="test-config" onClick={testForm} disabled={!!busy||!form.model}><Activity size={14}/>{busy==='test-form'?t('models.sendingHello'):t('models.testModel')}</button><button className="primary" disabled={!!busy}>{busy==='save'?t('common.saving'):t('models.saveProvider')}</button></div>
     </form>}
     <div className="model-grid">{providers.map(provider=><article className={`model-card panel ${provider.active?'active':''}`} key={provider.id}>
 	  <div className="model-card-head"><div className="provider-glyph"><Cpu size={21}/></div><div><h3>{provider.name}</h3><span>{providerLabels[provider.kind]}</span></div>{provider.active&&<em><Zap size={12}/>{t('models.active')}</em>}</div>
       <div className="model-name">{provider.model}</div>
-	  <dl><div><dt>{t('models.endpoint')}</dt><dd>{provider.base_url||t('models.providerDefault')}</dd></div><div><dt>{t('models.credential')}</dt><dd>{provider.has_api_key?t('models.encryptedKey'):t('models.noApiKey')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(provider.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl>
+	  <dl><div><dt>{t('models.endpoint')}</dt><dd>{provider.base_url||t('models.providerDefault')}</dd></div><div><dt>{t('models.proxy')}</dt><dd>{provider.proxy_url||t('models.noProxy')}{provider.has_proxy_password?` · ${t('models.proxyAuth')}`:''}</dd></div><div><dt>{t('models.credential')}</dt><dd>{provider.has_api_key?t('models.encryptedKey'):t('models.noApiKey')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(provider.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl>
 	  <div className="model-actions"><button onClick={()=>test(provider)} disabled={!!busy}><Activity size={14}/>{busy===`test-${provider.id}`?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(provider)} disabled={!!busy}><Edit3 size={14}/>{t('common.edit')}</button>{!provider.active&&<button className="use-model" onClick={()=>activate(provider)} disabled={!!busy}><Zap size={14}/>{busy===provider.id?t('models.switching'):t('models.useModel')}</button>}<button className="danger" title={t('common.delete')} onClick={()=>remove(provider)} disabled={!!busy}><Trash2 size={14}/></button></div>
     </article>)}</div>
 	{!providers.length&&<Empty icon={<Cpu/>} title={t('models.emptyTitle')} text={health?.model?.source==='environment'?t('models.environmentText'):t('models.emptyText')}/>}

@@ -2,6 +2,18 @@ package domain
 
 import "time"
 
+type Workspace struct {
+	ID        string    `json:"id"`
+	Access    string    `json:"access"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type WorkspaceInput struct {
+	ID     string `json:"id"`
+	Access string `json:"access"`
+}
+
 type RiskLevel string
 
 const (
@@ -74,40 +86,56 @@ type HostCapability struct {
 }
 
 type ModelProvider struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Kind         string    `json:"kind"`
-	BaseURL      string    `json:"base_url,omitempty"`
-	Model        string    `json:"model"`
-	APIKeyCipher string    `json:"-"`
-	HasAPIKey    bool      `json:"has_api_key"`
-	Active       bool      `json:"active"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	Kind                string    `json:"kind"`
+	BaseURL             string    `json:"base_url,omitempty"`
+	Model               string    `json:"model"`
+	APIKeyCipher        string    `json:"-"`
+	HasAPIKey           bool      `json:"has_api_key"`
+	ProxyURL            string    `json:"proxy_url,omitempty"`
+	ProxyUsername       string    `json:"proxy_username,omitempty"`
+	ProxyPasswordCipher string    `json:"-"`
+	HasProxyPassword    bool      `json:"has_proxy_password"`
+	Active              bool      `json:"active"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 type ModelProviderInput struct {
-	ID      string `json:"id,omitempty"`
-	Name    string `json:"name"`
-	Kind    string `json:"kind"`
-	BaseURL string `json:"base_url,omitempty"`
-	Model   string `json:"model"`
-	APIKey  string `json:"api_key,omitempty"`
+	ID                 string `json:"id,omitempty"`
+	Name               string `json:"name"`
+	Kind               string `json:"kind"`
+	BaseURL            string `json:"base_url,omitempty"`
+	Model              string `json:"model"`
+	APIKey             string `json:"api_key,omitempty"`
+	ProxyURL           string `json:"proxy_url,omitempty"`
+	ProxyUsername      string `json:"proxy_username,omitempty"`
+	ProxyPassword      string `json:"proxy_password,omitempty"`
+	ClearProxyPassword bool   `json:"clear_proxy_password,omitempty"`
 }
 
 type ModelDiscoveryInput struct {
-	ID      string  `json:"id,omitempty"`
-	Kind    string  `json:"kind,omitempty"`
-	BaseURL *string `json:"base_url,omitempty"`
-	APIKey  string  `json:"api_key,omitempty"`
+	ID                 string  `json:"id,omitempty"`
+	Kind               string  `json:"kind,omitempty"`
+	BaseURL            *string `json:"base_url,omitempty"`
+	APIKey             string  `json:"api_key,omitempty"`
+	ProxyURL           *string `json:"proxy_url,omitempty"`
+	ProxyUsername      *string `json:"proxy_username,omitempty"`
+	ProxyPassword      string  `json:"proxy_password,omitempty"`
+	ClearProxyPassword bool    `json:"clear_proxy_password,omitempty"`
 }
 
 type ModelTestInput struct {
-	ID      string  `json:"id,omitempty"`
-	Kind    string  `json:"kind,omitempty"`
-	BaseURL *string `json:"base_url,omitempty"`
-	Model   string  `json:"model"`
-	APIKey  string  `json:"api_key,omitempty"`
+	ID                 string  `json:"id,omitempty"`
+	Kind               string  `json:"kind,omitempty"`
+	BaseURL            *string `json:"base_url,omitempty"`
+	Model              string  `json:"model"`
+	APIKey             string  `json:"api_key,omitempty"`
+	ProxyURL           *string `json:"proxy_url,omitempty"`
+	ProxyUsername      *string `json:"proxy_username,omitempty"`
+	ProxyPassword      string  `json:"proxy_password,omitempty"`
+	ClearProxyPassword bool    `json:"clear_proxy_password,omitempty"`
 }
 
 type ModelCatalog struct {
@@ -150,6 +178,69 @@ type SystemSettingsInput struct {
 	SubagentModelProviderID     *string `json:"subagent_model_provider_id,omitempty"`
 	SubagentTimeoutSeconds      *int    `json:"subagent_timeout_seconds,omitempty"`
 	WorkspaceShellMode          *string `json:"workspace_shell_mode,omitempty"`
+}
+
+const (
+	DefaultWebSearchBaseURL        = "https://api.tavily.com"
+	DefaultWebSearchTimeoutSeconds = 20
+	MinWebSearchTimeoutSeconds     = 5
+	MaxWebSearchTimeoutSeconds     = 120
+	DefaultWebSearchMaxResults     = 10
+	MinWebSearchMaxResults         = 1
+	MaxWebSearchMaxResults         = 20
+)
+
+type WebSearchSettings struct {
+	Enabled             bool      `json:"enabled"`
+	Provider            string    `json:"provider"`
+	BaseURL             string    `json:"base_url"`
+	APIKeyCipher        string    `json:"-"`
+	HasAPIKey           bool      `json:"has_api_key"`
+	ProxyURL            string    `json:"proxy_url,omitempty"`
+	ProxyUsername       string    `json:"proxy_username,omitempty"`
+	ProxyPasswordCipher string    `json:"-"`
+	HasProxyPassword    bool      `json:"has_proxy_password"`
+	TimeoutSeconds      int       `json:"timeout_seconds"`
+	MaxResults          int       `json:"max_results"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+type WebSearchSettingsInput struct {
+	Enabled            bool   `json:"enabled"`
+	BaseURL            string `json:"base_url"`
+	APIKey             string `json:"api_key,omitempty"`
+	ClearAPIKey        bool   `json:"clear_api_key,omitempty"`
+	ProxyURL           string `json:"proxy_url,omitempty"`
+	ProxyUsername      string `json:"proxy_username,omitempty"`
+	ProxyPassword      string `json:"proxy_password,omitempty"`
+	ClearProxyPassword bool   `json:"clear_proxy_password,omitempty"`
+	TimeoutSeconds     int    `json:"timeout_seconds"`
+	MaxResults         int    `json:"max_results"`
+}
+
+type WebSearchRequest struct {
+	Query          string   `json:"query"`
+	MaxResults     int      `json:"max_results,omitempty"`
+	TimeRange      string   `json:"time_range,omitempty"`
+	IncludeDomains []string `json:"include_domains,omitempty"`
+	ExcludeDomains []string `json:"exclude_domains,omitempty"`
+}
+
+type WebSearchResult struct {
+	Title         string  `json:"title"`
+	URL           string  `json:"url"`
+	Content       string  `json:"content"`
+	Score         float64 `json:"score,omitempty"`
+	PublishedDate string  `json:"published_date,omitempty"`
+}
+
+type WebSearchResponse struct {
+	ToolMeta
+	Query              string            `json:"query"`
+	Provider           string            `json:"provider"`
+	Results            []WebSearchResult `json:"results"`
+	ResponseTime       float64           `json:"response_time,omitempty"`
+	ContentIsUntrusted bool              `json:"content_is_untrusted"`
 }
 
 type MCPTransport string
@@ -300,7 +391,6 @@ type ExecResult struct {
 	Status              string        `json:"status"`
 	Risk                RiskLevel     `json:"risk"`
 	ApprovalID          string        `json:"approval_id,omitempty"`
-	Challenge           string        `json:"challenge,omitempty"`
 	OperatorInstruction string        `json:"operator_instruction,omitempty"`
 	ExitCode            int           `json:"exit_code,omitempty"`
 	Stdout              string        `json:"stdout,omitempty"`
@@ -408,7 +498,6 @@ type Approval struct {
 	RequestDigest string         `json:"request_digest"`
 	Risk          RiskLevel      `json:"risk"`
 	Status        string         `json:"status"`
-	Challenge     string         `json:"challenge,omitempty"`
 	Reason        string         `json:"reason,omitempty"`
 	AIReview      *CommandReview `json:"ai_review,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`

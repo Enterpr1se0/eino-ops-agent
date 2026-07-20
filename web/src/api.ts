@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatMessage, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Run, ServerLogResponse, SystemSettings, SystemSettingsInput, ToolCapabilities, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceUploadResult } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatMessage, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Run, ServerLogResponse, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
 let csrfToken = ''
 
@@ -51,11 +51,17 @@ export const api = {
 	setMCPServerEnabled: (id:string,enabled:boolean) => request<MCPServer>(`/api/v1/mcp-servers/${encodeURIComponent(id)}/${enabled?'enable':'disable'}`,{method:'POST',body:'{}'}),
 	retryMCPServer: (id:string) => request<MCPServer>(`/api/v1/mcp-servers/${encodeURIComponent(id)}/retry`,{method:'POST',body:'{}'}),
 	testMCPServer: (id:string) => request<MCPTestResult>(`/api/v1/mcp-servers/${encodeURIComponent(id)}/test`,{method:'POST',body:'{}'}),
+	createWorkspace: (workspace:WorkspaceInput) => request<WorkspaceCapability>('/api/v1/workspaces',{method:'POST',body:JSON.stringify(workspace)}),
+	updateWorkspace: (id:string,workspace:WorkspaceInput) => request<WorkspaceCapability>(`/api/v1/workspaces/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify(workspace)}),
+	deleteWorkspace: (id:string) => request<void>(`/api/v1/workspaces/${encodeURIComponent(id)}`,{method:'DELETE'}),
 	workspaceFiles: (workspaceId:string,path='.') => request<WorkspaceFileList>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`),
 	previewWorkspaceFile: (workspaceId:string,path:string) => request<WorkspaceFilePreview>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/preview?path=${encodeURIComponent(path)}`),
 	uploadWorkspaceFile: (workspaceId:string,file:File,path:string) => {const body=new FormData();body.set('file',file);body.set('path',path);return request<WorkspaceUploadResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files`,{method:'POST',body})},
 	deleteWorkspaceEntry: (workspaceId:string,path:string) => request<WorkspaceDeleteResult>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`,{method:'DELETE'}),
   saveSystemSettings: (settings: SystemSettingsInput) => request<SystemSettings>('/api/v1/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+  webSearchSettings: () => request<WebSearchSettings>('/api/v1/web-search/settings'),
+  saveWebSearchSettings: (settings: WebSearchSettingsInput) => request<WebSearchSettings>('/api/v1/web-search/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+  testWebSearch: (query='Tavily Search API') => request<WebSearchResponse>('/api/v1/web-search/test', { method: 'POST', body: JSON.stringify({query}) }),
   modelProviders: () => requestList<ModelProvider>('/api/v1/model-providers'),
   discoverModels: (input: ModelDiscoveryInput) => request<ModelCatalog>('/api/v1/model-providers/discover', { method: 'POST', body: JSON.stringify(input) }),
   testModelConfiguration: (input: ModelTestInput) => request<ModelTestResult>('/api/v1/model-providers/test', { method: 'POST', body: JSON.stringify(input) }),
@@ -71,7 +77,7 @@ export const api = {
   probe: (id: string) => request<Record<string, string>>(`/api/v1/hosts/${id}/probe`, { method: 'POST', body: '{}' }),
   approvals: () => requestList<Approval>('/api/v1/approvals?status=pending&limit=100'),
   retryApprovalExplanation: (id: string) => request<Approval>(`/api/v1/approvals/${id}/explanation/retry`, { method: 'POST', body: '{}' }),
-  approve: (id: string, challenge: string, reason: string, scope: 'once'|'session' = 'once') => request<ApprovalExecutionResult>(`/api/v1/approvals/${id}/approve`, { method: 'POST', body: JSON.stringify({ challenge, reason, scope }) }),
+  approve: (id: string, reason: string, scope: 'once'|'session' = 'once') => request<ApprovalExecutionResult>(`/api/v1/approvals/${id}/approve`, { method: 'POST', body: JSON.stringify({ reason, scope }) }),
   reject: (id: string, reason: string) => request(`/api/v1/approvals/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   runs: (query = '') => requestList<Run>(`/api/v1/runs?limit=100&q=${encodeURIComponent(query)}`),
   logs: (filters: {level?:string;component?:string;q?:string;limit?:number} = {}) => {

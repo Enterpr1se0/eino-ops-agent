@@ -8,24 +8,15 @@ web_auth:
   # plaintext password is never persisted. Enable this when served over HTTPS.
   secure_cookies: false
 
-# When workspaces is empty, OpsPilot creates this directory relative to its
-# startup working directory and exposes it as read_write Workspace "default".
-# Set it to "" to disable the automatic Workspace, or override it with
-# OPS_AGENT_DEFAULT_WORKSPACE.
-default_workspace_dir: workspace
+# OpsPilot creates one directory per Workspace below this managed root.
+# Relative paths use the startup working directory. Override with
+# OPS_AGENT_WORKSPACE_DIR.
+workspace_dir: workspace
 
 # System settings choose Sandbox, Host Shell, or Disabled. Sandbox is the
 # fail-safe default and requires this Bubblewrap binary on Linux; it never
 # falls back to Host Shell. Override with OPS_AGENT_WORKSPACE_SANDBOX.
 workspace_sandbox_path: bwrap
-
-# Explicit absolute roots available to workspace_* tools. Defining one or more
-# entries replaces the automatic default. These cannot be changed in Web.
-workspaces: []
-# Example:
-#  - id: demo-app
-#    root: /srv/opspilot-workspaces/demo-app
-#    access: read_write
 
 # Validators are argv templates, never shell snippets. {{path}} is substituted
 # as one quoted remote argument or one local exec.Command argument.

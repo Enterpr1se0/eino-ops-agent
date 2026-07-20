@@ -43,8 +43,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 31 {
-		t.Fatalf("built-in catalog size=%d, want 31", len(descriptors))
+	if len(descriptors) != 32 {
+		t.Fatalf("built-in catalog size=%d, want 32", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -71,7 +71,7 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if seen["ssh_approval_status"] {
 		t.Fatal("removed ssh_approval_status tool remains in the Agent catalog")
 	}
-	if !seen["ops_plan_get"] || !seen["ssh_config_apply"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] {
+	if !seen["ops_plan_get"] || !seen["ssh_config_apply"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] {
 		t.Fatalf("representative functions missing: %#v", seen)
 	}
 }
