@@ -313,6 +313,17 @@
 .auth-screen>.language-switch{position:fixed;top:22px;right:24px}
 @media(max-width:760px){.top-actions .status{display:none}.top-actions{gap:7px}.auth-screen>.language-switch{top:14px;right:14px}}
 
+/* One-time desktop credential and destructive action dialogs. */
+.credential-dialog-backdrop,.destructive-dialog-backdrop{position:fixed;inset:0;z-index:70;display:grid;place-items:center;padding:28px;background:#020705dc;backdrop-filter:blur(7px);animation:approval-fade-in .16s ease-out}
+.credential-dialog,.destructive-dialog{width:min(480px,calc(100vw - 56px));padding:22px;box-shadow:0 30px 100px #000b;animation:approval-rise-in .2s ease-out}
+.credential-dialog{border-color:#315d49;background:linear-gradient(145deg,#10241c,#08120f 68%)}
+.credential-dialog header>div,.destructive-dialog header{display:flex;align-items:center;gap:12px}.credential-dialog header>div{color:var(--green)}
+.credential-dialog header small,.destructive-dialog header small{display:block;font:600 var(--text-micro) DM Mono,'Noto Sans SC',monospace;letter-spacing:1.2px}.credential-dialog header small{color:#65a98a}.credential-dialog h2,.destructive-dialog h2{margin:4px 0 0;color:#e4eee9;font-size:17px}
+.credential-dialog>p,.destructive-dialog>p{margin:17px 0;color:#829b90;font-size:var(--text-body);line-height:1.65}
+.credential-password{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:9px;padding:9px;border:1px solid #2b6048;border-radius:8px;background:#050d0a}.credential-password code{padding:0 5px;overflow:auto;color:#b7f7d3;font:500 var(--text-body) DM Mono,'Noto Sans SC',monospace;white-space:nowrap;user-select:all}.credential-password button{height:34px;display:flex;align-items:center;gap:6px;padding:0 10px;border:1px solid #347557;border-radius:6px;background:#123323;color:var(--green);font-size:var(--text-caption);cursor:pointer}.credential-copy-error{display:flex;align-items:center;gap:6px;margin-top:9px;color:#ff9999;font-size:var(--text-caption)}
+.credential-dialog footer,.destructive-dialog footer{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}.credential-dialog footer .primary{min-height:36px}
+.destructive-dialog{border-color:#693535;background:linear-gradient(145deg,#251414,#0d1210 68%)}.destructive-dialog header{color:#ff8585}.destructive-dialog header small{color:#b06565}.destructive-dialog>p{color:#b58b8b}.destructive-dialog footer button{height:36px;padding:0 13px;border:1px solid #493334;border-radius:7px;background:#171313;color:#b89a9a;font-size:var(--text-control);cursor:pointer}.destructive-dialog footer button.danger{display:flex;align-items:center;gap:6px;border-color:#944343;background:#7b2929;color:#fff;font-weight:700}.destructive-dialog footer button:disabled{opacity:.5;cursor:not-allowed}
+
 /* Password visibility control shared by authentication and encrypted settings. */
 .password-input{position:relative;width:100%;min-width:0}
 .password-input>input{width:100%;min-width:0;padding-right:38px!important}

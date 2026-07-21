@@ -23,6 +23,8 @@ const zh = {
   auth: {
     subtitle: 'OPSPILOT', title: '管理员登录',
     authenticating: '验证中...', enter: '登录',
+	initialPasswordLabel: '首次启动', initialPasswordTitle: '初始化管理员密码', initialPasswordText: '这是此密码唯一一次显示。请立即复制并妥善保存，之后可在系统设置中修改。',
+	copyPassword: '复制密码', passwordCopied: '已复制', passwordCopyFailed: '复制失败，请手动选择密码保存。', passwordSaved: '我已保存密码',
   },
   config: {
     tabs: { models: '模型提供商', hosts: 'SSH 主机', system: '系统设置' },
@@ -173,7 +175,7 @@ const zh = {
     keyLimit: 'OpenSSH 私钥 · 最大 1 MiB', keyRequired: '必须上传私钥。', keySizeError: '私钥大小必须在 1 字节到 1 MiB 之间。',
     proxyJump: 'SSH 跳板机', direct: '直连', proxy: '网络代理', proxyURL: '代理地址', proxyUsername: '代理用户名', proxyPassword: '代理密码', knownHosts: 'Known hosts 文件', useDefault: '使用系统默认值', sudoPolicy: 'Sudo 策略', sudoPasswordLabel: 'Sudo 密码',
     update: '更新主机', save: '保存主机', saved: '{{name}} 已{{action}}。', updated: '更新', registered: '注册',
-		hostKey: '主机密钥', uncheckedKey: '密钥未检查', checkingKey: '检查中', trustedKey: '密钥已信任', untrustedKey: '密钥未信任', checkKey: '检查密钥', trustingKey: '信任中', trusted: '已信任 {{fingerprint}}', hostId: '主机 ID', probe: '测试连接', trustKey: '信任', deleteConfirm: '删除 {{name}}？\n\n相关运行和审批记录也会被删除。', deleted: '{{name}} 已删除。',
+		hostKey: '主机密钥', uncheckedKey: '密钥未检查', checkingKey: '检查中', trustedKey: '密钥已信任', untrustedKey: '密钥未信任', checkKey: '检查密钥', trustingKey: '信任中', trusted: '已信任 {{fingerprint}}', hostId: '主机 ID', probe: '测试连接', trustKey: '信任', deleteDialogLabel: '永久删除主机', deleteTitle: '删除主机“{{name}}”？', deleteText: '相关运行和审批记录也会被删除，此操作无法撤销。', deleted: '{{name}} 已删除。',
     emptyTitle: '没有 SSH 主机',
   },
   models: {

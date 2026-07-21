@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import {
   Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronRight, CircleDot, Clock3, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, LogOut,
-  ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, X, Zap,
+  Copy, ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, X, Zap,
 } from 'lucide-react'
 import { api, chatAttachmentURL, streamChat } from './api'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
@@ -59,6 +59,7 @@ function recalledSession() { try { return localStorage.getItem('opspilot.activeS
 function App() {
 	const {t}=useTranslation()
 	const [auth,setAuth]=useState<'checking'|'authenticated'|'guest'>('checking')
+	const [initialPassword,setInitialPassword]=useState('')
   const [page, setPage] = useState<Page>('chat')
   const [health, setHealth] = useState<Health | null>(null)
   const [hosts, setHosts] = useState<Host[]>([])
@@ -89,10 +90,9 @@ function App() {
 	useEffect(()=>{
 		const bootstrapPassword=desktopBootstrapPassword()
 		const request=bootstrapPassword?api.login(bootstrapPassword):api.authSession()
-		request.then(()=>{
-			if(bootstrapPassword)window.history.replaceState(null,'',window.location.pathname+window.location.search)
-			setAuth('authenticated')
-		}).catch(()=>setAuth('guest'))
+		request.then(()=>setAuth('authenticated')).catch(()=>setAuth('guest')).finally(()=>{
+			if(bootstrapPassword){window.history.replaceState(null,'',window.location.pathname+window.location.search);setInitialPassword(bootstrapPassword)}
+		})
 	},[])
 	useEffect(()=>{
 		if(!('__TAURI_INTERNALS__' in window))return
@@ -112,7 +112,7 @@ function App() {
 	},[auth,agentStreaming,refresh])
 
 	if(auth==='checking')return <div className="auth-screen"><div className="auth-loading"><LoaderCircle className="spin" size={25}/><span>{t('shell.securing')}</span></div></div>
-	if(auth==='guest')return <LoginPage onAuthenticated={()=>setAuth('authenticated')}/>
+	if(auth==='guest')return <><LoginPage onAuthenticated={()=>setAuth('authenticated')}/>{initialPassword&&<InitialPasswordDialog password={initialPassword} onClose={()=>setInitialPassword('')}/>}</>
 
   const title = t(`shell.pageTitles.${page}`)
 
@@ -146,6 +146,7 @@ function App() {
         {page === 'logs' && <LogsPage/>}
       </section>
     </main>
+	{initialPassword&&<InitialPasswordDialog password={initialPassword} onClose={()=>setInitialPassword('')}/>}
   </div>
 }
 
@@ -170,6 +171,19 @@ function PasswordInput(props:PasswordInputProps){
 	const [visible,setVisible]=useState(false)
 	const label=t(visible?'common.hidePassword':'common.showPassword')
 	return <div className="password-input"><input {...props} type={visible?'text':'password'}/><button type="button" aria-label={label} aria-pressed={visible} title={label} onClick={()=>setVisible(value=>!value)}>{visible?<EyeOff size={16}/>:<Eye size={16}/>}</button></div>
+}
+
+function InitialPasswordDialog({password,onClose}:{password:string;onClose:()=>void}){
+	const {t}=useTranslation()
+	const [copyState,setCopyState]=useState<'idle'|'copied'|'failed'>('idle')
+	const copyPassword=async()=>{try{await navigator.clipboard.writeText(password);setCopyState('copied')}catch{setCopyState('failed')}}
+	return <div className="credential-dialog-backdrop"><section className="credential-dialog panel" role="dialog" aria-modal="true" aria-labelledby="initial-password-title"><header><div><KeyRound size={21}/><span><small>{t('auth.initialPasswordLabel')}</small><h2 id="initial-password-title">{t('auth.initialPasswordTitle')}</h2></span></div></header><p>{t('auth.initialPasswordText')}</p><div className="credential-password"><code>{password}</code><button type="button" onClick={()=>void copyPassword()}>{copyState==='copied'?<Check size={15}/>:<Copy size={15}/>} {t(copyState==='copied'?'auth.passwordCopied':'auth.copyPassword')}</button></div>{copyState==='failed'&&<div className="credential-copy-error"><ShieldAlert size={14}/>{t('auth.passwordCopyFailed')}</div>}<footer><button type="button" className="primary" autoFocus onClick={onClose}>{t('auth.passwordSaved')}</button></footer></section></div>
+}
+
+function DestructiveConfirmDialog({label,title,description,busy,onCancel,onConfirm}:{label:string;title:string;description:string;busy:boolean;onCancel:()=>void;onConfirm:()=>void}){
+	const {t}=useTranslation()
+	useEffect(()=>{const close=(event:KeyboardEvent)=>{if(event.key==='Escape'&&!busy)onCancel()};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close)},[busy,onCancel])
+	return <div className="destructive-dialog-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget&&!busy)onCancel()}}><section className="destructive-dialog panel" role="dialog" aria-modal="true" aria-labelledby="destructive-dialog-title"><header><Trash2 size={21}/><span><small>{label}</small><h2 id="destructive-dialog-title">{title}</h2></span></header><p>{description}</p><footer><button type="button" autoFocus disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button type="button" className="danger" disabled={busy} onClick={onConfirm}>{busy?<LoaderCircle className="spin" size={14}/>:<Trash2 size={14}/>} {busy?t('common.deleting'):t('common.delete')}</button></footer></section></div>
 }
 
 function LoginPage({onAuthenticated}:{onAuthenticated:()=>void}){
@@ -1303,6 +1317,7 @@ function sudoLabel(value:HostSudoMode){return i18n.t(value==='none'?'hosts.sudoN
 function HostsPage({ hosts, refresh }: {hosts:Host[];refresh:()=>Promise<void>}) {
 	const {t}=useTranslation()
   const [showForm, setShowForm] = useState(false); const [notice, setNotice] = useState(''); const [saving,setSaving]=useState(false);const [deletingHost,setDeletingHost]=useState('')
+	const [deleteCandidate,setDeleteCandidate]=useState<Host|null>(null)
   const [form, setForm] = useState<HostInput>(emptyHostForm)
 	const [privateKeyName,setPrivateKeyName]=useState(''),[privateKeyError,setPrivateKeyError]=useState(''),[existingPrivateKey,setExistingPrivateKey]=useState(false),[privateKeyInputKey,setPrivateKeyInputKey]=useState(0)
 	const [hostKeys,setHostKeys]=useState<Record<string,{fingerprint:string;algorithm?:string;trusted:boolean}>>({}),[hostKeyErrors,setHostKeyErrors]=useState<Record<string,string>>({}),[hostKeyBusy,setHostKeyBusy]=useState('')
@@ -1317,7 +1332,7 @@ function HostsPage({ hosts, refresh }: {hosts:Host[];refresh:()=>Promise<void>})
 	const trust = async (host:Host) => {const key=hostKeys[host.id];if(!key||key.trusted)return;setHostKeyBusy(`trust-${host.id}`);setHostKeyErrors(current=>({...current,[host.id]:''}));try{const trusted=await api.trustKey(host.id,key.fingerprint);setHostKeys(current=>({...current,[host.id]:{...trusted,trusted:true}}));setNotice(t('hosts.trusted',{fingerprint:trusted.fingerprint}))}catch(err){setHostKeyErrors(current=>({...current,[host.id]:errorText(err)}))}finally{setHostKeyBusy('')}}
 	const save = async (event:FormEvent) => { event.preventDefault(); if(missingPrivateKey)return;setSaving(true); try { const saved=await api.saveHost(form); setShowForm(false); setForm(emptyHostForm);resetPrivateKey();setHostKeys(current=>{const next={...current};delete next[saved.id];return next});setHostKeyErrors(current=>{const next={...current};delete next[saved.id];return next}); setNotice(t('hosts.saved',{name:saved.name,action:editing?t('hosts.updated'):t('hosts.registered')})); await refresh();void scan(saved) } catch(err){setNotice(errorText(err))} finally{setSaving(false)} }
   const probe = async (host:Host) => { try { const info = await api.probe(host.id); setNotice(`${host.name}: ${Object.values(info).join(' · ')}`) } catch(err){setNotice(errorText(err))} }
-	const remove=async(host:Host)=>{if(!confirm(t('hosts.deleteConfirm',{name:host.name})))return;setDeletingHost(host.id);setNotice('');try{await api.deleteHost(host.id);setNotice(t('hosts.deleted',{name:host.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setDeletingHost('')}}
+	const remove=async()=>{const host=deleteCandidate;if(!host)return;setDeletingHost(host.id);setNotice('');try{await api.deleteHost(host.id);setNotice(t('hosts.deleted',{name:host.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setDeletingHost('');setDeleteCandidate(null)}}
 		return <div className="page-stack"><div className="page-actions"><div/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('hosts.add')}</button></div>
     {notice && <div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
 		{showForm && <form className="host-form panel" onSubmit={save}><div className="host-form-head"><div><h3>{editing?t('hosts.editTitle'):t('hosts.createTitle')}</h3></div><button type="button" className="close-button" title={t('common.close')} onClick={()=>setShowForm(false)}><X size={16}/></button></div><div className="form-grid host-fields">
@@ -1336,8 +1351,9 @@ function HostsPage({ hosts, refresh }: {hosts:Host[];refresh:()=>Promise<void>})
 	  <label><span>{t('hosts.sudoPolicy')}</span><select value={form.sudo_mode} onChange={event=>setForm({...form,sudo_mode:event.target.value as HostSudoMode,sudo_password:''})}>{(['none','nopasswd','password'] as HostSudoMode[]).map(mode=><option value={mode} key={mode}>{sudoLabel(mode)}</option>)}</select></label>
 	  {form.sudo_mode==='password'&&<label><span>{t('hosts.sudoPasswordLabel')}</span><PasswordInput autoComplete="new-password" value={form.sudo_password} onChange={event=>setForm({...form,sudo_password:event.target.value})} placeholder={editing?t('hosts.keepPassword'):t('common.required')} required={!editing}/></label>}
 		</div><div className="form-actions"><button type="button" onClick={()=>setShowForm(false)}>{t('common.cancel')}</button><button className="primary" disabled={saving||!!privateKeyError||missingPrivateKey}>{saving?t('common.saving'):editing?t('hosts.update'):t('hosts.save')}</button></div></form>}
-		<div className="host-grid">{hosts.map(host=>{const key=hostKeys[host.id],keyError=hostKeyErrors[host.id],scanning=hostKeyBusy===`scan-${host.id}`,trusting=hostKeyBusy===`trust-${host.id}`;return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${host.address}:${host.port}`}</span></div><span className={`host-key-state ${key?.trusted?'trusted':key?'untrusted':'unchecked'}`}>{scanning?t('hosts.checkingKey'):key?.trusted?t('hosts.trustedKey'):key?t('hosts.untrustedKey'):t('hosts.uncheckedKey')}</span></div><dl><div><dt>{t('hosts.authentication')}</dt><dd>{authLabel(host.auth_type||'agent')}</dd></div>{host.proxy_url&&<div><dt>{t('hosts.proxy')}</dt><dd>{host.proxy_url}</dd></div>}<div><dt>Sudo</dt><dd>{sudoLabel(host.sudo_mode||'none')}</dd></div><div><dt>{t('hosts.hostId')}</dt><dd>{host.id}</dd></div></dl>{(key||keyError)&&<div className={`host-key-review ${key?.trusted?'trusted':'untrusted'}`}>{key&&<><div><KeyRound size={14}/><span><b>{key.algorithm||t('hosts.hostKey')}</b><code title={key.fingerprint}>{key.fingerprint}</code></span></div>{!key.trusted&&<button className="trust" disabled={trusting} onClick={()=>void trust(host)}>{trusting?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>} {trusting?t('hosts.trustingKey'):t('hosts.trustKey')}</button>}</>}{keyError&&<span className="host-key-error">{keyError}</span>}</div>}<div className="card-actions"><button onClick={()=>void probe(host)}><Activity size={15}/>{t('hosts.probe')}</button><button disabled={scanning||trusting} onClick={()=>void scan(host)}>{scanning?<LoaderCircle className="spin" size={15}/>:<KeyRound size={15}/>} {t('hosts.checkKey')}</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>{t('common.edit')}</button><button className="danger" disabled={deletingHost===host.id} title={t('common.delete')} onClick={()=>void remove(host)}>{deletingHost===host.id?<LoaderCircle className="spin" size={15}/>:<Trash2 size={15}/>}</button></div></article>})}</div>
+		<div className="host-grid">{hosts.map(host=>{const key=hostKeys[host.id],keyError=hostKeyErrors[host.id],scanning=hostKeyBusy===`scan-${host.id}`,trusting=hostKeyBusy===`trust-${host.id}`;return <article className="host-card panel" key={host.id}><div className="host-top"><div className="server-glyph"><Server size={22}/></div><div><h3>{host.name}</h3><span>{`${host.user}@${host.address}:${host.port}`}</span></div><span className={`host-key-state ${key?.trusted?'trusted':key?'untrusted':'unchecked'}`}>{scanning?t('hosts.checkingKey'):key?.trusted?t('hosts.trustedKey'):key?t('hosts.untrustedKey'):t('hosts.uncheckedKey')}</span></div><dl><div><dt>{t('hosts.authentication')}</dt><dd>{authLabel(host.auth_type||'agent')}</dd></div>{host.proxy_url&&<div><dt>{t('hosts.proxy')}</dt><dd>{host.proxy_url}</dd></div>}<div><dt>Sudo</dt><dd>{sudoLabel(host.sudo_mode||'none')}</dd></div><div><dt>{t('hosts.hostId')}</dt><dd>{host.id}</dd></div></dl>{(key||keyError)&&<div className={`host-key-review ${key?.trusted?'trusted':'untrusted'}`}>{key&&<><div><KeyRound size={14}/><span><b>{key.algorithm||t('hosts.hostKey')}</b><code title={key.fingerprint}>{key.fingerprint}</code></span></div>{!key.trusted&&<button className="trust" disabled={trusting} onClick={()=>void trust(host)}>{trusting?<LoaderCircle className="spin" size={13}/>:<ShieldCheck size={13}/>} {trusting?t('hosts.trustingKey'):t('hosts.trustKey')}</button>}</>}{keyError&&<span className="host-key-error">{keyError}</span>}</div>}<div className="card-actions"><button onClick={()=>void probe(host)}><Activity size={15}/>{t('hosts.probe')}</button><button disabled={scanning||trusting} onClick={()=>void scan(host)}>{scanning?<LoaderCircle className="spin" size={15}/>:<KeyRound size={15}/>} {t('hosts.checkKey')}</button><button onClick={()=>openEdit(host)}><Edit3 size={15}/>{t('common.edit')}</button><button className="danger" disabled={deletingHost===host.id} title={t('common.delete')} onClick={()=>setDeleteCandidate(host)}>{deletingHost===host.id?<LoaderCircle className="spin" size={15}/>:<Trash2 size={15}/>}</button></div></article>})}</div>
 	{!hosts.length && <Empty icon={<Server/>} title={t('hosts.emptyTitle')}/>}
+	{deleteCandidate&&<DestructiveConfirmDialog label={t('hosts.deleteDialogLabel')} title={t('hosts.deleteTitle',{name:deleteCandidate.name})} description={t('hosts.deleteText')} busy={deletingHost===deleteCandidate.id} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void remove()}/>}
   </div>
 }
 

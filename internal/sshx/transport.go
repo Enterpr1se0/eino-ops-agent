@@ -3,6 +3,8 @@ package sshx
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	posixpath "path"
@@ -150,9 +152,37 @@ func applyElevation(host domain.Host, req domain.ExecRequest, command string, st
 		if stdin == nil {
 			stdin = strings.NewReader("")
 		}
-		return "sudo -S -p '' -- " + wrapped, io.MultiReader(strings.NewReader(host.SudoPassword+"\n"), stdin), nil
+		// Frame the command input with a random marker. When sudo has a cached
+		// credential (or otherwise does not prompt), it leaves the password unread
+		// and would otherwise pass it to the elevated command. The gate below
+		// discards everything through the marker before starting the real command,
+		// regardless of whether sudo consumed the password line. For `bash -se`,
+		// this prevents the password from becoming the first script command.
+		marker, err := newSudoInputMarker(host.SudoPassword)
+		if err != nil {
+			return "", nil, err
+		}
+		const inputVariable = "OPSPILOT_SUDO_INPUT"
+		gate := "set +x; while IFS= read -r " + inputVariable + "; do " +
+			"if [ \"$" + inputVariable + "\" = " + shellQuote(marker) + " ]; then " +
+			"unset " + inputVariable + "; exec " + wrapped + "; fi; done; exit 1"
+		framedInput := io.MultiReader(strings.NewReader(host.SudoPassword+"\n"+marker+"\n"), stdin)
+		return "sudo -S -p '' -- bash -c " + shellQuote(gate), framedInput, nil
 	default:
 		return "", nil, fmt.Errorf("managed sudo is disabled for this host")
+	}
+}
+
+func newSudoInputMarker(password string) (string, error) {
+	var entropy [16]byte
+	for {
+		if _, err := rand.Read(entropy[:]); err != nil {
+			return "", fmt.Errorf("generate managed sudo input marker: %w", err)
+		}
+		marker := "__OPSPILOT_SUDO_INPUT_" + hex.EncodeToString(entropy[:]) + "__"
+		if marker != password {
+			return marker, nil
+		}
 	}
 }
 

@@ -23,6 +23,8 @@ const en = {
   auth: {
     subtitle: 'OPSPILOT', title: 'Administrator sign in',
     authenticating: 'Signing in...', enter: 'Sign in',
+	initialPasswordLabel: 'FIRST START', initialPasswordTitle: 'Initial administrator password', initialPasswordText: 'This password is shown only once. Copy and store it now; you can change it later in System settings.',
+	copyPassword: 'Copy password', passwordCopied: 'Copied', passwordCopyFailed: 'Copy failed. Select and save the password manually.', passwordSaved: 'I saved the password',
   },
   config: {
     tabs: { models: 'Model providers', hosts: 'SSH hosts', system: 'System settings' },
@@ -172,7 +174,7 @@ const en = {
     keyLimit: 'OpenSSH key · max 1 MiB', keyRequired: 'A private key upload is required.', keySizeError: 'Private key must be between 1 byte and 1 MiB.',
     proxyJump: 'SSH jump host', direct: 'Direct connection', proxy: 'Network proxy', proxyURL: 'Proxy URL', proxyUsername: 'Proxy username', proxyPassword: 'Proxy password', knownHosts: 'Known hosts file', useDefault: 'Use system default', sudoPolicy: 'Sudo policy', sudoPasswordLabel: 'Sudo password',
     update: 'Update host', save: 'Save host', saved: '{{name}} {{action}}.', updated: 'updated', registered: 'registered',
-		hostKey: 'Host key', uncheckedKey: 'Key not checked', checkingKey: 'Checking', trustedKey: 'Key trusted', untrustedKey: 'Key not trusted', checkKey: 'Check key', trustingKey: 'Trusting', trusted: 'Trusted {{fingerprint}}', hostId: 'Host ID', probe: 'Test connection', trustKey: 'Trust', deleteConfirm: 'Delete {{name}}?\n\nRelated runs and approvals will also be deleted.', deleted: '{{name}} deleted.',
+		hostKey: 'Host key', uncheckedKey: 'Key not checked', checkingKey: 'Checking', trustedKey: 'Key trusted', untrustedKey: 'Key not trusted', checkKey: 'Check key', trustingKey: 'Trusting', trusted: 'Trusted {{fingerprint}}', hostId: 'Host ID', probe: 'Test connection', trustKey: 'Trust', deleteDialogLabel: 'PERMANENT HOST DELETION', deleteTitle: 'Delete host “{{name}}”?', deleteText: 'Related runs and approvals will also be deleted. This action cannot be undone.', deleted: '{{name}} deleted.',
     emptyTitle: 'No SSH hosts',
   },
   models: {
