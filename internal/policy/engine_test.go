@@ -21,6 +21,7 @@ func TestDefaultPolicy(t *testing.T) {
 		action domain.DecisionAction
 	}{
 		{"read only", domain.ExecRequest{Mode: domain.ExecProgram, Program: "ps", Args: []string{"aux"}}, domain.RiskReadOnly, domain.ActionAllow},
+		{"read script with shell options", domain.ExecRequest{Mode: domain.ExecScript, Script: "set -e\nstat /etc/hosts\nsha256sum /etc/hosts\nhead -c 1 /etc/hosts"}, domain.RiskReadOnly, domain.ActionAllow},
 		{"mutation", domain.ExecRequest{Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "api"}}, domain.RiskChange, domain.ActionApprove},
 		{"managed sudo", domain.ExecRequest{Mode: domain.ExecProgram, Program: "id", Elevated: true}, domain.RiskCritical, domain.ActionBreakGlass},
 		{"destructive", domain.ExecRequest{Mode: domain.ExecProgram, Program: "rm", Args: []string{"-rf", "/tmp/demo"}}, domain.RiskCritical, domain.ActionBreakGlass},

@@ -88,28 +88,35 @@ func (s *Service) SearchFile(ctx context.Context, hostID, path, pattern string, 
 	return s.Submit(ctx, domain.ExecRequest{HostID: hostID, Mode: domain.ExecScript, Script: script, Elevated: elevated, Reason: "search bounded literal matches in a remote file"}, actor)
 }
 
-func (s *Service) ApplyRemoteConfig(ctx context.Context, hostID, path, content, patchContent, expectedSHA256, validatorID string, elevated bool, reason, rollback, actor string) (domain.ExecResult, error) {
+func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, content, patchContent, expectedSHA256, validatorID string, elevated bool, reason, rollback, actor string) (domain.ExecResult, error) {
 	if err := validateRemoteFilePath(path); err != nil {
 		return domain.ExecResult{}, err
 	}
-	if content != "" && patchContent != "" {
-		return domain.ExecResult{}, fmt.Errorf("content and patch are mutually exclusive")
+	expectedSHA256 = strings.ToLower(strings.TrimSpace(expectedSHA256))
+	if (content == "") == (patchContent == "") {
+		return domain.ExecResult{}, fmt.Errorf("exactly one of content or patch is required")
 	}
 	if len(content) > 1<<20 || len(patchContent) > 1<<20 {
-		return domain.ExecResult{}, fmt.Errorf("configuration change exceeds 1 MiB")
+		return domain.ExecResult{}, fmt.Errorf("file edit exceeds 1 MiB")
 	}
 	if strings.TrimSpace(reason) == "" || strings.TrimSpace(rollback) == "" {
 		return domain.ExecResult{}, fmt.Errorf("reason and rollback are required")
 	}
-	if expectedSHA256 != "" && expectedSHA256 != "absent" && !regexp.MustCompile(`^[a-fA-F0-9]{64}$`).MatchString(expectedSHA256) {
+	if expectedSHA256 == "" {
+		return domain.ExecResult{}, fmt.Errorf("expected_sha256 is required; read the current file first or use absent for a new file")
+	}
+	if expectedSHA256 != "absent" && !regexp.MustCompile(`^[a-fA-F0-9]{64}$`).MatchString(expectedSHA256) {
 		return domain.ExecResult{}, fmt.Errorf("expected_sha256 must be a 64-character SHA256 or absent")
+	}
+	if patchContent != "" && expectedSHA256 == "absent" {
+		return domain.ExecResult{}, fmt.Errorf("patch cannot create a new file; provide content instead")
 	}
 	changeData := content
 	if patchContent != "" {
 		changeData = patchContent
 	}
 	if strings.Contains(changeData, "[REDACTED]") || s.redactor.Redact(changeData) != changeData {
-		return domain.ExecResult{}, fmt.Errorf("configuration input contains a secret or redaction placeholder; use a change that does not expose or overwrite secret values")
+		return domain.ExecResult{}, fmt.Errorf("file edit contains a secret or redaction placeholder; use a change that does not expose or overwrite secret values")
 	}
 	validatorCommand, err := s.validatorCommandFor(validatorID, "remote", path, path)
 	if err != nil {
@@ -124,13 +131,13 @@ func (s *Service) ApplyRemoteConfig(ctx context.Context, hostID, path, content, 
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
-	script := buildConfigTransactionScript(path, tempPath, backupPath, content, patchContent, expectedSHA256, tempValidatorCommand, validatorCommand, elevated)
+	script := buildFileEditTransactionScript(path, tempPath, backupPath, content, patchContent, expectedSHA256, tempValidatorCommand, validatorCommand, elevated)
 	result, submitErr := s.Submit(ctx, domain.ExecRequest{
 		HostID: hostID, Mode: domain.ExecScript, Script: script, Elevated: elevated, Reason: reason,
-		ExpectedChanges: "transactionally update configuration file " + path,
+		ExpectedChanges: "transactionally edit file " + path,
 		Rollback:        rollback + "; protected backup: " + backupPath, RemotePath: path, ExpectedSHA256: expectedSHA256, Validator: validatorID,
 	}, actor)
-	metadata := parseConfigTransactionOutput(path, validatorID, result.Stdout)
+	metadata := parseFileEditOutput(path, validatorID, result.Stdout)
 	result.File = &metadata
 	if result.ExitCode == 73 {
 		return result, fmt.Errorf("conflict: remote file changed or its existence does not match expected_sha256")
@@ -149,27 +156,12 @@ func (s *Service) ApplyRemoteConfig(ctx context.Context, hostID, path, content, 
 		result.File.OperationID = operation.ID
 		result.File.BackupPath = operation.BackupPath
 		result.Message = "file operation " + operation.ID + " completed"
-		result.NextAction = "verify the consuming service; use ssh_config_restore with operation_id " + operation.ID + " if rollback is required"
+		result.NextAction = "verify the consuming service; use ssh_file_restore with operation_id " + operation.ID + " if rollback is required"
 	}
 	return result, submitErr
 }
 
-func (s *Service) ApplyRemoteConfigVersioned(ctx context.Context, hostID, path, content, patchContent, expectedSHA256, validatorID string, elevated bool, reason, rollback, actor string) (domain.ExecResult, error) {
-	if strings.TrimSpace(expectedSHA256) == "" {
-		return domain.ExecResult{}, fmt.Errorf("expected_sha256 is required; read the current file first or use absent for a new file")
-	}
-	return s.ApplyRemoteConfig(ctx, hostID, path, content, patchContent, expectedSHA256, validatorID, elevated, reason, rollback, actor)
-}
-
-func (s *Service) ApplyPatchChecked(ctx context.Context, hostID, cwd, patchContent, expectedSHA256, validatorID string, elevated bool, reason, rollback, actor string) (domain.ExecResult, error) {
-	path, err := singlePatchTarget(cwd, patchContent)
-	if err != nil {
-		return domain.ExecResult{}, err
-	}
-	return s.ApplyRemoteConfig(ctx, hostID, path, "", patchContent, expectedSHA256, validatorID, elevated, reason, rollback, actor)
-}
-
-func (s *Service) RestoreRemoteConfig(ctx context.Context, operationID string, elevated bool, reason, actor string) (domain.ExecResult, error) {
+func (s *Service) RestoreRemoteFile(ctx context.Context, operationID string, elevated bool, reason, actor string) (domain.ExecResult, error) {
 	operation, err := s.store.GetFileOperation(ctx, strings.TrimSpace(operationID))
 	if err != nil {
 		return domain.ExecResult{}, err
@@ -224,10 +216,10 @@ func (s *Service) RestoreRemoteConfig(ctx context.Context, operationID string, e
 	lines = append(lines, "unlink -- "+shellQuote(preRestorePath), "trap - EXIT", "printf '"+fileAfterMarker+"\\n'", "sha256sum -- "+shellQuote(operation.Path))
 	result, submitErr := s.Submit(ctx, domain.ExecRequest{
 		HostID: operation.HostID, Mode: domain.ExecScript, Script: strings.Join(lines, "\n"), Elevated: elevated,
-		Reason: reason, ExpectedChanges: "restore configuration from audited operation " + operation.ID,
+		Reason: reason, ExpectedChanges: "restore file from audited operation " + operation.ID,
 		Rollback: "reapply the reviewed change from run " + operation.RunID, RemotePath: operation.Path, ExpectedSHA256: operation.AfterSHA256, Validator: operation.Validator,
 	}, actor)
-	metadata := parseConfigTransactionOutput(operation.Path, operation.Validator, result.Stdout)
+	metadata := parseFileEditOutput(operation.Path, operation.Validator, result.Stdout)
 	metadata.BeforeSHA256 = operation.AfterSHA256
 	metadata.BackupPath = operation.BackupPath
 	result.File = &metadata
@@ -240,7 +232,7 @@ func (s *Service) RestoreRemoteConfig(ctx context.Context, operationID string, e
 	return result, submitErr
 }
 
-func buildConfigTransactionScript(path, tempPath, backupPath, content, patchContent, expectedSHA256, tempValidatorCommand, validatorCommand string, elevated bool) string {
+func buildFileEditTransactionScript(path, tempPath, backupPath, content, patchContent, expectedSHA256, tempValidatorCommand, validatorCommand string, elevated bool) string {
 	pathQ, tempQ, backupQ := shellQuote(path), shellQuote(tempPath), shellQuote(backupPath)
 	lines := []string{"set -eu", "if test -e " + pathQ + "; then", "  ops_had_original=1", "  printf '" + fileBeforeMarker + "\\n'", "  sha256sum -- " + pathQ}
 	if expectedSHA256 == "absent" {
@@ -253,7 +245,7 @@ func buildConfigTransactionScript(path, tempPath, backupPath, content, patchCont
 		lines = append(lines, "  exit 73")
 	}
 	lines = append(lines, "fi", "test ! -e "+tempQ+" || exit 73")
-	marker := configHeredocMarker(content + patchContent)
+	marker := fileEditHeredocMarker(content + patchContent)
 	lines = append(lines, "trap "+shellQuote("test ! -e "+tempQ+" || unlink -- "+tempQ)+" EXIT")
 	if patchContent != "" {
 		lines = append(lines, "test -e "+pathQ+" || exit 73", "cp -p -- "+pathQ+" "+tempQ, "patch --batch --forward "+tempQ+" <<'"+marker+"'", patchContent, marker)
@@ -296,9 +288,9 @@ func buildConfigTransactionScript(path, tempPath, backupPath, content, patchCont
 	return strings.Join(lines, "\n")
 }
 
-func configHeredocMarker(content string) string {
+func fileEditHeredocMarker(content string) string {
 	for {
-		marker := "__OPS_CONFIG_" + strings.TrimPrefix(ids.New("cfg"), "cfg_") + "__"
+		marker := "__OPS_FILE_EDIT_" + strings.TrimPrefix(ids.New("edit"), "edit_") + "__"
 		conflict := false
 		for _, line := range strings.Split(content, "\n") {
 			if line == marker {
@@ -381,7 +373,7 @@ func parseFileReadOutput(path, output string) (domain.FileMetadata, string) {
 	return metadata, output[contentIndex+len(fileContentMarker)+1:]
 }
 
-func parseConfigTransactionOutput(path, validatorID, output string) domain.FileMetadata {
+func parseFileEditOutput(path, validatorID, output string) domain.FileMetadata {
 	metadata := domain.FileMetadata{Path: path, Validator: validatorID, ValidationOK: validatorID == "" || strings.Contains(output, fileValidationMarker)}
 	lines := strings.Split(output, "\n")
 	for index, line := range lines {
@@ -407,42 +399,4 @@ func parseConfigTransactionOutput(path, validatorID, output string) domain.FileM
 		}
 	}
 	return metadata
-}
-
-func singlePatchTarget(cwd, patchContent string) (string, error) {
-	if !posixpath.IsAbs(cwd) || posixpath.Clean(cwd) != cwd {
-		return "", fmt.Errorf("remote working directory must be a clean absolute path")
-	}
-	targets := make(map[string]struct{})
-	for _, line := range strings.Split(patchContent, "\n") {
-		if !strings.HasPrefix(line, "+++ ") {
-			continue
-		}
-		fields := strings.Fields(strings.TrimPrefix(line, "+++ "))
-		if len(fields) == 0 {
-			return "", fmt.Errorf("patch target is missing")
-		}
-		value := fields[0]
-		if value == "/dev/null" {
-			continue
-		}
-		value = strings.TrimPrefix(value, "b/")
-		value = strings.TrimPrefix(value, "a/")
-		if posixpath.IsAbs(value) || value == ".." || strings.HasPrefix(value, "../") {
-			return "", fmt.Errorf("patch target escapes the working directory")
-		}
-		targets[value] = struct{}{}
-	}
-	if len(targets) != 1 {
-		return "", fmt.Errorf("remote patch must modify exactly one file; apply multi-file changes as independently approved steps")
-	}
-	var relative string
-	for value := range targets {
-		relative = value
-	}
-	target := posixpath.Clean(posixpath.Join(cwd, relative))
-	if target != cwd && !strings.HasPrefix(target, cwd+"/") {
-		return "", fmt.Errorf("patch target escapes the working directory")
-	}
-	return target, nil
 }

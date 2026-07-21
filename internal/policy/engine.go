@@ -38,7 +38,7 @@ var safePrograms = stringSet(
 	"free", "getent", "grep", "head", "hostname", "id", "ip", "journalctl", "last", "ls", "lscpu",
 	"lsblk", "lsof", "netstat", "pgrep", "printenv", "ps", "pwd", "ss", "stat", "tail", "top",
 	"uname", "uptime", "vmstat", "wc", "who", "whoami",
-	"cmp", "printf", "sha256sum", "sync", "test", "timeout",
+	"cmp", "printf", "set", "sha256sum", "sync", "test", "timeout",
 )
 
 var changePrograms = stringSet(
@@ -138,6 +138,10 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 		} else {
 			hits = append(hits, "workspace_sandbox_shell")
 		}
+	}
+	if req.Mode == domain.ExecWorkspaceEdit {
+		risk = maxRisk(risk, domain.RiskChange)
+		hits = append(hits, "workspace_file_edit")
 	}
 	if req.Mode == domain.ExecSSHFileTransfer {
 		risk = maxRisk(risk, domain.RiskChange)
@@ -273,8 +277,11 @@ func shellSource(req domain.ExecRequest) (string, error) {
 		return "ls " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
 	case domain.ExecWorkspaceSearch:
 		return "grep " + shellQuote(req.SearchPattern) + " " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
-	case domain.ExecWorkspacePatch:
-		return "patch " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
+	case domain.ExecWorkspaceEdit:
+		if req.WorkspaceID == "" || req.RelativePath == "" || (req.Content == "") == (req.Patch == "") {
+			return "", fmt.Errorf("workspace edit requires a workspace file and exactly one of content or patch")
+		}
+		return "edit " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
 	case domain.ExecWorkspaceUpload:
 		if req.WorkspaceID == "" || req.RelativePath == "" || req.ExpectedSHA256 == "" || !posixpath.IsAbs(req.RemotePath) {
 			return "", fmt.Errorf("workspace upload requires a workspace file, expected SHA256, and absolute remote path")

@@ -134,7 +134,7 @@ const en = {
   },
   tool: {
     bashScript: 'Bash script', moreLines: '{{line}} ... (+{{count}} lines)', latestStdout: 'STDOUT · latest {{count}} lines', fileOperation: 'File operation',
-    fullScript: 'Full script', fullCommand: 'Full command', fullTransaction: 'View full transaction script / Patch', originalArgs: 'ARGV · original arguments', environment: 'Environment variables',
+    fullScript: 'Full script', fullCommand: 'Full command', fullTransaction: 'Full edit', originalArgs: 'ARGV · original arguments', environment: 'Environment variables',
     targetHost: 'Target host', sourceHost: 'Source host', sourceFile: 'Source file', filePath: 'File path', workingDirectory: 'Working directory', defaultDirectory: 'Default directory',
     permission: 'Permission', hostAuthority: 'Full host authority', sandbox: 'Bubblewrap sandbox', managedSudo: 'Managed sudo', normalUser: 'Standard user', exitCode: 'Exit code', duration: 'Duration', runId: 'Run ID',
     reason: 'Execution reason', expectedChanges: 'Expected changes', rollback: 'Rollback', result: 'Tool result', operatorInstruction: 'Operator instruction',
@@ -207,12 +207,12 @@ const en = {
   toolCategories: { planning: 'Task planning', execution: 'Command execution', hosts: 'SSH hosts', tasks: 'Long tasks', remote_files: 'Remote files', workspace: 'Workspace', web: 'Web search', history: 'Audit history', approvals: 'Approvals', skills: 'Ops skills', mcp: 'External MCP' },
   toolGuards: { read_only: 'Read only', policy_checked: 'Dynamic policy', approval_required: 'Human approval', agent_state: 'Agent state', audited_control: 'Audited control', external_mcp: 'External MCP' },
   toolNames: {
-    ssh_exec: 'Run remote command', ssh_run_script: 'Run Bash script', ssh_file_read: 'Read remote file', ssh_file_search: 'Search remote file', ssh_file_list: 'List remote directory', ssh_file_stat: 'Read file metadata',
-    ssh_file_write: 'Write remote file transactionally', ssh_file_apply_patch: 'Apply remote patch transactionally', ssh_file_transfer: 'Transfer file between hosts', ssh_config_apply: 'Apply remote configuration transaction', ssh_config_restore: 'Restore remote configuration backup',
-    ssh_task_get: 'Read background task', ssh_task_cancel: 'Cancel background task', ssh_host_list: 'List hosts', ssh_host_inspect: 'Inspect host',
-    workspace_list: 'List Workspaces', workspace_file_list: 'List Workspace directory', workspace_file_read: 'Read Workspace file', workspace_file_search: 'Search Workspace file', workspace_file_apply_patch: 'Apply Workspace patch',
-    workspace_file_upload: 'Upload Workspace file', workspace_shell: 'Run Workspace Shell', ssh_history_search: 'Search execution history', ssh_history_get: 'Read execution history', ops_skill_list: 'List Skills', ops_skill_get: 'Load Skill',
-    ops_plan_create: 'Create task plan', ops_plan_get: 'Read task plan', ops_plan_step_update: 'Advance task step', web_search: 'Search the Web', web_extract: 'Extract Web pages',
+    ssh_exec: 'Run remote command', ssh_run_script: 'Run Bash script', ssh_file_read: 'Read remote file', ssh_file_search: 'Search remote file', ssh_file_list: 'List remote directory',
+    ssh_file_edit: 'Edit remote file', ssh_file_transfer: 'Transfer file between hosts', ssh_file_restore: 'Restore remote file',
+    ssh_task: 'Manage background task', ssh_host_list: 'List hosts', ssh_host_inspect: 'Inspect host',
+    workspace_list: 'List Workspaces', workspace_file_list: 'List Workspace directory', workspace_file_read: 'Read Workspace file', workspace_file_search: 'Search Workspace file', workspace_file_edit: 'Edit Workspace file',
+    workspace_file_upload: 'Upload Workspace file', workspace_shell: 'Run Workspace Shell', ssh_history: 'Read execution history', ops_skill: 'Read Skill',
+    ops_plan_create: 'Create task plan', ops_plan_step_update: 'Advance task step', web_search: 'Search the Web', web_extract: 'Extract Web pages',
   },
 }
 

@@ -393,7 +393,7 @@ const (
 	ExecWorkspaceRead   ExecMode = "workspace_read"
 	ExecWorkspaceList   ExecMode = "workspace_list"
 	ExecWorkspaceSearch ExecMode = "workspace_search"
-	ExecWorkspacePatch  ExecMode = "workspace_patch"
+	ExecWorkspaceEdit   ExecMode = "workspace_edit"
 	ExecWorkspaceUpload ExecMode = "workspace_upload"
 	ExecWorkspaceShell  ExecMode = "workspace_shell"
 	ExecSSHFileTransfer ExecMode = "ssh_file_transfer"
@@ -405,6 +405,8 @@ type ExecRequest struct {
 	Program                   string            `json:"program,omitempty" jsonschema:"remote executable name for program mode"`
 	Args                      []string          `json:"args,omitempty" jsonschema:"separate arguments; do not include shell quoting"`
 	Script                    string            `json:"script,omitempty" jsonschema:"bash script content for script mode"`
+	Content                   string            `json:"content,omitempty" jsonschema:"complete replacement content for a workspace file edit"`
+	Patch                     string            `json:"patch,omitempty" jsonschema:"unified diff for a workspace file edit"`
 	Cwd                       string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory, or a clean workspace-relative directory for workspace_shell"`
 	Env                       map[string]string `json:"env,omitempty" jsonschema:"non-secret environment values"`
 	Elevated                  bool              `json:"elevated,omitempty" jsonschema:"request root through the host sudo policy; never pass sudo or a password as a program or argument"`

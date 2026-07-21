@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"eino-ops-agent/internal/domain"
@@ -73,7 +74,7 @@ func toolCategory(name string) string {
 	switch {
 	case strings.HasPrefix(name, "ops_plan_"):
 		return "planning"
-	case strings.HasPrefix(name, "ops_skill_"):
+	case name == "ops_skill" || strings.HasPrefix(name, "ops_skill_"):
 		return "skills"
 	case strings.HasPrefix(name, "mcp__"):
 		return "mcp"
@@ -83,11 +84,11 @@ func toolCategory(name string) string {
 		return "web"
 	case strings.HasPrefix(name, "ssh_host_"):
 		return "hosts"
-	case strings.HasPrefix(name, "ssh_task_"):
+	case name == "ssh_task" || strings.HasPrefix(name, "ssh_task_"):
 		return "tasks"
-	case strings.HasPrefix(name, "ssh_file_") || strings.HasPrefix(name, "ssh_config_"):
+	case strings.HasPrefix(name, "ssh_file_"):
 		return "remote_files"
-	case strings.HasPrefix(name, "ssh_history_"):
+	case name == "ssh_history" || strings.HasPrefix(name, "ssh_history_"):
 		return "history"
 	default:
 		return "execution"
@@ -100,9 +101,9 @@ func toolGuard(name string) string {
 		return "agent_state"
 	case "ssh_exec", "ssh_run_script", "ssh_file_read", "ssh_file_search":
 		return "policy_checked"
-	case "ssh_file_write", "ssh_file_apply_patch", "ssh_file_transfer", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_upload", "workspace_shell":
+	case "ssh_file_edit", "ssh_file_transfer", "ssh_file_restore", "workspace_file_edit", "workspace_file_upload", "workspace_shell":
 		return "approval_required"
-	case "ssh_task_cancel":
+	case "ssh_task":
 		return "audited_control"
 	default:
 		if strings.HasPrefix(name, "mcp__") {
@@ -148,12 +149,13 @@ type ScriptInput struct {
 }
 
 type FileReadInput struct {
-	HostID      string `json:"host_id" jsonschema:"registered host identifier"`
-	Path        string `json:"path" jsonschema:"absolute remote file path"`
-	MaxBytes    int    `json:"max_bytes,omitempty" jsonschema:"maximum bytes to return, capped by policy"`
-	OffsetBytes int64  `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset; cannot be combined with tail_lines"`
-	TailLines   int    `json:"tail_lines,omitempty" jsonschema:"return the last bounded number of lines; cannot be combined with offset_bytes"`
-	Elevated    bool   `json:"elevated,omitempty" jsonschema:"read through managed sudo; requires break-glass approval"`
+	HostID       string `json:"host_id" jsonschema:"registered host identifier"`
+	Path         string `json:"path" jsonschema:"absolute remote file path"`
+	MetadataOnly bool   `json:"metadata_only,omitempty" jsonschema:"return metadata and SHA256 without file content; defaults to false"`
+	MaxBytes     int    `json:"max_bytes,omitempty" jsonschema:"maximum bytes to return, capped by policy"`
+	OffsetBytes  int64  `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset; cannot be combined with tail_lines"`
+	TailLines    int    `json:"tail_lines,omitempty" jsonschema:"return the last bounded number of lines; cannot be combined with offset_bytes"`
+	Elevated     bool   `json:"elevated,omitempty" jsonschema:"read through managed sudo; requires break-glass approval"`
 }
 
 type FileListInput struct {
@@ -161,26 +163,16 @@ type FileListInput struct {
 	Path   string `json:"path" jsonschema:"absolute remote directory path"`
 }
 
-type FileWriteInput struct {
+type FileEditInput struct {
 	HostID         string `json:"host_id" jsonschema:"registered host identifier"`
 	Path           string `json:"path" jsonschema:"absolute remote file path"`
-	Content        string `json:"content" jsonschema:"complete replacement content"`
-	Elevated       bool   `json:"elevated,omitempty" jsonschema:"write through the host managed sudo policy; never provide a password"`
-	Reason         string `json:"reason" jsonschema:"why the write is needed"`
-	Rollback       string `json:"rollback" jsonschema:"how to restore the previous file"`
-	ExpectedSHA256 string `json:"expected_sha256,omitempty" jsonschema:"sha256 observed by ssh_file_read; use absent only when creating a new file"`
+	Content        string `json:"content,omitempty" jsonschema:"complete replacement content; mutually exclusive with patch"`
+	Patch          string `json:"patch,omitempty" jsonschema:"unified diff for this file; mutually exclusive with content"`
+	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"sha256 returned by ssh_file_read, or absent when creating a file"`
 	Validator      string `json:"validator,omitempty" jsonschema:"optional registered remote validator id"`
-}
-
-type FilePatchInput struct {
-	HostID         string `json:"host_id" jsonschema:"registered host identifier"`
-	Cwd            string `json:"cwd" jsonschema:"absolute directory used as the patch root"`
-	Patch          string `json:"patch" jsonschema:"unified diff content"`
-	Elevated       bool   `json:"elevated,omitempty" jsonschema:"apply through the host managed sudo policy; never provide a password"`
-	Reason         string `json:"reason" jsonschema:"why the patch is needed"`
-	Rollback       string `json:"rollback" jsonschema:"how to revert the patch"`
-	ExpectedSHA256 string `json:"expected_sha256,omitempty" jsonschema:"sha256 observed for the single target file"`
-	Validator      string `json:"validator,omitempty" jsonschema:"optional registered remote validator id"`
+	Elevated       bool   `json:"elevated,omitempty" jsonschema:"edit through the host managed sudo policy; never include sudo or credentials"`
+	Reason         string `json:"reason" jsonschema:"why the edit is needed"`
+	Rollback       string `json:"rollback" jsonschema:"how to undo the edit"`
 }
 
 type FileSearchInput struct {
@@ -192,20 +184,8 @@ type FileSearchInput struct {
 	Elevated     bool   `json:"elevated,omitempty" jsonschema:"search through managed sudo; requires break-glass approval"`
 }
 
-type ConfigApplyInput struct {
-	HostID         string `json:"host_id" jsonschema:"registered host identifier"`
-	Path           string `json:"path" jsonschema:"single absolute remote configuration file"`
-	Content        string `json:"content,omitempty" jsonschema:"complete replacement content; mutually exclusive with patch"`
-	Patch          string `json:"patch,omitempty" jsonschema:"unified diff for this one file; mutually exclusive with content"`
-	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"sha256 from ssh_file_read, or absent when creating a file"`
-	Validator      string `json:"validator,omitempty" jsonschema:"registered remote validator id allowed for this path"`
-	Elevated       bool   `json:"elevated,omitempty" jsonschema:"apply through managed sudo; never include sudo or credentials"`
-	Reason         string `json:"reason" jsonschema:"evidence-based reason for the exact change"`
-	Rollback       string `json:"rollback" jsonschema:"operator-facing rollback intent"`
-}
-
 type FileRestoreInput struct {
-	OperationID string `json:"operation_id" jsonschema:"audited file operation identifier returned by ssh_config_apply"`
+	OperationID string `json:"operation_id" jsonschema:"audited file operation identifier returned by ssh_file_edit"`
 	Reason      string `json:"reason" jsonschema:"why restoration is required"`
 	Elevated    bool   `json:"elevated,omitempty" jsonschema:"restore through managed sudo when required"`
 }
@@ -213,11 +193,11 @@ type FileRestoreInput struct {
 type SSHFileTransferInput struct {
 	SourceHostID              string `json:"source_host_id" jsonschema:"registered source SSH host identifier"`
 	SourcePath                string `json:"source_path" jsonschema:"absolute source file path; symbolic links are rejected"`
-	ExpectedSHA256            string `json:"expected_sha256" jsonschema:"source SHA256 returned by ssh_file_stat or ssh_file_read"`
+	ExpectedSHA256            string `json:"expected_sha256" jsonschema:"source SHA256 returned by ssh_file_read with metadata_only=true"`
 	DestinationHostID         string `json:"destination_host_id" jsonschema:"registered destination SSH host identifier"`
 	DestinationPath           string `json:"destination_path" jsonschema:"absolute destination file path"`
 	Overwrite                 bool   `json:"overwrite,omitempty" jsonschema:"replace an existing destination; defaults to false"`
-	ExpectedDestinationSHA256 string `json:"expected_destination_sha256,omitempty" jsonschema:"destination SHA256 from ssh_file_stat; required when overwrite is true"`
+	ExpectedDestinationSHA256 string `json:"expected_destination_sha256,omitempty" jsonschema:"destination SHA256 from ssh_file_read with metadata_only=true; required when overwrite is true"`
 	TimeoutSeconds            int    `json:"timeout_seconds,omitempty" jsonschema:"transfer timeout from 1 to 600 seconds"`
 	Reason                    string `json:"reason" jsonschema:"why this file migration is needed"`
 	Rollback                  string `json:"rollback" jsonschema:"how to remove or restore the destination file"`
@@ -246,11 +226,12 @@ type WorkspaceSearchInput struct {
 	MaxMatches  int    `json:"max_matches,omitempty" jsonschema:"maximum matching lines, capped at 200"`
 }
 
-type WorkspacePatchInput struct {
+type WorkspaceFileEditInput struct {
 	WorkspaceID    string `json:"workspace_id" jsonschema:"allowlisted read_write workspace identifier"`
 	Path           string `json:"path" jsonschema:"single clean file path relative to the workspace root"`
-	Patch          string `json:"patch" jsonschema:"single-file unified diff"`
-	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"sha256 returned by workspace_file_read"`
+	Content        string `json:"content,omitempty" jsonschema:"complete replacement content; mutually exclusive with patch"`
+	Patch          string `json:"patch,omitempty" jsonschema:"unified diff for this file; mutually exclusive with content"`
+	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"sha256 returned by workspace_file_read, or absent when creating a file"`
 	Validator      string `json:"validator,omitempty" jsonschema:"allowlisted workspace validator id"`
 	Reason         string `json:"reason" jsonschema:"evidence-based reason for the change"`
 	Rollback       string `json:"rollback" jsonschema:"how to revert the change"`
@@ -278,6 +259,7 @@ type WorkspaceShellInput struct {
 }
 
 type HistorySearchInput struct {
+	RunID  string `json:"run_id,omitempty" jsonschema:"exact audit run identifier; mutually exclusive with search filters"`
 	Query  string `json:"query,omitempty" jsonschema:"text found in command or redacted output"`
 	HostID string `json:"host_id,omitempty" jsonschema:"optional registered host identifier"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"maximum 50 results"`
@@ -295,16 +277,13 @@ type WebExtractInput struct {
 	URLs []string `json:"urls" jsonschema:"1-5 specific public HTTP/HTTPS page URLs; never include credentials, private addresses, or private operational data"`
 }
 
-type HistorySearchOutput struct {
+type HistoryOutput struct {
 	Runs []domain.Run `json:"runs"`
-}
-
-type HistoryGetInput struct {
-	RunID string `json:"run_id" jsonschema:"audit run identifier"`
 }
 
 type TaskInput struct {
 	TaskID string `json:"task_id" jsonschema:"long-running task identifier"`
+	Action string `json:"action" jsonschema:"task operation: status or cancel"`
 }
 
 const rejectedOperationNextAction = "stop this operation, do not resubmit it, and follow operator_instruction as the human's authoritative replacement instruction"
@@ -378,6 +357,68 @@ func TaskToolResult(task domain.Task, result domain.ExecResult, taskErr string, 
 		}
 	}
 	return result, nil
+}
+
+func RunTaskTool(svc *service.Service, input TaskInput, actor string) (domain.ExecResult, error) {
+	switch input.Action {
+	case "status":
+		task, result, taskErr, err := svc.GetTask(input.TaskID)
+		if task.ID == "" {
+			task.ID = input.TaskID
+		}
+		return TaskToolResult(task, result, taskErr, err)
+	case "cancel":
+		cancelErr := svc.CancelTask(input.TaskID, actor)
+		task, result, taskErr, getErr := svc.GetTask(input.TaskID)
+		if task.ID == "" {
+			task.ID = input.TaskID
+		}
+		if cancelErr != nil {
+			return TaskToolResult(task, result, taskErr, cancelErr)
+		}
+		return TaskToolResult(task, result, taskErr, getErr)
+	default:
+		return NormalizeExecToolResult(domain.ExecResult{TaskID: input.TaskID}, fmt.Errorf("invalid task action: use status or cancel"))
+	}
+}
+
+func RunFileReadTool(ctx context.Context, svc *service.Service, input FileReadInput, actor string) (domain.ExecResult, error) {
+	maxBytes, offsetBytes, tailLines := input.MaxBytes, input.OffsetBytes, input.TailLines
+	if input.MetadataOnly {
+		maxBytes, offsetBytes, tailLines = 1, 0, 0
+	}
+	result, err := svc.ReadFileAdvanced(ctx, input.HostID, input.Path, maxBytes, offsetBytes, tailLines, input.Elevated, actor)
+	if input.MetadataOnly {
+		result.Stdout = ""
+	}
+	return NormalizeExecToolResult(result, err)
+}
+
+func ReadHistoryTool(ctx context.Context, svc *service.Service, input HistorySearchInput) (HistoryOutput, error) {
+	if input.RunID != "" {
+		if input.Query != "" || input.HostID != "" || input.Limit != 0 {
+			return HistoryOutput{}, fmt.Errorf("invalid history input: run_id is mutually exclusive with search filters")
+		}
+		result, err := svc.GetRun(ctx, input.RunID, false)
+		if err != nil {
+			return HistoryOutput{}, err
+		}
+		return HistoryOutput{Runs: []domain.Run{result.Run}}, nil
+	}
+	runs, err := svc.SearchRuns(ctx, input.Query, input.HostID, input.Limit)
+	return HistoryOutput{Runs: runs}, err
+}
+
+func ReadSkillTool(ctx context.Context, svc *service.Service, input SkillInput, actor string) (SkillOutput, error) {
+	if strings.TrimSpace(input.Name) == "" {
+		items, err := svc.ListEnabledSkills()
+		return SkillOutput{Skills: items}, err
+	}
+	item, err := svc.LoadSkill(ctx, input.Name, actor)
+	if err != nil {
+		return SkillOutput{}, err
+	}
+	return SkillOutput{Skills: []skills.Skill{item}}, nil
 }
 
 func TaskStartToolResult(svc *service.Service, task domain.Task, startErr error) (domain.ExecResult, error) {
@@ -488,10 +529,10 @@ func NormalizeWebExtractToolResult(result domain.WebExtractResponse, err error) 
 }
 
 type SkillInput struct {
-	Name string `json:"name" jsonschema:"skill name returned by ops_skill_list"`
+	Name string `json:"name,omitempty" jsonschema:"enabled skill name; omit to list available skills"`
 }
 
-type SkillListOutput struct {
+type SkillOutput struct {
 	Skills []skills.Skill `json:"skills"`
 }
 
@@ -504,12 +545,6 @@ type PlanStepUpdateInput struct {
 	StepNumber int    `json:"step_number" jsonschema:"the currently in-progress step number"`
 	Status     string `json:"status" jsonschema:"completed after verification or blocked when progress genuinely cannot continue"`
 	Evidence   string `json:"evidence" jsonschema:"concise observed result or blocker; never claim completion without tool evidence"`
-}
-
-type PlanGetOutput struct {
-	Found    bool              `json:"found"`
-	Plan     *domain.AgentPlan `json:"plan,omitempty"`
-	Guidance string            `json:"guidance,omitempty"`
 }
 
 func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
@@ -525,18 +560,6 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	if err := appendTool(toolutils.InferTool("ops_plan_create", "Create or replace the persistent step-by-step plan for a complex task. Provide 2-8 ordered, independently verifiable steps. Step 1 starts automatically and only one step can be in progress.", func(ctx context.Context, input PlanCreateInput) (any, error) {
 		plan, err := svc.CreateAgentPlan(ctx, input.Goal, input.Steps, "eino-agent")
 		return normalizePlanToolResult(ctx, svc, "ops_plan_create", plan, err)
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("ops_plan_get", "Read the persistent plan for the current conversation before resuming a complex task or reporting progress. A conversation without a plan returns found=false; do not retry, and create a plan only when the current request is complex.", func(ctx context.Context, _ struct{}) (any, error) {
-		plan, err := svc.GetAgentPlan(ctx, "")
-		if errors.Is(err, store.ErrNotFound) {
-			return PlanGetOutput{
-				Found:    false,
-				Guidance: "This conversation has no persistent plan. Do not retry ops_plan_get. Create one only if the current request is a complex operational task; otherwise continue without a plan.",
-			}, nil
-		}
-		return normalizeValueToolResult(ctx, "ops_plan_get", PlanGetOutput{Found: true, Plan: &plan}, err)
 	})); err != nil {
 		return nil, err
 	}
@@ -571,28 +594,13 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_task_get", "Get the current status and bounded, redacted stdout and stderr for a background SSH task.", func(_ context.Context, input TaskInput) (domain.ExecResult, error) {
-		task, result, taskErr, err := svc.GetTask(input.TaskID)
-		if task.ID == "" {
-			task.ID = input.TaskID
-		}
-		return TaskToolResult(task, result, taskErr, err)
+	if err := appendTool(toolutils.InferTool("ssh_task", "Read or cancel one background SSH task. Use action=status to get bounded redacted output, or action=cancel to stop a running task.", func(_ context.Context, input TaskInput) (domain.ExecResult, error) {
+		return RunTaskTool(svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_task_cancel", "Cancel a long-running SSH task.", func(_ context.Context, input TaskInput) (map[string]any, error) {
-		err := svc.CancelTask(input.TaskID, "eino-agent")
-		if err == nil {
-			return map[string]any{"tool_version": "1.1", "ok": true, "code": "cancelled", "task_id": input.TaskID, "cancelled": true}, nil
-		}
-		code, retryable, nextAction := classifyToolError(err)
-		return map[string]any{"tool_version": "1.1", "ok": false, "code": code, "message": err.Error(), "retryable": retryable, "next_action": nextAction, "task_id": input.TaskID, "cancelled": false}, nil
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("ssh_file_read", "Read at most a bounded number of bytes from a remote file. Sensitive credential paths are denied.", func(ctx context.Context, input FileReadInput) (domain.ExecResult, error) {
-		result, err := svc.ReadFileAdvanced(ctx, input.HostID, input.Path, input.MaxBytes, input.OffsetBytes, input.TailLines, input.Elevated, "eino-agent")
-		return NormalizeExecToolResult(result, err)
+	if err := appendTool(toolutils.InferTool("ssh_file_read", "Read bounded remote file content, or set metadata_only=true to return only metadata and SHA256. Sensitive credential paths are denied.", func(ctx context.Context, input FileReadInput) (domain.ExecResult, error) {
+		return RunFileReadTool(ctx, svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err
 	}
@@ -608,38 +616,20 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_write", "Replace a remote file. The write is never performed until a human approves the exact content digest.", func(ctx context.Context, input FileWriteInput) (domain.ExecResult, error) {
-		result, err := svc.ApplyRemoteConfig(ctx, input.HostID, input.Path, input.Content, "", input.ExpectedSHA256, input.Validator, input.Elevated, input.Reason, input.Rollback, "eino-agent")
+	if err := appendTool(toolutils.InferTool("ssh_file_edit", "Replace or patch one remote file with SHA256 conflict detection, backup, optional validation, rollback, and human approval.", func(ctx context.Context, input FileEditInput) (domain.ExecResult, error) {
+		result, err := svc.EditRemoteFile(ctx, input.HostID, input.Path, input.Content, input.Patch, input.ExpectedSHA256, input.Validator, input.Elevated, input.Reason, input.Rollback, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_stat", "Inspect metadata for one absolute remote file path.", func(ctx context.Context, input FileListInput) (domain.ExecResult, error) {
-		result, err := svc.StatFile(ctx, input.HostID, input.Path, "eino-agent")
-		return NormalizeExecToolResult(result, err)
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("ssh_file_transfer", "Transfer one regular file between two registered SSH hosts through the control plane. The hosts do not need network access to each other. Call ssh_file_stat on the source first and bind its SHA256. Existing destinations are rejected unless overwrite=true and their current SHA256 is also bound. The exact transfer requires human approval.", func(ctx context.Context, input SSHFileTransferInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_file_transfer", "Transfer one regular file between two registered SSH hosts through the control plane. The hosts do not need network access to each other. Call ssh_file_read with metadata_only=true on the source first and bind its SHA256. Existing destinations are rejected unless overwrite=true and their current SHA256 is also bound. The exact transfer requires human approval.", func(ctx context.Context, input SSHFileTransferInput) (domain.ExecResult, error) {
 		result, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, input.Rollback, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_apply_patch", "Apply a unified diff in a remote directory after human approval of the exact patch digest.", func(ctx context.Context, input FilePatchInput) (domain.ExecResult, error) {
-		result, err := svc.ApplyPatchChecked(ctx, input.HostID, input.Cwd, input.Patch, input.ExpectedSHA256, input.Validator, input.Elevated, input.Reason, input.Rollback, "eino-agent")
-		return NormalizeExecToolResult(result, err)
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("ssh_config_apply", "Atomically replace or patch one remote configuration file with SHA256 conflict detection, protected backup, optional allowlisted validation, and automatic rollback.", func(ctx context.Context, input ConfigApplyInput) (domain.ExecResult, error) {
-		result, err := svc.ApplyRemoteConfigVersioned(ctx, input.HostID, input.Path, input.Content, input.Patch, input.ExpectedSHA256, input.Validator, input.Elevated, input.Reason, input.Rollback, "eino-agent")
-		return NormalizeExecToolResult(result, err)
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("ssh_config_restore", "Restore the protected backup recorded by one audited ssh_config_apply operation. Human approval is always required.", func(ctx context.Context, input FileRestoreInput) (domain.ExecResult, error) {
-		result, err := svc.RestoreRemoteConfig(ctx, input.OperationID, input.Elevated, input.Reason, "eino-agent")
+	if err := appendTool(toolutils.InferTool("ssh_file_restore", "Restore the protected backup recorded by one audited ssh_file_edit operation. Human approval is always required.", func(ctx context.Context, input FileRestoreInput) (domain.ExecResult, error) {
+		result, err := svc.RestoreRemoteFile(ctx, input.OperationID, input.Elevated, input.Reason, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
@@ -667,8 +657,8 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_file_apply_patch", "Apply a single-file unified diff inside a read_write workspace with SHA256 conflict detection, approval, atomic replacement, optional validation, backup, and rollback on failure.", func(ctx context.Context, input WorkspacePatchInput) (domain.ExecResult, error) {
-		result, err := svc.ApplyWorkspacePatch(ctx, input.WorkspaceID, input.Path, input.Patch, input.ExpectedSHA256, input.Validator, input.Reason, input.Rollback, "eino-agent")
+	if err := appendTool(toolutils.InferTool("workspace_file_edit", "Replace or patch one file inside a read_write workspace with SHA256 conflict detection, approval, atomic replacement, optional validation, backup, and rollback on failure.", func(ctx context.Context, input WorkspaceFileEditInput) (domain.ExecResult, error) {
+		result, err := svc.EditWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.Content, input.Patch, input.ExpectedSHA256, input.Validator, input.Reason, input.Rollback, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
@@ -709,27 +699,15 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_history_search", "Search prior commands and redacted results to reuse evidence and avoid repeating failed operations.", func(ctx context.Context, input HistorySearchInput) (any, error) {
-		runs, err := svc.SearchRuns(ctx, input.Query, input.HostID, input.Limit)
-		return normalizeValueToolResult(ctx, "ssh_history_search", HistorySearchOutput{Runs: runs}, err)
+	if err := appendTool(toolutils.InferTool("ssh_history", "Search audited commands and redacted results, or provide run_id to get one exact run. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistorySearchInput) (any, error) {
+		result, err := ReadHistoryTool(ctx, svc, input)
+		return normalizeValueToolResult(ctx, "ssh_history", result, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_history_get", "Get one audited command and its redacted result. Raw encrypted output is never exposed to the model.", func(ctx context.Context, input HistoryGetInput) (any, error) {
-		run, err := svc.GetRun(ctx, input.RunID, false)
-		return normalizeValueToolResult(ctx, "ssh_history_get", run, err)
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("ops_skill_list", "List administrator-managed operational skills for diagnosis, deployment, and recovery. Skills provide methodology but no extra permissions.", func(ctx context.Context, _ struct{}) (any, error) {
-		items, err := svc.ListEnabledSkills()
-		return normalizeValueToolResult(ctx, "ops_skill_list", SkillListOutput{Skills: items}, err)
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("ops_skill_get", "Load one administrator-managed operational skill before handling a matching complex workflow.", func(ctx context.Context, input SkillInput) (any, error) {
-		skill, err := svc.LoadSkill(ctx, input.Name, "eino-agent")
-		return normalizeValueToolResult(ctx, "ops_skill_get", skill, err)
+	if err := appendTool(toolutils.InferTool("ops_skill", "List enabled operational skills when name is omitted, or load one skill's complete instructions by name. Skills provide methodology but no extra permissions.", func(ctx context.Context, input SkillInput) (any, error) {
+		result, err := ReadSkillTool(ctx, svc, input, "eino-agent")
+		return normalizeValueToolResult(ctx, "ops_skill", result, err)
 	})); err != nil {
 		return nil, err
 	}

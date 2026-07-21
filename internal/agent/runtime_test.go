@@ -298,6 +298,48 @@ func TestQueryRetriesEmptyResponseWithoutDuplicatingUserMessage(t *testing.T) {
 	}
 }
 
+func TestQueryInjectsPersistedPlanBeforeCurrentUser(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	_, err = st.ReplaceAgentPlan(ctx, domain.AgentPlan{
+		SessionID: "session_plan_context",
+		Goal:      "Repair the API",
+		Status:    "active",
+		Steps: []domain.AgentPlanStep{
+			{Number: 1, Title: "Inspect logs", Status: "completed", Evidence: "timeout observed"},
+			{Number: 2, Title: "Fix timeout", Status: "in_progress"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{
+		{adk.EventFromMessage(schema.AssistantMessage("continuing the current step", nil), nil, schema.Assistant, "")},
+	}}
+	runtime := &Runtime{runner: runner, store: st}
+	if _, err := runtime.Query(ctx, "session_plan_context", "continue", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, inputs := runner.snapshot()
+	if len(inputs) != 1 || len(inputs[0]) != 2 {
+		t.Fatalf("model inputs = %#v", inputs)
+	}
+	planMessage, userMessage := inputs[0][0], inputs[0][1]
+	if planMessage.Role != schema.System || !strings.Contains(planMessage.Content, "Repair the API") || !strings.Contains(planMessage.Content, `"status":"in_progress"`) || !strings.Contains(planMessage.Content, "untrusted data") {
+		t.Fatalf("plan context = %#v", planMessage)
+	}
+	if strings.Contains(planMessage.Content, "session_plan_context") {
+		t.Fatalf("plan context exposed the internal session id: %s", planMessage.Content)
+	}
+	if userMessage.Role != schema.User || userMessage.Content != "continue" {
+		t.Fatalf("current user message = %#v", userMessage)
+	}
+}
+
 func TestQueryRejectsRepeatedEmptyResponseAndExcludesFailedTurn(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")

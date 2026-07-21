@@ -1491,8 +1491,8 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 	} else if req.WorkspaceShellBackend != "" {
 		return fmt.Errorf("workspace_shell_backend is only valid for workspace shell requests")
 	}
-	if len(req.Program) > 512 || len(req.Args) > 128 || len(req.Env) > 64 || len(req.Script) > 1<<20 {
-		return fmt.Errorf("execution request exceeds program, argument, environment, or 1 MiB script limits")
+	if len(req.Program) > 512 || len(req.Args) > 128 || len(req.Env) > 64 || len(req.Script) > 1<<20 || len(req.Content) > 1<<20 || len(req.Patch) > 1<<20 {
+		return fmt.Errorf("execution request exceeds program, argument, environment, or 1 MiB content limits")
 	}
 	for _, argument := range req.Args {
 		if len(argument) > 32<<10 || strings.ContainsRune(argument, '\x00') {
@@ -1531,7 +1531,7 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 		return fmt.Errorf("interactive program %q is unsupported because SSH tools do not allocate a PTY; use a non-interactive command or ssh_run_script", program)
 	}
 	if program == "systemctl" && len(req.Args) > 0 && req.Args[0] == "edit" {
-		return fmt.Errorf("interactive systemctl edit is unsupported; use ssh_config_apply on the unit or override file")
+		return fmt.Errorf("interactive systemctl edit is unsupported; use ssh_file_edit on the unit or override file")
 	}
 	if packageMutation(req.Args) {
 		requiredFlag := ""
@@ -1705,20 +1705,6 @@ func (s *Service) ListFiles(ctx context.Context, hostID, path string, actor stri
 		return domain.ExecResult{}, fmt.Errorf("remote directory path must be absolute")
 	}
 	return s.Submit(ctx, domain.ExecRequest{HostID: hostID, Mode: domain.ExecProgram, Program: "ls", Args: []string{"-la", "--", path}, Reason: "list a remote directory for diagnosis"}, actor)
-}
-
-func (s *Service) WriteFile(ctx context.Context, hostID, path, content string, elevated bool, reason, rollback, actor string) (domain.ExecResult, error) {
-	return s.ApplyRemoteConfig(ctx, hostID, path, content, "", "", "", elevated, reason, rollback, actor)
-}
-
-func (s *Service) StatFile(ctx context.Context, hostID, path, actor string) (domain.ExecResult, error) {
-	result, err := s.ReadFileAdvanced(ctx, hostID, path, 1, 0, 0, false, actor)
-	result.Stdout = ""
-	return result, err
-}
-
-func (s *Service) ApplyPatch(ctx context.Context, hostID, cwd, patchContent string, elevated bool, reason, rollback, actor string) (domain.ExecResult, error) {
-	return s.ApplyPatchChecked(ctx, hostID, cwd, patchContent, "", "", elevated, reason, rollback, actor)
 }
 
 func (s *Service) GetRun(ctx context.Context, id string, includeRaw bool) (HistoryResult, error) {

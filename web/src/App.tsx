@@ -763,13 +763,14 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
   const runID=textValue(payload.run_id)||textValue(taskPayload?.run_id)||textValue(resultPayload?.run_id)
   const run=runs.find(item=>item.id===runID)
   const display=jsonRecord(payload._display)
-  const request=jsonRecord(display?.request)||requestFromRun(run)
+	const request=jsonRecord(display?.request)||requestFromRun(run)
   const hostID=textValue(display?.host_id)||run?.host_id||textValue(request?.host_id)
   const hostName=hosts.find(host=>host.id===hostID||host.name===hostID)?.name||hostID||'—'
   const status=textValue(payload.status)||textValue(taskPayload?.status)||textValue(resultPayload?.status)||run?.status||'completed'
   const risk=textValue(display?.risk)||textValue(resultPayload?.risk)||run?.risk||''
   const program=request?fullProgram(request):''
-  const script=request?textValue(request.script):''
+	const script=request?textValue(request.script):''
+	const fileEdit=request?textValue(request.patch)||textValue(request.content):''
   const remotePath=request?textValue(request.remote_path):''
 	const workspaceID=request?textValue(request.workspace_id):''
 	const relativePath=request?textValue(request.relative_path):''
@@ -804,7 +805,7 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
         <section className="tool-command-pane">
 		  <div className="tool-command-head"><span>{filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
 			  <div className="tool-command-block">{workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
-		  {filePath&&script&&<details className="tool-raw"><summary>{t('tool.fullTransaction')}</summary><pre>{script}</pre></details>}
+		  {filePath&&(script||fileEdit)&&<details className="tool-raw"><summary>{t('tool.fullTransaction')}</summary><pre>{script||fileEdit}</pre></details>}
 		  {program&&<CompactTable title={t('tool.originalArgs')} columns={[t('tool.index'),t('tool.value')]} rows={[[0,textValue(request.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>}
 		  {env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
         </section>
@@ -913,6 +914,7 @@ function ApprovalDialog({
     request = { request: approval.request_json };
   }
   const script = textValue(request.script);
+  const fileEdit = textValue(request.patch) || textValue(request.content);
   const workspaceID = textValue(request.workspace_id);
   const filePath =
     textValue(request.remote_path) || textValue(request.relative_path);
@@ -964,6 +966,7 @@ function ApprovalDialog({
       ? `${workspaceID}:${relativePath} → ${remotePath}`
     : fullProgram(request) ||
       script ||
+      fileEdit ||
       `${requestMode} ${filePath}`.trim() ||
       t("approval.pendingOperation");
   const hostName = workspaceTransfer || sshTransfer
@@ -1109,7 +1112,7 @@ function ApprovalDialog({
             </div>
           )}
           <pre className="approval-command-preview">
-            {script || `$ ${operation}`}
+            {script || fileEdit || `$ ${operation}`}
           </pre>
           <dl>
             <div>

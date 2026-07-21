@@ -129,7 +129,7 @@ func TestWorkspaceReadPatchAndTraversalProtection(t *testing.T) {
 		t.Fatalf("unexpected workspace read: %#v", read)
 	}
 	patch := "--- app.conf\n+++ app.conf\n@@ -1,1 +1,1 @@\n-port=8080\n+port=9090\n"
-	pending, err := svc.ApplyWorkspacePatch(context.Background(), "project", "app.conf", patch, read.File.SHA256, "", "change port", "restore backup", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "", patch, read.File.SHA256, "", "change port", "restore backup", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,13 +155,65 @@ func TestWorkspacePatchDetectsVersionConflict(t *testing.T) {
 	_ = os.WriteFile(path, []byte("a\n"), 0o600)
 	stale := fmt.Sprintf("%x", sha256.Sum256([]byte("old\n")))
 	patch := "--- app.conf\n+++ app.conf\n@@ -1 +1 @@\n-a\n+b\n"
-	pending, err := svc.ApplyWorkspacePatch(context.Background(), "project", "app.conf", patch, stale, "", "change", "restore", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "", patch, stale, "", "change", "restore", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
 	if err == nil || result.ExitCode != 73 {
 		t.Fatalf("expected conflict, got %#v err=%v", result, err)
+	}
+}
+
+func TestWorkspaceFileEditReplacesAndCreatesFiles(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	existingPath := filepath.Join(root, "app.conf")
+	if err := os.WriteFile(existingPath, []byte("enabled=false\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	expected := fmt.Sprintf("%x", sha256.Sum256([]byte("enabled=false\n")))
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "enabled=true\n", "", expected, "", "enable app", "restore backup", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(existingPath)
+	if err != nil || string(content) != "enabled=true\n" {
+		t.Fatalf("replacement content=%q err=%v", content, err)
+	}
+	info, err := os.Stat(existingPath)
+	if err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("replacement mode=%v err=%v", info, err)
+	}
+
+	createdPath := filepath.Join(root, "new.conf")
+	pending, err = svc.EditWorkspaceFile(context.Background(), "project", "new.conf", "created=true\n", "", "absent", "", "create config", "remove file", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	content, err = os.ReadFile(createdPath)
+	if err != nil || string(content) != "created=true\n" {
+		t.Fatalf("created content=%q err=%v", content, err)
+	}
+	info, err = os.Stat(createdPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("created mode=%v err=%v", info, err)
+	}
+}
+
+func TestWorkspaceFileEditRejectsAmbiguousChanges(t *testing.T) {
+	svc, _ := newWorkspaceService(t, "read_write")
+	expected := strings.Repeat("a", 64)
+	if _, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "replacement", "@@ -0,0 +1 @@\n+patch\n", expected, "", "change", "restore", "test"); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("content and patch were accepted together: %v", err)
+	}
+	if _, err := svc.EditWorkspaceFile(context.Background(), "project", "new.conf", "", "@@ -0,0 +1 @@\n+new\n", "absent", "", "create", "remove", "test"); err == nil || !strings.Contains(err.Error(), "cannot create") {
+		t.Fatalf("patch creation was accepted: %v", err)
 	}
 }
 
@@ -208,7 +260,7 @@ func TestWorkspacePostValidationFailureRestoresOriginalAtomically(t *testing.T) 
 	svc.validators["fixture"] = config.Validator{ID: "fixture", Scope: "workspace", Program: validator, Args: []string{"{{path}}"}, TimeoutSeconds: 5, PathPatterns: []string{filepath.Join(root, "**")}}
 	expected := fmt.Sprintf("%x", sha256.Sum256([]byte("port=8080\n")))
 	patch := "@@ -1 +1 @@\n-port=8080\n+port=9090\n"
-	pending, err := svc.ApplyWorkspacePatch(context.Background(), "project", "app.conf", patch, expected, "fixture", "change port", "restore backup", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "", patch, expected, "fixture", "change port", "restore backup", "test")
 	if err != nil {
 		t.Fatal(err)
 	}

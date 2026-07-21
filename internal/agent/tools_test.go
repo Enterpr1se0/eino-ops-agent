@@ -31,6 +31,10 @@ type backgroundToolTransport struct {
 	release chan struct{}
 }
 
+type fileReadToolTransport struct {
+	request domain.ExecRequest
+}
+
 type toolFailureLoopModel struct {
 	calls  int
 	inputs [][]*schema.Message
@@ -67,6 +71,24 @@ func (t *backgroundToolTransport) Exec(ctx context.Context, _ sshx.ConnectionSpe
 	case <-ctx.Done():
 		return sshx.RawResult{}, ctx.Err()
 	}
+}
+
+func (t *fileReadToolTransport) Exec(_ context.Context, _ sshx.ConnectionSpec, request domain.ExecRequest) (sshx.RawResult, error) {
+	t.request = request
+	stdout := "__OPS_FILE_META__\n15\t640\tops\tops\t1700000000\n" + strings.Repeat("a", 64) + "  /etc/example.conf\n__OPS_FILE_CONTENT__\nsecret contents"
+	return sshx.RawResult{Stdout: []byte(stdout)}, nil
+}
+
+func (*fileReadToolTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
+	return sshx.HostInfo{}, nil
+}
+
+func (*fileReadToolTransport) ScanHostKey(context.Context, sshx.ConnectionSpec) (sshx.HostKey, error) {
+	return sshx.HostKey{}, nil
+}
+
+func (*fileReadToolTransport) TrustHostKey(context.Context, sshx.ConnectionSpec, string) (sshx.HostKey, error) {
+	return sshx.HostKey{}, nil
 }
 
 func (*backgroundToolTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
@@ -108,8 +130,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 31 {
-		t.Fatalf("built-in catalog size=%d, want 31", len(descriptors))
+	if len(descriptors) != 24 {
+		t.Fatalf("built-in catalog size=%d, want 24", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -143,6 +165,21 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		if descriptor.Name == "ssh_run_script" && !strings.Contains(string(descriptor.InputSchema), `"background"`) {
 			t.Fatalf("ssh_run_script metadata is missing background: %#v", descriptor)
 		}
+		if descriptor.Name == "ssh_file_read" && !strings.Contains(string(descriptor.InputSchema), `"metadata_only"`) {
+			t.Fatalf("ssh_file_read metadata_only mode is missing: %#v", descriptor)
+		}
+		if descriptor.Name == "ssh_task" && (descriptor.Guard != "audited_control" || !strings.Contains(string(descriptor.InputSchema), `"action"`)) {
+			t.Fatalf("ssh_task metadata does not expose its audited action: %#v", descriptor)
+		}
+		if descriptor.Name == "ssh_task" && descriptor.Category != "tasks" {
+			t.Fatalf("ssh_task category = %q, want tasks", descriptor.Category)
+		}
+		if descriptor.Name == "ssh_history" && descriptor.Category != "history" {
+			t.Fatalf("ssh_history category = %q, want history", descriptor.Category)
+		}
+		if descriptor.Name == "ops_skill" && descriptor.Category != "skills" {
+			t.Fatalf("ops_skill category = %q, want skills", descriptor.Category)
+		}
 		if descriptor.Name == "workspace_shell" && descriptor.Guard != "approval_required" {
 			t.Fatalf("workspace_shell must be approval-gated: %#v", descriptor)
 		}
@@ -153,12 +190,12 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
 		}
 	}
-	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list"} {
+	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get", "ops_plan_get"} {
 		if seen[retired] {
 			t.Fatalf("removed %s tool remains in the Agent catalog", retired)
 		}
 	}
-	if !seen["ops_plan_get"] || !seen["ssh_config_apply"] || !seen["ssh_file_transfer"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task_get"] || !seen["ssh_task_cancel"] {
+	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ssh_file_edit"] || !seen["ssh_file_restore"] || !seen["ssh_file_transfer"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
 		t.Fatalf("representative functions missing: %#v", seen)
 	}
 }
@@ -236,7 +273,7 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 	}
 }
 
-func TestRunScriptBackgroundReturnsTaskAndTaskGetReturnsOutput(t *testing.T) {
+func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/background-tools.db")
 	if err != nil {
@@ -265,7 +302,7 @@ func TestRunScriptBackgroundReturnsTaskAndTaskGetReturnsOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var scriptTool, getTool tool.InvokableTool
+	var scriptTool, taskTool tool.InvokableTool
 	for _, candidate := range loaded {
 		info, infoErr := candidate.Info(ctx)
 		if infoErr != nil {
@@ -274,11 +311,11 @@ func TestRunScriptBackgroundReturnsTaskAndTaskGetReturnsOutput(t *testing.T) {
 		switch info.Name {
 		case "ssh_run_script":
 			scriptTool = candidate.(tool.InvokableTool)
-		case "ssh_task_get":
-			getTool = candidate.(tool.InvokableTool)
+		case "ssh_task":
+			taskTool = candidate.(tool.InvokableTool)
 		}
 	}
-	if scriptTool == nil || getTool == nil {
+	if scriptTool == nil || taskTool == nil {
 		t.Fatal("merged background tools are missing")
 	}
 	inputJSON, _ := json.Marshal(map[string]any{
@@ -305,10 +342,10 @@ func TestRunScriptBackgroundReturnsTaskAndTaskGetReturnsOutput(t *testing.T) {
 	}
 	close(transport.release)
 
-	getInput, _ := json.Marshal(map[string]string{"task_id": started.TaskID})
+	getInput, _ := json.Marshal(map[string]string{"task_id": started.TaskID, "action": "status"})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		resultJSON, getErr := getTool.InvokableRun(ctx, string(getInput))
+		resultJSON, getErr := taskTool.InvokableRun(ctx, string(getInput))
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
@@ -325,6 +362,149 @@ func TestRunScriptBackgroundReturnsTaskAndTaskGetReturnsOutput(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("background task did not complete")
+}
+
+func TestUnifiedTaskToolCancelsWithStandardExecResult(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/cancel-task.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &backgroundToolTransport{started: make(chan domain.ExecRequest, 1), release: make(chan struct{})}
+	defer close(transport.release)
+	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	host, err := svc.AddHost(ctx, domain.Host{Name: "cancel-host", Address: "127.0.0.1", Port: 22, User: "ops"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := svc.StartTask(ctx, domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "uname", Reason: "verify cancellation"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-transport.started:
+	case <-time.After(time.Second):
+		t.Fatal("background task did not start")
+	}
+	result, err := RunTaskTool(svc, TaskInput{TaskID: task.ID, Action: "cancel"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.TaskID != task.ID || result.Status != "cancelled" || result.Code != "cancelled" || result.ToolVersion != "1.1" {
+		t.Fatalf("cancel result is not a standard ExecResult: %#v", result)
+	}
+}
+
+func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/file-read.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &fileReadToolTransport{}
+	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	host, err := svc.AddHost(ctx, domain.Host{Name: "file-host", Address: "127.0.0.1", Port: 22, User: "ops"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true, MaxBytes: 4096, OffsetBytes: 20, TailLines: 5}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Stdout != "" || result.File == nil || result.File.SHA256 != strings.Repeat("a", 64) || result.File.Size != 15 {
+		t.Fatalf("metadata-only result = %#v", result)
+	}
+	if !strings.Contains(transport.request.Script, "head -c 1") || strings.Contains(transport.request.Script, "tail -n") || strings.Contains(transport.request.Script, "tail -c") {
+		t.Fatalf("metadata-only request did not minimize the remote read: %s", transport.request.Script)
+	}
+}
+
+func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/history.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	for _, host := range []domain.Host{
+		{ID: "host-a", Name: "host-a", Address: "127.0.0.1", Port: 22, User: "ops", AuthType: "agent", CreatedAt: now, UpdatedAt: now},
+		{ID: "host-b", Name: "host-b", Address: "127.0.0.2", Port: 22, User: "ops", AuthType: "agent", CreatedAt: now, UpdatedAt: now},
+	} {
+		if _, err := st.UpsertHost(ctx, host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, run := range []domain.Run{
+		{ID: "run-nginx", HostID: "host-a", RequestJSON: `{"program":"nginx"}`, RequestDigest: "digest-a", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now.Add(-time.Minute)},
+		{ID: "run-disk", HostID: "host-b", RequestJSON: `{"program":"df"}`, RequestDigest: "digest-b", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now},
+	} {
+		if err := st.CreateRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	searched, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: "nginx", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(searched.Runs) != 1 || searched.Runs[0].ID != "run-nginx" {
+		t.Fatalf("history search result = %#v", searched)
+	}
+	exact, err := ReadHistoryTool(ctx, svc, HistorySearchInput{RunID: "run-disk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exact.Runs) != 1 || exact.Runs[0].ID != "run-disk" {
+		t.Fatalf("exact history result = %#v", exact)
+	}
+
+	loaded, err := BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var historyTool tool.InvokableTool
+	for _, candidate := range loaded {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "ssh_history" {
+			historyTool = candidate.(tool.InvokableTool)
+			break
+		}
+	}
+	if historyTool == nil {
+		t.Fatal("ssh_history was not registered")
+	}
+	failureJSON, err := historyTool.InvokableRun(ctx, `{"run_id":"run-disk","query":"df"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failure domain.ToolFailure
+	if err := json.Unmarshal([]byte(failureJSON), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.OK || failure.Code != "validation_failed" || !strings.Contains(failure.Message, "mutually exclusive") {
+		t.Fatalf("history input conflict was not structured: %#v", failure)
+	}
 }
 
 func TestDisabledToolIsExcludedFromRunnerAndRetainedInCatalog(t *testing.T) {
@@ -394,7 +574,7 @@ func TestDisabledToolIsExcludedFromRunnerAndRetainedInCatalog(t *testing.T) {
 	t.Fatal("re-enabled ssh_exec was not loaded into the runner")
 }
 
-func TestSkillToolsReadTheLiveAdministratorRegistry(t *testing.T) {
+func TestUnifiedSkillToolReadsTheLiveAdministratorRegistry(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/skills.db")
 	if err != nil {
@@ -416,23 +596,20 @@ func TestSkillToolsReadTheLiveAdministratorRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var getTool, listTool tool.InvokableTool
+	var skillTool tool.InvokableTool
 	for _, candidate := range loaded {
 		info, infoErr := candidate.Info(ctx)
 		if infoErr != nil {
 			t.Fatal(infoErr)
 		}
-		if info.Name == "ops_skill_get" {
-			getTool = candidate.(tool.InvokableTool)
-		}
-		if info.Name == "ops_skill_list" {
-			listTool = candidate.(tool.InvokableTool)
+		if info.Name == "ops_skill" {
+			skillTool = candidate.(tool.InvokableTool)
 		}
 	}
-	if getTool == nil {
-		t.Fatal("ops_skill_get was not registered")
+	if skillTool == nil {
+		t.Fatal("ops_skill was not registered")
 	}
-	result, err := getTool.InvokableRun(service.WithSessionID(ctx, "session_skill"), `{"name":"custom-diagnosis"}`)
+	result, err := skillTool.InvokableRun(service.WithSessionID(ctx, "session_skill"), `{"name":"custom-diagnosis"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,7 +619,7 @@ func TestSkillToolsReadTheLiveAdministratorRegistry(t *testing.T) {
 	if _, err := svc.SetAdminSkillEnabled(ctx, "custom-diagnosis", false, "test"); err != nil {
 		t.Fatal(err)
 	}
-	disabledJSON, err := getTool.InvokableRun(ctx, `{"name":"custom-diagnosis"}`)
+	disabledJSON, err := skillTool.InvokableRun(ctx, `{"name":"custom-diagnosis"}`)
 	if err != nil {
 		t.Fatalf("disabled skill aborted the ToolNode: %v", err)
 	}
@@ -453,77 +630,12 @@ func TestSkillToolsReadTheLiveAdministratorRegistry(t *testing.T) {
 	if disabled.OK || disabled.Status != "failed" || disabled.Code != "configuration_required" || !strings.Contains(disabled.Message, "disabled") {
 		t.Fatalf("disabled skill did not return a structured failure: %#v", disabled)
 	}
-	listed, err := listTool.InvokableRun(ctx, `{}`)
+	listed, err := skillTool.InvokableRun(ctx, `{}`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(listed, "custom-diagnosis") {
 		t.Fatalf("disabled skill remained discoverable: %s", listed)
-	}
-}
-
-func TestPlanGetToolTreatsMissingPlanAsRecoverableState(t *testing.T) {
-	ctx := context.Background()
-	st, err := store.Open(ctx, t.TempDir()+"/tools.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	engine, err := policy.Load("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	encryptor, err := security.NewEncryptor("", t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
-	tools, err := BuildTools(svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var planTool tool.InvokableTool
-	for _, candidate := range tools {
-		info, infoErr := candidate.Info(ctx)
-		if infoErr != nil {
-			t.Fatal(infoErr)
-		}
-		if info.Name == "ops_plan_get" {
-			planTool = candidate.(tool.InvokableTool)
-			break
-		}
-	}
-	if planTool == nil {
-		t.Fatal("ops_plan_get tool was not registered")
-	}
-
-	sessionCtx := service.WithSessionID(ctx, "session_without_plan")
-	resultJSON, err := planTool.InvokableRun(sessionCtx, `{}`)
-	if err != nil {
-		t.Fatalf("a missing optional plan aborted the ToolNode: %v", err)
-	}
-	var missing PlanGetOutput
-	if err := json.Unmarshal([]byte(resultJSON), &missing); err != nil {
-		t.Fatal(err)
-	}
-	if missing.Found || missing.Plan != nil || missing.Guidance == "" {
-		t.Fatalf("unexpected missing-plan result: %#v", missing)
-	}
-
-	created, err := svc.CreateAgentPlan(sessionCtx, "Diagnose the service", []string{"Collect evidence", "Verify the cause"}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resultJSON, err = planTool.InvokableRun(sessionCtx, `{}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var found PlanGetOutput
-	if err := json.Unmarshal([]byte(resultJSON), &found); err != nil {
-		t.Fatal(err)
-	}
-	if !found.Found || found.Plan == nil || found.Plan.SessionID != created.SessionID || len(found.Plan.Steps) != 2 {
-		t.Fatalf("existing plan was not returned: %#v", found)
 	}
 }
 
