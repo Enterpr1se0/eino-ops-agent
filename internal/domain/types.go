@@ -162,6 +162,8 @@ const (
 
 type SystemSettings struct {
 	AgentMaxIterations          int       `json:"agent_max_iterations"`
+	SystemPrompt                string    `json:"system_prompt"`
+	DefaultSystemPrompt         string    `json:"default_system_prompt"`
 	ApprovalExplanationsEnabled bool      `json:"approval_explanations_enabled"`
 	SubagentModelProviderID     string    `json:"subagent_model_provider_id"`
 	SubagentTimeoutSeconds      int       `json:"subagent_timeout_seconds"`
@@ -177,6 +179,7 @@ type SystemSettings struct {
 
 type SystemSettingsInput struct {
 	AgentMaxIterations          int      `json:"agent_max_iterations"`
+	SystemPrompt                *string  `json:"system_prompt,omitempty"`
 	ApprovalExplanationsEnabled *bool    `json:"approval_explanations_enabled,omitempty"`
 	SubagentModelProviderID     *string  `json:"subagent_model_provider_id,omitempty"`
 	SubagentTimeoutSeconds      *int     `json:"subagent_timeout_seconds,omitempty"`
@@ -384,6 +387,7 @@ const (
 	ExecWorkspaceList   ExecMode = "workspace_list"
 	ExecWorkspaceSearch ExecMode = "workspace_search"
 	ExecWorkspaceEdit   ExecMode = "workspace_edit"
+	ExecRemoteEdit      ExecMode = "remote_edit"
 	ExecWorkspaceUpload ExecMode = "workspace_upload"
 	ExecWorkspaceShell  ExecMode = "workspace_shell"
 	ExecSSHFileTransfer ExecMode = "ssh_file_transfer"
@@ -395,8 +399,7 @@ type ExecRequest struct {
 	Program                   string            `json:"program,omitempty" jsonschema:"remote executable name for program mode"`
 	Args                      []string          `json:"args,omitempty" jsonschema:"separate arguments; do not include shell quoting"`
 	Script                    string            `json:"script,omitempty" jsonschema:"bash script content for script mode"`
-	Content                   string            `json:"content,omitempty" jsonschema:"complete replacement content for a workspace file edit"`
-	Patch                     string            `json:"patch,omitempty" jsonschema:"unified diff for a workspace file edit"`
+	Change                    *FileChange       `json:"change,omitempty"`
 	Cwd                       string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory, or a clean workspace-relative directory for workspace_shell"`
 	Env                       map[string]string `json:"env,omitempty" jsonschema:"non-secret environment values"`
 	Elevated                  bool              `json:"elevated,omitempty" jsonschema:"request root through the host sudo policy; never pass sudo or a password as a program or argument"`
@@ -451,10 +454,10 @@ type ExecResult struct {
 	PolicyHits          []string      `json:"policy_hits,omitempty"`
 	CompletedAt         time.Time     `json:"completed_at,omitempty"`
 	File                *FileMetadata `json:"file,omitempty"`
+	Change              *FileChange   `json:"change,omitempty"`
 }
 
 type FileMetadata struct {
-	OperationID   string `json:"operation_id,omitempty"`
 	Path          string `json:"path"`
 	Size          int64  `json:"size,omitempty"`
 	Mode          string `json:"mode,omitempty"`
@@ -462,8 +465,6 @@ type FileMetadata struct {
 	Group         string `json:"group,omitempty"`
 	ModifiedUnix  int64  `json:"modified_unix,omitempty"`
 	SHA256        string `json:"sha256,omitempty"`
-	BeforeSHA256  string `json:"before_sha256,omitempty"`
-	BackupPath    string `json:"backup_path,omitempty"`
 	Validator     string `json:"validator,omitempty"`
 	ValidationOK  bool   `json:"validation_ok,omitempty"`
 	Sensitive     bool   `json:"sensitive,omitempty"`
@@ -471,17 +472,10 @@ type FileMetadata struct {
 	ReturnedBytes int    `json:"returned_bytes,omitempty"`
 }
 
-type FileOperation struct {
-	ID           string    `json:"id"`
-	RunID        string    `json:"run_id"`
-	HostID       string    `json:"host_id"`
-	Path         string    `json:"path"`
-	BackupPath   string    `json:"backup_path"`
-	BeforeSHA256 string    `json:"before_sha256"`
-	AfterSHA256  string    `json:"after_sha256"`
-	Validator    string    `json:"validator,omitempty"`
-	Status       string    `json:"status"`
-	CreatedAt    time.Time `json:"created_at"`
+type FileChange struct {
+	Diff      string `json:"diff"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
 }
 
 type Decision struct {

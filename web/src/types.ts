@@ -258,6 +258,8 @@ export interface Health {
 
 export interface SystemSettings {
   agent_max_iterations: number
+  system_prompt: string
+  default_system_prompt: string
   approval_explanations_enabled: boolean
   subagent_model_provider_id: string
   subagent_timeout_seconds: number
@@ -275,6 +277,7 @@ export type WorkspaceShellMode = 'sandbox' | 'host' | 'disabled'
 
 export interface SystemSettingsInput {
   agent_max_iterations: number
+  system_prompt?: string
   approval_explanations_enabled?: boolean
   subagent_model_provider_id?: string
   subagent_timeout_seconds?: number
@@ -324,7 +327,6 @@ export interface AuthSession {
 }
 
 export interface FileMetadata {
-	operation_id?: string
   path: string
   size?: number
   mode?: string
@@ -332,8 +334,6 @@ export interface FileMetadata {
   group?: string
   modified_unix?: number
   sha256?: string
-  before_sha256?: string
-  backup_path?: string
   validator?: string
   validation_ok?: boolean
   sensitive?: boolean

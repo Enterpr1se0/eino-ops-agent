@@ -60,21 +60,15 @@ func New(svc *service.Service, version string) *Server {
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_edit", Description: "Replace or patch one SHA256-bound remote file after human approval."},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_edit", Description: "Apply one reviewed unified diff to an existing remote file."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileEditInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.EditRemoteFile(ctx, input.HostID, input.Path, input.Content, input.Patch, input.ExpectedSHA256, input.Validator, input.Elevated, input.Reason, input.Rollback, "mcp-client")
+			output, err := svc.EditRemoteFile(ctx, input.HostID, input.Path, input.Diff, input.Validator, input.Elevated, input.Reason, "mcp-client")
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_transfer", Description: "Transfer one SHA256-bound regular file between two registered SSH hosts through the control plane after human approval."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHFileTransferInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, input.Rollback, "mcp-client")
-			output, err = agent.NormalizeExecToolResult(output, err)
-			return nil, output, err
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_restore", Description: "Restore the protected backup from an audited file edit."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileRestoreInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.RestoreRemoteFile(ctx, input.OperationID, input.Elevated, input.Reason, "mcp-client")
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
@@ -100,9 +94,9 @@ func New(svc *service.Service, version string) *Server {
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_edit", Description: "Replace or patch one SHA256-bound file inside a read_write workspace after human approval."},
+	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_edit", Description: "Apply one reviewed unified diff to an existing file inside a read_write workspace."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspaceFileEditInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.EditWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.Content, input.Patch, input.ExpectedSHA256, input.Validator, input.Reason, input.Rollback, "mcp-client")
+			output, err := svc.EditWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.Diff, input.Validator, input.Reason, "mcp-client")
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})

@@ -59,14 +59,12 @@
 
 向 Agent 输入：
 
-> 检查 demo 主机的 nginx 配置；如果确实需要修改，只调整 server_tokens，修改前绑定当前 SHA256，使用 nginx validator，并保留可恢复的 operation ID。
+> 检查 demo 主机的 nginx 配置；如果确实需要修改，只调整 server_tokens，使用 unified diff 和 nginx validator。
 
-展示 `ssh_file_read` 返回 mode、owner、mtime 和 SHA256。`ssh_file_edit` 审批框应展示完整目标、expected SHA256、变更内容、validator、备份与回滚策略。批准后检查 before/after SHA256 和 operation ID；随后在测试环境调用 `ssh_file_restore`，证明恢复只能引用已记录的操作，不能让模型任意填写备份路径。
-
-在另一个终端于审批期间修改目标文件，再批准原请求。展示系统返回 `conflict` 和重新读取建议，而不是覆盖较新的内容。
+展示 `ssh_file_read` 返回 mode、owner、mtime 和 SHA256。`ssh_file_edit` 审批框应直接显示带行号的红绿 diff、`+新增/-删除` 统计和 validator，而不是内部 Bash 事务脚本。批准后确认结果卡展示同一份 diff 和修改后 SHA256；对不存在的目标文件应直接拒绝编辑。
 
 ## 8. Workspace 与持久长任务
 
-直接在 Agent 对话左侧的 Workspace 文件栏选择 `default`，上传一次性示例仓库文件或压缩包。展示文件浏览、子目录导航、文本预览、二进制元数据提示和可恢复删除；强调点击文件只会预览，不会自动给 LLM 发送任务。在 System 设置中展示 Workspace Shell 三种模式，默认保留 Sandbox。要求 Agent 用 `workspace_shell` 解压压缩包，审批框应展示完整脚本、Workspace 和 Bubblewrap 后端，批准后展示产物，并说明沙箱断网、看不到宿主绝对路径且只能按 Workspace access 落盘。可另行切到 Host Shell 展示显著权限警告和被禁用的会话级授权按钮；Host 每次必须单独批准，且 `read_only` Workspace 不允许调用。随后要求 Agent 读取 README、搜索启动入口并调用 `workspace_file_edit` 提交一个单文件 unified diff；patch 必须绑定 SHA256，且只允许配置中声明的 validator。
+直接在 Agent 对话左侧的 Workspace 文件栏选择 `default`，上传一次性示例仓库文件或压缩包。展示文件浏览、子目录导航、文本预览、二进制元数据提示和可恢复删除；强调点击文件只会预览，不会自动给 LLM 发送任务。在 System 设置中展示 Workspace Shell 三种模式，默认保留 Sandbox。要求 Agent 用 `workspace_shell` 解压压缩包，审批框应展示完整脚本、Workspace 和 Bubblewrap 后端，批准后展示产物，并说明沙箱断网、看不到宿主绝对路径且只能按 Workspace access 落盘。可另行切到 Host Shell 展示显著权限警告和被禁用的会话级授权按钮；Host 每次必须单独批准，且 `read_only` Workspace 不允许调用。随后要求 Agent 读取 README、搜索启动入口并调用 `workspace_file_edit` 提交一个单文件 unified diff；审批框必须显示完整 diff，且只允许配置中声明的 validator。
 
 再让 Agent 调用 `ssh_exec` 或 `ssh_run_script` 并设置 `background: true`，启动一个短时后台诊断任务。保存返回的 `task_id`，刷新页面后用 `ssh_task(action=status)` 查看状态和输出，最后用 `ssh_task(action=cancel)` 演示取消。说明服务重启后无法重新附着到旧 SSH 进程，数据库会把未完成任务明确标为 `interrupted`，不会假装仍在运行。

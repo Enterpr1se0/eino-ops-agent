@@ -330,6 +330,11 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 		return domain.SystemSettings{}, err
 	}
 	current.AgentMaxIterations = input.AgentMaxIterations
+	systemPromptChanged := false
+	if input.SystemPrompt != nil {
+		systemPromptChanged = current.SystemPrompt != *input.SystemPrompt
+		current.SystemPrompt = *input.SystemPrompt
+	}
 	if input.ApprovalExplanationsEnabled != nil {
 		current.ApprovalExplanationsEnabled = *input.ApprovalExplanationsEnabled
 	}
@@ -388,6 +393,7 @@ func (s *Service) SaveSystemSettings(ctx context.Context, input domain.SystemSet
 	}
 	s.audit(ctx, "", "system_settings_updated", actor, map[string]any{
 		"agent_max_iterations": saved.AgentMaxIterations, "approval_explanations_enabled": saved.ApprovalExplanationsEnabled,
+		"system_prompt_changed": systemPromptChanged, "system_prompt_bytes": len(saved.SystemPrompt),
 		"subagent_model_provider_id": saved.SubagentModelProviderID, "subagent_timeout_seconds": saved.SubagentTimeoutSeconds,
 		"chat_image_allowed_types": saved.ChatImageAllowedTypes,
 		"workspace_shell_mode":     saved.WorkspaceShellMode,
@@ -1340,6 +1346,21 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		}
 		req = prepared
 	}
+	approvedReq := req
+	transportReq := req
+	if req.Mode == domain.ExecRemoteEdit {
+		prepared, prepareErr := s.prepareRemoteFileChange(req)
+		if prepareErr != nil {
+			run.Status = "failed"
+			run.Error = prepareErr.Error()
+			run.CompletedAt = time.Now().UTC()
+			_ = s.store.UpdateRun(ctx, run)
+			s.audit(ctx, run.ID, "command_failed", actor, map[string]any{"error": prepareErr.Error()})
+			logger.ErrorContext(ctx, "remote file change preparation failed", "error", prepareErr)
+			return domain.ExecResult{RunID: run.ID, Status: run.Status, Risk: run.Risk, Stderr: prepareErr.Error(), Change: req.Change, CompletedAt: run.CompletedAt}, prepareErr
+		}
+		transportReq = prepared
+	}
 	hostIDs := []string{host.ID}
 	if req.Mode == domain.ExecSSHFileTransfer {
 		hostIDs = append(hostIDs, req.SourceHostID)
@@ -1382,9 +1403,9 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	} else if isWorkspaceMode(req.Mode) {
 		raw, execErr = s.executeWorkspace(ctx, req)
 	} else if streaming, ok := s.transport.(sshx.StreamingTransport); ok && stream != nil {
-		raw, execErr = streaming.ExecStream(ctx, connection, req, stream)
+		raw, execErr = streaming.ExecStream(ctx, connection, transportReq, stream)
 	} else {
-		raw, execErr = s.transport.Exec(ctx, connection, req)
+		raw, execErr = s.transport.Exec(ctx, connection, transportReq)
 	}
 	run.ExitCode = raw.ExitCode
 	run.StdoutRedacted = s.redactor.Redact(string(raw.Stdout))
@@ -1414,7 +1435,15 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	result := domain.ExecResult{
 		RunID: run.ID, Status: run.Status, Risk: run.Risk, ExitCode: run.ExitCode,
 		Stdout: run.StdoutRedacted, Stderr: run.StderrRedacted,
-		Duration: raw.Duration, PolicyHits: hits, CompletedAt: run.CompletedAt,
+		Duration: raw.Duration, PolicyHits: hits, Change: approvedReq.Change, CompletedAt: run.CompletedAt,
+	}
+	if approvedReq.Change != nil {
+		path := approvedReq.RemotePath
+		if approvedReq.Mode == domain.ExecWorkspaceEdit {
+			path = approvedReq.RelativePath
+		}
+		metadata := parseFileEditOutput(path, approvedReq.Validator, result.Stdout)
+		result.File = &metadata
 	}
 	return result, execErr
 }
@@ -1490,7 +1519,11 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 	} else if req.WorkspaceShellBackend != "" {
 		return fmt.Errorf("workspace_shell_backend is only valid for workspace shell requests")
 	}
-	if len(req.Program) > 512 || len(req.Args) > 128 || len(req.Env) > 64 || len(req.Script) > 1<<20 || len(req.Content) > 1<<20 || len(req.Patch) > 1<<20 {
+	changeTooLarge := false
+	if req.Change != nil {
+		changeTooLarge = len(req.Change.Diff) > 2<<20
+	}
+	if len(req.Program) > 512 || len(req.Args) > 128 || len(req.Env) > 64 || len(req.Script) > 1<<20 || changeTooLarge {
 		return fmt.Errorf("execution request exceeds program, argument, environment, or 1 MiB content limits")
 	}
 	for _, argument := range req.Args {

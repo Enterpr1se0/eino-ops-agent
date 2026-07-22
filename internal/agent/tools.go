@@ -101,7 +101,7 @@ func toolGuard(name string) string {
 		return "agent_state"
 	case "ssh_exec", "ssh_run_script", "ssh_file_read", "ssh_file_search":
 		return "policy_checked"
-	case "ssh_file_edit", "ssh_file_transfer", "ssh_file_restore", "workspace_file_edit", "workspace_file_upload", "workspace_shell":
+	case "ssh_file_edit", "ssh_file_transfer", "workspace_file_edit", "workspace_file_upload", "workspace_shell":
 		return "approval_required"
 	case "ssh_task":
 		return "audited_control"
@@ -164,15 +164,12 @@ type FileListInput struct {
 }
 
 type FileEditInput struct {
-	HostID         string `json:"host_id" jsonschema:"registered host identifier"`
-	Path           string `json:"path" jsonschema:"absolute remote file path"`
-	Content        string `json:"content,omitempty" jsonschema:"complete replacement content; mutually exclusive with patch"`
-	Patch          string `json:"patch,omitempty" jsonschema:"unified diff for this file; mutually exclusive with content"`
-	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"sha256 returned by ssh_file_read, or absent when creating a file"`
-	Validator      string `json:"validator,omitempty" jsonschema:"optional registered remote validator id"`
-	Elevated       bool   `json:"elevated,omitempty" jsonschema:"edit through the host managed sudo policy; never include sudo or credentials"`
-	Reason         string `json:"reason" jsonschema:"why the edit is needed"`
-	Rollback       string `json:"rollback" jsonschema:"how to undo the edit"`
+	HostID    string `json:"host_id" jsonschema:"registered host identifier"`
+	Path      string `json:"path" jsonschema:"absolute path of an existing remote file"`
+	Diff      string `json:"diff" jsonschema:"complete unified diff containing one or more hunks for this file"`
+	Validator string `json:"validator,omitempty" jsonschema:"optional registered remote validator id"`
+	Elevated  bool   `json:"elevated,omitempty" jsonschema:"edit through the host managed sudo policy; never include sudo or credentials"`
+	Reason    string `json:"reason" jsonschema:"why the edit is needed"`
 }
 
 type FileSearchInput struct {
@@ -182,12 +179,6 @@ type FileSearchInput struct {
 	ContextLines int    `json:"context_lines,omitempty" jsonschema:"lines around each match"`
 	MaxMatches   int    `json:"max_matches,omitempty" jsonschema:"optional maximum result lines; omitted returns every match"`
 	Elevated     bool   `json:"elevated,omitempty" jsonschema:"search through managed sudo; requires break-glass approval"`
-}
-
-type FileRestoreInput struct {
-	OperationID string `json:"operation_id" jsonschema:"audited file operation identifier returned by ssh_file_edit"`
-	Reason      string `json:"reason" jsonschema:"why restoration is required"`
-	Elevated    bool   `json:"elevated,omitempty" jsonschema:"restore through managed sudo when required"`
 }
 
 type SSHFileTransferInput struct {
@@ -227,14 +218,11 @@ type WorkspaceSearchInput struct {
 }
 
 type WorkspaceFileEditInput struct {
-	WorkspaceID    string `json:"workspace_id" jsonschema:"allowlisted read_write workspace identifier"`
-	Path           string `json:"path" jsonschema:"single clean file path relative to the workspace root"`
-	Content        string `json:"content,omitempty" jsonschema:"complete replacement content; mutually exclusive with patch"`
-	Patch          string `json:"patch,omitempty" jsonschema:"unified diff for this file; mutually exclusive with content"`
-	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"sha256 returned by workspace_file_read, or absent when creating a file"`
-	Validator      string `json:"validator,omitempty" jsonschema:"allowlisted workspace validator id"`
-	Reason         string `json:"reason" jsonschema:"evidence-based reason for the change"`
-	Rollback       string `json:"rollback" jsonschema:"how to revert the change"`
+	WorkspaceID string `json:"workspace_id" jsonschema:"allowlisted read_write workspace identifier"`
+	Path        string `json:"path" jsonschema:"existing clean file path relative to the workspace root"`
+	Diff        string `json:"diff" jsonschema:"complete unified diff containing one or more hunks for this file"`
+	Validator   string `json:"validator,omitempty" jsonschema:"allowlisted workspace validator id"`
+	Reason      string `json:"reason" jsonschema:"evidence-based reason for the change"`
 }
 
 type WorkspaceUploadInput struct {
@@ -616,20 +604,14 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_edit", "Replace or patch one remote file with SHA256 conflict detection, backup, optional validation, rollback, and human approval.", func(ctx context.Context, input FileEditInput) (domain.ExecResult, error) {
-		result, err := svc.EditRemoteFile(ctx, input.HostID, input.Path, input.Content, input.Patch, input.ExpectedSHA256, input.Validator, input.Elevated, input.Reason, input.Rollback, "eino-agent")
+	if err := appendTool(toolutils.InferTool("ssh_file_edit", "Apply a unified diff to one existing remote file after human approval. The approval shows the exact added and deleted lines.", func(ctx context.Context, input FileEditInput) (domain.ExecResult, error) {
+		result, err := svc.EditRemoteFile(ctx, input.HostID, input.Path, input.Diff, input.Validator, input.Elevated, input.Reason, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
 	}
 	if err := appendTool(toolutils.InferTool("ssh_file_transfer", "Transfer one regular file between two registered SSH hosts through the control plane. The hosts do not need network access to each other. Call ssh_file_read with metadata_only=true on the source first and bind its SHA256. Existing destinations are rejected unless overwrite=true and their current SHA256 is also bound. The exact transfer requires human approval.", func(ctx context.Context, input SSHFileTransferInput) (domain.ExecResult, error) {
 		result, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, input.Rollback, "eino-agent")
-		return NormalizeExecToolResult(result, err)
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("ssh_file_restore", "Restore the protected backup recorded by one audited ssh_file_edit operation. Human approval is always required.", func(ctx context.Context, input FileRestoreInput) (domain.ExecResult, error) {
-		result, err := svc.RestoreRemoteFile(ctx, input.OperationID, input.Elevated, input.Reason, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
@@ -657,8 +639,8 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_file_edit", "Replace or patch one file inside a read_write workspace with SHA256 conflict detection, approval, atomic replacement, optional validation, backup, and rollback on failure.", func(ctx context.Context, input WorkspaceFileEditInput) (domain.ExecResult, error) {
-		result, err := svc.EditWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.Content, input.Patch, input.ExpectedSHA256, input.Validator, input.Reason, input.Rollback, "eino-agent")
+	if err := appendTool(toolutils.InferTool("workspace_file_edit", "Apply a unified diff to one existing file inside a read_write workspace after human approval. The approval shows the exact added and deleted lines.", func(ctx context.Context, input WorkspaceFileEditInput) (domain.ExecResult, error) {
+		result, err := svc.EditWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.Diff, input.Validator, input.Reason, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err

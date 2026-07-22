@@ -76,6 +76,33 @@ VALUES('legacy-host','legacy','192.0.2.10',22,'ops','key','/legacy/id_ed25519','
 	}
 }
 
+func TestDeprecatedFileOperationsTableIsDropped(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-file-operations.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE file_operations (id TEXT PRIMARY KEY); INSERT INTO file_operations(id) VALUES('legacy')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var count int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='file_operations'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("deprecated file_operations table survived migration")
+	}
+}
+
 func TestDeleteHostRemovesRelatedRecords(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "hosts.db"))
@@ -106,11 +133,6 @@ func TestDeleteHostRemovesRelatedRecords(t *testing.T) {
 	if err := st.CreateApproval(ctx, approval); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreateFileOperation(ctx, domain.FileOperation{
-		ID: "file-delete", RunID: run.ID, HostID: host.ID, Path: "/tmp/test", Status: "pending", CreatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
 	if err := st.UpsertTask(ctx, domain.Task{
 		ID: "task-delete", RunID: run.ID, HostID: host.ID, Status: "pending", StartedAt: now,
 	}, domain.ExecResult{RunID: run.ID, Status: "pending"}, ""); err != nil {
@@ -136,9 +158,6 @@ func TestDeleteHostRemovesRelatedRecords(t *testing.T) {
 	}
 	if _, err := st.GetApproval(ctx, approval.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("related approval was not deleted: %v", err)
-	}
-	if _, err := st.GetFileOperation(ctx, "file-delete"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("related file operation was not deleted: %v", err)
 	}
 	if _, _, _, err := st.GetTask(ctx, "task-delete"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("related task was not deleted: %v", err)

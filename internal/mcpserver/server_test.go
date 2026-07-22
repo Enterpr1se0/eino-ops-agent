@@ -36,12 +36,11 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	fileTransferFound := false
 	fileReadFound := false
 	fileEditFound := false
-	fileRestoreFound := false
 	historyFound := false
 	skillFound := false
 	backgroundInputs := map[string]bool{"ssh_exec": false, "ssh_run_script": false}
 	for _, registered := range result.Tools {
-		for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get"} {
+		for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_create", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get"} {
 			if registered.Name == retired {
 				t.Fatalf("retired %s tool remains in the MCP catalog", retired)
 			}
@@ -54,9 +53,6 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 		}
 		if registered.Name == "ssh_file_edit" {
 			fileEditFound = true
-		}
-		if registered.Name == "ssh_file_restore" {
-			fileRestoreFound = true
 		}
 		if registered.Name == "ssh_task" {
 			schemaJSON, marshalErr := json.Marshal(registered.InputSchema)
@@ -96,8 +92,8 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	if !workspaceShellFound {
 		t.Fatal("workspace_shell is missing from the MCP catalog")
 	}
-	if !workspaceEditFound || !fileEditFound || !fileRestoreFound {
-		t.Fatalf("file edit interface is incomplete: ssh_edit=%v ssh_restore=%v workspace_edit=%v", fileEditFound, fileRestoreFound, workspaceEditFound)
+	if !workspaceEditFound || !fileEditFound {
+		t.Fatalf("file edit interface is incomplete: ssh_edit=%v workspace_edit=%v", fileEditFound, workspaceEditFound)
 	}
 	if !taskFound || !backgroundInputs["ssh_exec"] || !backgroundInputs["ssh_run_script"] {
 		t.Fatalf("merged background task interface is incomplete: task=%v inputs=%#v", taskFound, backgroundInputs)

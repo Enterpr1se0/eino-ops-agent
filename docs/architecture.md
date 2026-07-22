@@ -52,7 +52,7 @@ stdio 通过 `exec.Command(command,args...)` 启动，不解析 Shell；Streamab
 
 ## Transactional files and Workspace
 
-`ssh_file_read` 在同一次受审计操作中返回有界内容、mode/owner/mtime 与 SHA256。`ssh_file_edit` 把 expected SHA256、目标内容或单文件 diff、validator 和回滚绑定进审批摘要；执行时重新验证版本，在同目录写入并同步临时文件，保存 `0600` 备份，运行白名单 argv validator，原子 rename，并在后置校验失败时恢复。成功操作写入 `file_operations`，`ssh_file_restore` 只能引用该 ID。
+`ssh_file_read` 在同一次受审计操作中返回有界内容、mode/owner/mtime 与 SHA256。现有文件只能通过 `ssh_file_edit` 提交单文件 unified diff，Workspace 提供对应的 `workspace_file_edit`；不提供专用的新建文件 Tool。Service 在审批前规范化 diff 并计算新增、删除行数，`ExecRequest.change` 是审批、审计和 Web 展示的唯一变更来源。远程 Bash 事务脚本在批准后才生成：同目录写入并同步临时文件、对临时文件运行白名单 validator，通过后原子提交。编辑链路不校验旧文件 SHA、不创建持久备份、不写 `file_operations`，也不提供恢复 Tool。
 
 `ssh_file_transfer` 由控制端分别建立源、目标两条内部 SSH/SFTP 连接并用 `io.Copy` 中继，不要求远端主机互通，不调用本地或远端 `scp`，也不在控制端落盘。请求以目标主机作为 Run 主机，同时绑定源主机 ID、源路径及 SHA256、目标路径、覆盖条件、两端 `ssh_connection_digest` 和回滚说明。覆盖时目标当前 SHA256 同样必填并在写入前后复核。Transport 拒绝符号链接和非普通文件，先写目标同目录的随机独占临时文件，流式计算源 SHA256，通过后使用 SFTP rename 提交；冲突、取消和超时会清理临时文件。一次传输只占一个全局执行槽，并按稳定顺序同时占用两台主机的并发槽，避免反向传输死锁。
 
@@ -72,7 +72,7 @@ Host 后端直接以服务账户执行，拥有宿主机文件系统与网络权
 
 内置实现通过未认证握手扫描协商出的 host key，信任时重新扫描并精确比较 SHA256 指纹，再以 `0600` 追加和同步 known_hosts。未知 key 与 key mismatch 均关闭失败。命令和 SFTP 每次建立独立连接，连接/命令取消会关闭完整跳板链；15 秒 keepalive 连续超时会断开。
 
-双后端到内置单后端的升级是显式破坏性迁移。检测到旧 `transport_backend`、`config_alias`、自由格式 `proxy_jump` 或 `identity_file` 列时，Store 会清理旧主机及依赖的 runs、approvals、tasks、file_operations，再删除这些列，不保留运行时兼容分支。
+双后端到内置单后端的升级是显式破坏性迁移。检测到旧 `transport_backend`、`config_alias`、自由格式 `proxy_jump` 或 `identity_file` 列时，Store 会清理旧主机及依赖的 runs、approvals、tasks，再删除这些列，不保留运行时兼容分支。废弃的 `file_operations` 表会在启动迁移时直接删除。
 
 提权是 `ExecRequest.elevated` 的结构化属性，不是任意命令字符串。Policy 会无条件追加 `managed_sudo` 命中并升级为 Critical；批准后 Transport 才按主机配置包装为 `sudo -n -- bash -c ...` 或 `sudo -S -p '' -- bash -c ...`。sudo 密码只拼接到远端 stdin，不进入请求摘要、审计 JSON 或模型工具参数。
 
@@ -132,4 +132,4 @@ SQLite 使用部分唯一索引保证最多只有一个 active provider。切换
 
 ## Runtime settings
 
-Web 配置中心把模型提供商、SSH 主机和系统设置收敛到同一入口。`system_settings` 单行表保存 Agent 最大模型迭代数、命令解释开关、独立 provider、请求超时、聊天图片格式和 Workspace Shell 模式；每次修改都会写入 `system_settings_updated` 审计事件。保存后 Runtime 构建新的 ChatModelAgent/Runner 并原子替换指针，因此新请求立即使用新的循环预算和解释模型路由，已经取得旧 Runner 的执行不会被中断。
+Web 配置中心把模型提供商、SSH 主机和系统设置收敛到同一入口。`system_settings` 单行表保存完整 System Prompt、Agent 最大模型迭代数、命令解释开关、独立 provider、请求超时、聊天图片格式和 Workspace Shell 模式；每次修改都会写入 `system_settings_updated` 审计事件。未显式保存 Prompt 时读取内置模板，显式空字符串则保持为空。保存后的 Prompt 直接作为 ChatModelAgent Instruction，不拼接内置内容。Runtime 构建新的 ChatModelAgent/Runner 并原子替换指针，因此所有会话的新请求立即使用新的 Prompt、循环预算和解释模型路由，已经取得旧 Runner 的执行不会被中断。

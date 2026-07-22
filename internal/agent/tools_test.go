@@ -130,8 +130,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 24 {
-		t.Fatalf("built-in catalog size=%d, want 24", len(descriptors))
+	if len(descriptors) != 23 {
+		t.Fatalf("built-in catalog size=%d, want 23", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -168,6 +168,18 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		if descriptor.Name == "ssh_file_read" && !strings.Contains(string(descriptor.InputSchema), `"metadata_only"`) {
 			t.Fatalf("ssh_file_read metadata_only mode is missing: %#v", descriptor)
 		}
+		if descriptor.Name == "ssh_file_edit" {
+			schema := string(descriptor.InputSchema)
+			if !strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"rollback"`) || strings.Contains(schema, `"content"`) {
+				t.Fatalf("ssh_file_edit still exposes the retired edit contract: %s", schema)
+			}
+		}
+		if descriptor.Name == "workspace_file_edit" {
+			schema := string(descriptor.InputSchema)
+			if !strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"rollback"`) || strings.Contains(schema, `"content"`) {
+				t.Fatalf("workspace_file_edit still exposes the retired edit contract: %s", schema)
+			}
+		}
 		if descriptor.Name == "ssh_task" && (descriptor.Guard != "audited_control" || !strings.Contains(string(descriptor.InputSchema), `"action"`)) {
 			t.Fatalf("ssh_task metadata does not expose its audited action: %#v", descriptor)
 		}
@@ -190,12 +202,12 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
 		}
 	}
-	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get", "ops_plan_get"} {
+	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_create", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get", "ops_plan_get"} {
 		if seen[retired] {
 			t.Fatalf("removed %s tool remains in the Agent catalog", retired)
 		}
 	}
-	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ssh_file_edit"] || !seen["ssh_file_restore"] || !seen["ssh_file_transfer"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
+	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
 		t.Fatalf("representative functions missing: %#v", seen)
 	}
 }

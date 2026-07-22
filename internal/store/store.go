@@ -114,30 +114,6 @@ func (s *Store) DeleteAllWebSessions(ctx context.Context) error {
 	return err
 }
 
-func (s *Store) CreateFileOperation(ctx context.Context, operation domain.FileOperation) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO file_operations(id,run_id,host_id,path,backup_path,before_sha256,after_sha256,validator,status,created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?)`, operation.ID, operation.RunID, operation.HostID, operation.Path, operation.BackupPath,
-		operation.BeforeSHA256, operation.AfterSHA256, operation.Validator, operation.Status, formatTime(operation.CreatedAt))
-	return err
-}
-
-func (s *Store) GetFileOperation(ctx context.Context, id string) (domain.FileOperation, error) {
-	var operation domain.FileOperation
-	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id,run_id,host_id,path,backup_path,before_sha256,after_sha256,validator,status,created_at FROM file_operations WHERE id=?`, id).Scan(
-		&operation.ID, &operation.RunID, &operation.HostID, &operation.Path, &operation.BackupPath, &operation.BeforeSHA256,
-		&operation.AfterSHA256, &operation.Validator, &operation.Status, &created,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.FileOperation{}, ErrNotFound
-	}
-	if err != nil {
-		return domain.FileOperation{}, err
-	}
-	operation.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	return operation, nil
-}
-
 func (s *Store) UpsertTask(ctx context.Context, task domain.Task, result domain.ExecResult, taskError string) error {
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
@@ -420,21 +396,6 @@ CREATE TABLE IF NOT EXISTS session_approval_grants (
 	  expires_at TEXT NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at);
-CREATE TABLE IF NOT EXISTS file_operations (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  host_id TEXT NOT NULL,
-  path TEXT NOT NULL,
-  backup_path TEXT NOT NULL DEFAULT '',
-  before_sha256 TEXT NOT NULL DEFAULT '',
-  after_sha256 TEXT NOT NULL DEFAULT '',
-  validator TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  FOREIGN KEY(run_id) REFERENCES runs(id),
-  FOREIGN KEY(host_id) REFERENCES hosts(id)
-);
-CREATE INDEX IF NOT EXISTS idx_file_operations_host_created ON file_operations(host_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL DEFAULT '',
@@ -471,6 +432,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_model_providers_active ON model_providers(
 CREATE TABLE IF NOT EXISTS system_settings (
   id INTEGER PRIMARY KEY CHECK(id=1),
   agent_max_iterations INTEGER NOT NULL,
+  system_prompt TEXT DEFAULT NULL,
   approval_explanations_enabled INTEGER NOT NULL DEFAULT 1,
   subagent_model_provider_id TEXT NOT NULL DEFAULT '',
   subagent_timeout_seconds INTEGER NOT NULL DEFAULT 30,
@@ -529,7 +491,10 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 	if err := s.migrateManagedWorkspaces(ctx); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name IN ('ssh_approval_status','ssh_task_start','ssh_task_status','ssh_task_tail','ssh_task_list')`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS file_operations`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name IN ('ssh_approval_status','ssh_task_start','ssh_task_status','ssh_task_tail','ssh_task_list','ssh_file_restore','ssh_file_create','workspace_file_create')`); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(id,agent_max_iterations,updated_at) VALUES(1,?,?)`,
@@ -554,6 +519,7 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		`ALTER TABLE model_providers ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN proxy_password_cipher TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE system_settings ADD COLUMN chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]'`,
+		`ALTER TABLE system_settings ADD COLUMN system_prompt TEXT DEFAULT NULL`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
@@ -670,7 +636,6 @@ func (s *Store) migrateNativeOnlyHosts(ctx context.Context) error {
 	defer tx.Rollback()
 	for _, statement := range []string{
 		`DELETE FROM approvals`,
-		`DELETE FROM file_operations`,
 		`DELETE FROM tasks`,
 		`DELETE FROM runs`,
 		`DELETE FROM hosts`,
@@ -915,15 +880,17 @@ func (s *Store) GetSystemSettings(ctx context.Context) (domain.SystemSettings, e
 	var settings domain.SystemSettings
 	var explanationsEnabled int
 	var imageTypesJSON string
+	var systemPrompt sql.NullString
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,
+	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,system_prompt,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,
 chat_image_allowed_types_json,workspace_shell_mode,updated_at FROM system_settings WHERE id=1`).Scan(
-		&settings.AgentMaxIterations, &explanationsEnabled, &settings.SubagentModelProviderID, &settings.SubagentTimeoutSeconds,
+		&settings.AgentMaxIterations, &systemPrompt, &explanationsEnabled, &settings.SubagentModelProviderID, &settings.SubagentTimeoutSeconds,
 		&imageTypesJSON, &settings.WorkspaceShellMode, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.SystemSettings{
 			AgentMaxIterations: domain.DefaultAgentMaxIterations, ApprovalExplanationsEnabled: true,
+			SystemPrompt: domain.DefaultSystemPrompt, DefaultSystemPrompt: domain.DefaultSystemPrompt,
 			SubagentTimeoutSeconds: domain.DefaultSubagentTimeoutSeconds, WorkspaceShellMode: domain.WorkspaceShellModeSandbox,
 			ChatImageAllowedTypes: append([]string(nil), domain.DefaultChatImageAllowedTypes...),
 		}, nil
@@ -932,6 +899,12 @@ chat_image_allowed_types_json,workspace_shell_mode,updated_at FROM system_settin
 		return domain.SystemSettings{}, err
 	}
 	settings.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	settings.DefaultSystemPrompt = domain.DefaultSystemPrompt
+	if systemPrompt.Valid {
+		settings.SystemPrompt = systemPrompt.String
+	} else {
+		settings.SystemPrompt = domain.DefaultSystemPrompt
+	}
 	settings.ApprovalExplanationsEnabled = explanationsEnabled != 0
 	if err := json.Unmarshal([]byte(imageTypesJSON), &settings.ChatImageAllowedTypes); err != nil || len(settings.ChatImageAllowedTypes) == 0 {
 		settings.ChatImageAllowedTypes = append([]string(nil), domain.DefaultChatImageAllowedTypes...)
@@ -948,14 +921,15 @@ func (s *Store) SaveSystemSettings(ctx context.Context, settings domain.SystemSe
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,updated_at) VALUES(1,?,?,?,?,?,?,?)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,system_prompt,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,updated_at) VALUES(1,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,
+system_prompt=excluded.system_prompt,
 approval_explanations_enabled=excluded.approval_explanations_enabled,
 subagent_model_provider_id=excluded.subagent_model_provider_id,
 subagent_timeout_seconds=excluded.subagent_timeout_seconds,
 chat_image_allowed_types_json=excluded.chat_image_allowed_types_json,
 workspace_shell_mode=excluded.workspace_shell_mode,updated_at=excluded.updated_at`,
-		settings.AgentMaxIterations, boolInt(settings.ApprovalExplanationsEnabled), settings.SubagentModelProviderID,
+		settings.AgentMaxIterations, settings.SystemPrompt, boolInt(settings.ApprovalExplanationsEnabled), settings.SubagentModelProviderID,
 		settings.SubagentTimeoutSeconds, string(imageTypesJSON), settings.WorkspaceShellMode, formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.SystemSettings{}, err
@@ -1052,7 +1026,6 @@ func (s *Store) DeleteHost(ctx context.Context, id string) error {
 	}{
 		{`DELETE FROM session_approval_grants WHERE session_id IN (SELECT DISTINCT session_id FROM runs WHERE host_id=? AND session_id<>'')`, []any{id}},
 		{`DELETE FROM approvals WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
-		{`DELETE FROM file_operations WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
 		{`DELETE FROM tasks WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
 		{`DELETE FROM runs WHERE host_id=?`, []any{id}},
 	}

@@ -129,7 +129,7 @@ func TestWorkspaceReadPatchAndTraversalProtection(t *testing.T) {
 		t.Fatalf("unexpected workspace read: %#v", read)
 	}
 	patch := "--- app.conf\n+++ app.conf\n@@ -1,1 +1,1 @@\n-port=8080\n+port=9090\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "", patch, read.File.SHA256, "", "change port", "restore backup", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "change port", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,30 +164,33 @@ func TestWorkspaceReadPreservesCompleteLargeFile(t *testing.T) {
 	}
 }
 
-func TestWorkspacePatchDetectsVersionConflict(t *testing.T) {
+func TestWorkspacePatchUsesCurrentContextWithoutSHABinding(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
 	path := filepath.Join(root, "app.conf")
 	_ = os.WriteFile(path, []byte("a\n"), 0o600)
-	stale := fmt.Sprintf("%x", sha256.Sum256([]byte("old\n")))
 	patch := "--- app.conf\n+++ app.conf\n@@ -1 +1 @@\n-a\n+b\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "", patch, stale, "", "change", "restore", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "change", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
-	if err == nil || result.ExitCode != 73 {
-		t.Fatalf("expected conflict, got %#v err=%v", result, err)
+	if err != nil || result.Status != "completed" {
+		t.Fatalf("context-matched edit failed: %#v err=%v", result, err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "b\n" {
+		t.Fatalf("edit result=%q err=%v", content, err)
 	}
 }
 
-func TestWorkspaceFileEditReplacesAndCreatesFiles(t *testing.T) {
+func TestWorkspaceFileEditPreservesMode(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
 	existingPath := filepath.Join(root, "app.conf")
 	if err := os.WriteFile(existingPath, []byte("enabled=false\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	expected := fmt.Sprintf("%x", sha256.Sum256([]byte("enabled=false\n")))
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "enabled=true\n", "", expected, "", "enable app", "restore backup", "test")
+	patch := "@@ -1 +1 @@\n-enabled=false\n+enabled=true\n"
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "enable app", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,33 +205,19 @@ func TestWorkspaceFileEditReplacesAndCreatesFiles(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o640 {
 		t.Fatalf("replacement mode=%v err=%v", info, err)
 	}
+}
 
-	createdPath := filepath.Join(root, "new.conf")
-	pending, err = svc.EditWorkspaceFile(context.Background(), "project", "new.conf", "created=true\n", "", "absent", "", "create config", "remove file", "test")
+func TestWorkspaceFileEditRejectsMalformedDiffAndMissingTarget(t *testing.T) {
+	svc, _ := newWorkspaceService(t, "read_write")
+	if _, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "not a diff", "", "change", "test"); err == nil || !strings.Contains(err.Error(), "unified diff") {
+		t.Fatalf("malformed diff was accepted: %v", err)
+	}
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "missing.conf", "@@ -1 +1 @@\n-old\n+new\n", "", "change", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
-		t.Fatal(err)
-	}
-	content, err = os.ReadFile(createdPath)
-	if err != nil || string(content) != "created=true\n" {
-		t.Fatalf("created content=%q err=%v", content, err)
-	}
-	info, err = os.Stat(createdPath)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("created mode=%v err=%v", info, err)
-	}
-}
-
-func TestWorkspaceFileEditRejectsAmbiguousChanges(t *testing.T) {
-	svc, _ := newWorkspaceService(t, "read_write")
-	expected := strings.Repeat("a", 64)
-	if _, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "replacement", "@@ -0,0 +1 @@\n+patch\n", expected, "", "change", "restore", "test"); err == nil || !strings.Contains(err.Error(), "exactly one") {
-		t.Fatalf("content and patch were accepted together: %v", err)
-	}
-	if _, err := svc.EditWorkspaceFile(context.Background(), "project", "new.conf", "", "@@ -0,0 +1 @@\n+new\n", "absent", "", "create", "remove", "test"); err == nil || !strings.Contains(err.Error(), "cannot create") {
-		t.Fatalf("patch creation was accepted: %v", err)
+	if result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator"); err == nil || !strings.Contains(result.Stderr, "does not exist") {
+		t.Fatalf("missing edit target was accepted: result=%#v err=%v", result, err)
 	}
 }
 
@@ -261,35 +250,34 @@ func TestWorkspaceListHidesSensitiveControlPlaneNames(t *testing.T) {
 	}
 }
 
-func TestWorkspacePostValidationFailureRestoresOriginalAtomically(t *testing.T) {
+func TestWorkspacePreValidationFailureDoesNotTouchOriginal(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
 	path := filepath.Join(root, "app.conf")
 	if err := os.WriteFile(path, []byte("port=8080\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	validator := filepath.Join(t.TempDir(), "validate-fixture")
-	validatorBody := "#!/bin/sh\ncase \"$1\" in *.tmp) exit 0;; *) exit 1;; esac\n"
+	validatorBody := "#!/bin/sh\nexit 1\n"
 	if err := os.WriteFile(validator, []byte(validatorBody), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	svc.validators["fixture"] = config.Validator{ID: "fixture", Scope: "workspace", Program: validator, Args: []string{"{{path}}"}, TimeoutSeconds: 5, PathPatterns: []string{filepath.Join(root, "**")}}
-	expected := fmt.Sprintf("%x", sha256.Sum256([]byte("port=8080\n")))
 	patch := "@@ -1 +1 @@\n-port=8080\n+port=9090\n"
-	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "", patch, expected, "fixture", "change port", "restore backup", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "fixture", "change port", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
 	if err == nil || result.ExitCode != 74 {
-		t.Fatalf("expected post-validation rollback, result=%#v err=%v", result, err)
+		t.Fatalf("expected pre-validation failure, result=%#v err=%v", result, err)
 	}
 	content, readErr := os.ReadFile(path)
 	if readErr != nil || string(content) != "port=8080\n" {
-		t.Fatalf("automatic rollback did not restore the original: content=%q err=%v", content, readErr)
+		t.Fatalf("failed validation touched the original: content=%q err=%v", content, readErr)
 	}
 	info, statErr := os.Stat(path)
 	if statErr != nil || info.Mode().Perm() != 0o640 {
-		t.Fatalf("automatic rollback did not preserve mode: info=%#v err=%v", info, statErr)
+		t.Fatalf("failed validation changed file mode: info=%#v err=%v", info, statErr)
 	}
 }
 

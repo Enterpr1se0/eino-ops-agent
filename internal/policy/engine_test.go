@@ -29,6 +29,8 @@ func TestDefaultPolicy(t *testing.T) {
 		{"dynamic expansion", domain.ExecRequest{Mode: domain.ExecScript, Script: "echo $(whoami)"}, domain.RiskCritical, domain.ActionBreakGlass},
 		{"credential read", domain.ExecRequest{Mode: domain.ExecScript, Script: "cat ~/.ssh/id_ed25519"}, domain.RiskForbidden, domain.ActionDeny},
 		{"unparseable", domain.ExecRequest{Mode: domain.ExecScript, Script: "if then"}, domain.RiskCritical, domain.ActionBreakGlass},
+		{"remote file edit", domain.ExecRequest{HostID: "host_1", Mode: domain.ExecRemoteEdit, RemotePath: "/etc/app.conf", Change: &domain.FileChange{Diff: "@@ -1 +1 @@\n-a\n+b\n"}}, domain.RiskChange, domain.ActionApprove},
+		{"workspace file edit", domain.ExecRequest{Mode: domain.ExecWorkspaceEdit, WorkspaceID: "default", RelativePath: "app.conf", Change: &domain.FileChange{Diff: "@@ -1 +1 @@\n-a\n+b\n"}}, domain.RiskChange, domain.ActionApprove},
 		{"workspace upload", domain.ExecRequest{Mode: domain.ExecWorkspaceUpload, WorkspaceID: "default", RelativePath: "app.yaml", ExpectedSHA256: strings.Repeat("a", 64), RemotePath: "/tmp/app.yaml"}, domain.RiskChange, domain.ActionApprove},
 		{"SSH host file transfer", domain.ExecRequest{HostID: "host_2", Mode: domain.ExecSSHFileTransfer, SourceHostID: "host_1", SourcePath: "/srv/app.tar", RemotePath: "/srv/app.tar", ExpectedSHA256: strings.Repeat("a", 64)}, domain.RiskChange, domain.ActionApprove},
 		{"SSH credential transfer", domain.ExecRequest{HostID: "host_2", Mode: domain.ExecSSHFileTransfer, SourceHostID: "host_1", SourcePath: "/etc/shadow", RemotePath: "/tmp/shadow", ExpectedSHA256: strings.Repeat("a", 64)}, domain.RiskForbidden, domain.ActionDeny},

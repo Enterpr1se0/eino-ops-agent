@@ -174,6 +174,10 @@ make dev-web
 
 在两个终端中分别运行以上命令。Web 开发服务器监听 `0.0.0.0:5173`，访问 [http://127.0.0.1:5173](http://127.0.0.1:5173)，`/api` 请求会自动代理到 `8080` 端口。
 
+## System Prompt
+
+系统设置会展示当前完整 System Prompt，可直接编辑、保存为空或恢复内置模板。用户保存的文本会完整覆盖内置 Prompt，不进行自动拼接、去空白或空值回退。保存后 Runtime 原子替换 Agent Runner；已经开始的请求继续执行，所有会话之后发起的请求统一使用新 Prompt。
+
 ## Tavily Web
 
 系统设置中的 Tavily Web 可配置 API 地址、API Key、超时、搜索结果上限、网页提取内容上限和独立网络代理。`web_search` 用于发现来源，`web_extract` 从最多五个指定公开 URL 提取 Markdown；单页默认上限为 32 KiB，单次总量默认上限为 128 KiB。两个 func 可在 Loaded functions 中分别启停。API Key 与代理密码使用 AES-256-GCM 加密保存，只对外返回是否已配置。查询和 URL 会发送给 Tavily，返回内容按不可信外部证据交给模型。审计只保存查询或 URL 列表的 SHA256、耗时、数量和代理使用状态，不保存正文或凭据。
@@ -196,7 +200,7 @@ Agent 向远端发送 Workspace 文件只使用 `workspace_file_upload`：源相
 
 SSH 主机间迁移单个普通文件使用 `ssh_file_transfer`。OpsPilot 分别连接源主机和目标主机，通过内置 SFTP 在内存中中继数据，因此两台主机无需彼此可达，也不会调用远端 `scp`。调用前先用 `ssh_file_read(metadata_only=true)` 获取源文件 SHA256；覆盖目标文件时还必须绑定目标文件当前 SHA256。两端连接配置、路径、版本、覆盖标记和超时进入同一次人工审批。目标端先写同目录临时文件，源 SHA256 匹配后再原子改名；版本冲突、取消或超时不会留下半文件。
 
-文件编辑 Tool 会额外展示 before/after SHA256、权限属主、validator、备份和 file operation ID。`ssh_file_edit` 必须携带读取时得到的版本，并通过 `content` 或 `patch` 提交修改；审批期间文件发生变化会返回可恢复的 `conflict`，而不是覆盖。Tool 的不存在资源、参数错误、超时和远端失败统一返回 `code/message/retryable/next_action`，不会用普通运行错误中断 Eino ToolNode。
+文件编辑 Tool 把变更作为一等数据展示：审批和执行结果都显示完整 unified diff、行号以及新增/删除统计。`ssh_file_edit` 与 `workspace_file_edit` 只修改现有文件，不提供专用的新建文件 Tool。远程事务脚本只在批准后由执行层生成，不进入审批内容。编辑不再绑定 SHA256、不保存备份，也不提供自动恢复 Tool；validator 仅对临时文件执行，失败时目标文件不会被修改。Tool 的不存在资源、参数错误、超时和远端失败统一返回 `code/message/retryable/next_action`，不会用普通运行错误中断 Eino ToolNode。
 
 ## 日志
 
@@ -290,7 +294,7 @@ Web 的 **Extensions / MCP Servers** 还支持反向角色：让 OpsPilot 作为
 - `ssh_exec` / `ssh_run_script`（可选 `background: true` 启动后台任务，默认同步执行）
 - `ssh_task`（`action=status|cancel`）
 - `ssh_file_read`（可选 `metadata_only=true`）/ `ssh_file_search` / `ssh_file_list`
-- `ssh_file_edit` / `ssh_file_transfer` / `ssh_file_restore`
+- `ssh_file_edit` / `ssh_file_transfer`
 - `workspace_list` / `workspace_file_list` / `workspace_file_read` / `workspace_file_search` / `workspace_file_edit` / `workspace_file_upload` / `workspace_shell`
 - `ssh_history`（搜索或按 `run_id` 精确读取）
 - `ops_skill`（列出或按 `name` 加载）

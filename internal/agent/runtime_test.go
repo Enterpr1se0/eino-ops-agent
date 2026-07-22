@@ -14,6 +14,9 @@ import (
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
+	"eino-ops-agent/internal/policy"
+	"eino-ops-agent/internal/security"
+	"eino-ops-agent/internal/service"
 	"eino-ops-agent/internal/store"
 
 	"github.com/cloudwego/eino/adk"
@@ -119,6 +122,116 @@ func TestProviderRejectsEmptyResponse(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("empty model response was accepted")
+	}
+}
+
+func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testing.T) {
+	type wireMessage struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	requests := make(chan []wireMessage, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Messages []wireMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode model request: %v", err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		requests <- request.Messages
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-prompt\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":null}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-prompt\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime-prompt.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, err := policy.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Model = config.Model{APIKey: "fixture-key", BaseURL: server.URL + "/v1", Name: "fixture-model"}
+	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	firstPrompt := "first complete system prompt"
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations, SystemPrompt: &firstPrompt,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := New(ctx, cfg.Model, svc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Query(ctx, "same_session", "first turn", nil); err != nil {
+		t.Fatal(err)
+	}
+	assertSystemPrompt := func(want string) {
+		t.Helper()
+		select {
+		case messages := <-requests:
+			for _, message := range messages {
+				if message.Role == "system" {
+					if message.Content != want {
+						t.Fatalf("system prompt = %q, want %q", message.Content, want)
+					}
+					return
+				}
+			}
+			t.Fatalf("model request did not contain a system prompt: %#v", messages)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for model request")
+		}
+	}
+	assertSystemPrompt(firstPrompt)
+
+	secondPrompt := "replacement prompt without the built-in instructions"
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations, SystemPrompt: &secondPrompt,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Query(ctx, "same_session", "second turn", nil); err != nil {
+		t.Fatal(err)
+	}
+	assertSystemPrompt(secondPrompt)
+
+	emptyPrompt := ""
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations, SystemPrompt: &emptyPrompt,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Query(ctx, "same_session", "third turn", nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case messages := <-requests:
+		for _, message := range messages {
+			if message.Role == "system" && message.Content != "" {
+				t.Fatalf("empty prompt fell back to non-empty system prompt: %q", message.Content)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for model request using empty prompt")
 	}
 }
 

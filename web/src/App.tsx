@@ -379,14 +379,17 @@ function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<
 }
 
 function SystemSettingsPage({settings,providers,capabilities,modelStatus,refresh}:{settings:SystemSettings|null;providers:ModelProvider[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refresh:()=>Promise<void>}) {
-	  const {t,i18n:instance}=useTranslation()
+  const {t,i18n:instance}=useTranslation()
   const savedValue=settings?.agent_max_iterations??50
+  const savedPrompt=settings?.system_prompt??''
+	const defaultPrompt=settings?.default_system_prompt??''
   const savedExplanation=settings?.approval_explanations_enabled??true
 	  const savedSubagentProvider=settings?.subagent_model_provider_id??''
 	  const savedSubagentTimeout=settings?.subagent_timeout_seconds??30
 	  const savedImageTypes=settings?.chat_image_allowed_types??defaultChatImageTypes
-	  const savedShellMode=settings?.workspace_shell_mode??'sandbox'
+  const savedShellMode=settings?.workspace_shell_mode??'sandbox'
   const [maxIterations,setMaxIterations]=useState(savedValue)
+  const [systemPrompt,setSystemPrompt]=useState(savedPrompt)
   const [explanationEnabled,setExplanationEnabled]=useState(savedExplanation)
   const [subagentProvider,setSubagentProvider]=useState(savedSubagentProvider)
 	  const [subagentTimeout,setSubagentTimeout]=useState(savedSubagentTimeout)
@@ -395,25 +398,28 @@ function SystemSettingsPage({settings,providers,capabilities,modelStatus,refresh
   const [dirty,setDirty]=useState(false)
   const [saving,setSaving]=useState(false)
   const [notice,setNotice]=useState('')
-	  useEffect(()=>{if(!dirty){setMaxIterations(savedValue);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setImageTypes(savedImageTypes);setShellMode(savedShellMode)}},[savedValue,savedExplanation,savedSubagentProvider,savedSubagentTimeout,savedImageTypes,savedShellMode,dirty])
+	  useEffect(()=>{if(!dirty){setMaxIterations(savedValue);setSystemPrompt(savedPrompt);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setImageTypes(savedImageTypes);setShellMode(savedShellMode)}},[savedValue,savedPrompt,savedExplanation,savedSubagentProvider,savedSubagentTimeout,savedImageTypes,savedShellMode,dirty])
   const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(100,value||5)));setDirty(true);setNotice('')}
+	const updateSystemPrompt=(value:string)=>{setSystemPrompt(value);setDirty(true);setNotice('')}
+	const restoreDefaultPrompt=()=>{setSystemPrompt(defaultPrompt);setDirty(true);setNotice('')}
   const toggleExplanation=(value:boolean)=>{setExplanationEnabled(value);setDirty(true);setNotice('')}
   const selectSubagentProvider=(value:string)=>{setSubagentProvider(value);setDirty(true);setNotice('')}
 	  const updateSubagentTimeout=(value:number)=>{setSubagentTimeout(Math.max(5,Math.min(120,value||5)));setDirty(true);setNotice('')}
 	  const toggleImageType=(value:string)=>{setImageTypes(current=>current.includes(value)?current.length===1?current:current.filter(item=>item!==value):[...current,value]);setDirty(true);setNotice('')}
   const selectShellMode=(value:WorkspaceShellMode)=>{setShellMode(value);setDirty(true);setNotice('')}
-		  const save=async(event:FormEvent)=>{event.preventDefault();setSaving(true);try{const result=await api.saveSystemSettings({agent_max_iterations:maxIterations,approval_explanations_enabled:explanationEnabled,subagent_model_provider_id:subagentProvider,subagent_timeout_seconds:subagentTimeout,chat_image_allowed_types:imageTypes,workspace_shell_mode:shellMode});setMaxIterations(result.agent_max_iterations);setExplanationEnabled(result.approval_explanations_enabled);setSubagentProvider(result.subagent_model_provider_id);setSubagentTimeout(result.subagent_timeout_seconds);setImageTypes(result.chat_image_allowed_types);setShellMode(result.workspace_shell_mode);setDirty(false);setNotice(t('settings.saved'));await refresh()}catch(err){setNotice(errorText(err))}finally{setSaving(false)}}
+		  const save=async(event:FormEvent)=>{event.preventDefault();setSaving(true);try{const result=await api.saveSystemSettings({agent_max_iterations:maxIterations,system_prompt:systemPrompt,approval_explanations_enabled:explanationEnabled,subagent_model_provider_id:subagentProvider,subagent_timeout_seconds:subagentTimeout,chat_image_allowed_types:imageTypes,workspace_shell_mode:shellMode});setMaxIterations(result.agent_max_iterations);setSystemPrompt(result.system_prompt);setExplanationEnabled(result.approval_explanations_enabled);setSubagentProvider(result.subagent_model_provider_id);setSubagentTimeout(result.subagent_timeout_seconds);setImageTypes(result.chat_image_allowed_types);setShellMode(result.workspace_shell_mode);setDirty(false);setNotice(t('settings.saved'));await refresh()}catch(err){setNotice(errorText(err))}finally{setSaving(false)}}
   return <div className="system-settings page-stack">
 
     {notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
 		    <form className="settings-panel panel" onSubmit={save}><div className="settings-panel-head"><div className="settings-glyph"><SlidersHorizontal size={20}/></div><div><h3>{t('settings.maxIterations')}</h3></div><strong>{maxIterations}</strong></div>
 	      <div className="iteration-editor"><input aria-label={t('settings.maxIterations')} type="range" min="5" max="100" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>{t('settings.rounds')}</span><input type="number" min="5" max="100" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div>
 		      <div className="iteration-presets"><span>{t('settings.quickPresets')}</span>{[20,50,100].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b></button>)}</div>
+				<div className="system-prompt-settings"><div className="system-prompt-settings-head"><Bot size={18}/><div><b>{t('settings.systemPrompt')}</b><p>{t('settings.systemPromptHelp')}</p></div><button type="button" disabled={systemPrompt===defaultPrompt} onClick={restoreDefaultPrompt}><RefreshCw size={13}/>{t('settings.restoreDefaultPrompt')}</button></div><textarea aria-label={t('settings.systemPrompt')} spellCheck={false} value={systemPrompt} onChange={event=>updateSystemPrompt(event.target.value)}/><small>{systemPrompt.length?t('settings.systemPromptCharacters',{count:systemPrompt.length}):t('settings.emptySystemPrompt')}</small></div>
 			      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>{t('settings.explanationSection')}</b></div><em className={modelStatus?.explanation_agent_available?'ready':'offline'}><CircleDot size={9}/>{modelStatus?.explanation_agent_available?t('settings.runnerReady'):t('settings.modelUnavailable')}</em></div><label className="subagent-toggle"><span><b>{t('settings.commandAgent')}</b></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label><div className="subagent-config-grid"><label><span><b>{t('settings.modelProvider')}</b></span><select value={subagentProvider} onChange={event=>selectSubagentProvider(event.target.value)}><option value="">{t('settings.followMain')}</option>{providers.map(provider=><option value={provider.id} key={provider.id}>{provider.name} · {provider.model}</option>)}</select></label><label><span><b>{t('settings.requestTimeout')}</b></span><div className="subagent-timeout-input"><input aria-label={t('settings.timeout')} type="number" min="5" max="120" step="1" value={subagentTimeout} onChange={event=>updateSubagentTimeout(Number(event.target.value))}/><em>{t('settings.seconds',{count:subagentTimeout})}</em></div></label></div>{modelStatus?.explanation_error&&<div className="subagent-runtime-error"><ShieldAlert size={14}/><span>{modelStatus.explanation_error}</span></div>}</div>
 				  <div className="chat-image-settings"><div className="chat-image-settings-head"><ImagePlus size={18}/><b>{t('settings.chatImages')}</b></div><div className="chat-image-formats">{[['image/png','PNG'],['image/jpeg','JPEG'],['image/webp','WebP'],['image/gif','GIF']].map(([value,label])=><label className={imageTypes.includes(value)?'active':''} key={value}><input type="checkbox" checked={imageTypes.includes(value)} disabled={imageTypes.length===1&&imageTypes.includes(value)} onChange={()=>toggleImageType(value)}/><span>{label}</span></label>)}</div></div>
 				  <div className="workspace-shell-settings"><div className="workspace-shell-settings-head"><TerminalSquare size={18}/><div><b>{t('settings.shellBackend')}</b></div><em>{settings?.workspace_shell_platform||t('settings.detecting')}</em></div><div className="workspace-shell-modes" role="group" aria-label={t('settings.shellBackend')}><button type="button" className={shellMode==='sandbox'?'active':''} disabled={!settings?.workspace_sandbox_available} onClick={()=>selectShellMode('sandbox')}><ShieldCheck size={16}/><span><b>{t('settings.sandbox')}</b><small>{settings?.workspace_sandbox_available?t('settings.sandboxAvailable'):t('settings.unavailableHost')}</small></span></button><button type="button" className={`${shellMode==='host'?'active ':''}host`} disabled={!settings?.workspace_host_shell_available} onClick={()=>selectShellMode('host')}><TerminalSquare size={16}/><span><b>{t('settings.hostShell')}</b><small>{settings?.workspace_host_shell_available?`${settings.workspace_shell_name||t('settings.systemShell')} · ${t('settings.fullAuthority')}`:t('settings.noShell')}</small></span></button><button type="button" className={shellMode==='disabled'?'active':''} onClick={()=>selectShellMode('disabled')}><Power size={16}/><span><b>{t('settings.shellDisabled')}</b></span></button></div>{shellMode==='host'&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.hostWarning')}</b></div>}{shellMode==='sandbox'&&!settings?.workspace_sandbox_available&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.sandboxWarning')}</b></div>}</div>
 			  <WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refresh} onNotice={setNotice}/>
-			      <div className="settings-footer"><span>{settings?.updated_at?t('settings.lastUpdated',{date:new Date(settings.updated_at).toLocaleString(localeFor(instance.language))}):t('settings.systemDefault')}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setImageTypes(savedImageTypes);setShellMode(savedShellMode);setDirty(false);setNotice('')}}>{t('settings.discard')}</button><button className="primary" disabled={!dirty||saving}>{saving?t('settings.applying'):t('settings.apply')}</button></div>
+			      <div className="settings-footer"><span>{settings?.updated_at?t('settings.lastUpdated',{date:new Date(settings.updated_at).toLocaleString(localeFor(instance.language))}):t('settings.systemDefault')}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setSystemPrompt(savedPrompt);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setImageTypes(savedImageTypes);setShellMode(savedShellMode);setDirty(false);setNotice('')}}>{t('settings.discard')}</button><button className="primary" disabled={!dirty||saving}>{saving?t('settings.applying'):t('settings.apply')}</button></div>
 	    </form>
 	<WebSearchSettingsPanel refresh={refresh}/>
 	<AdminPasswordPanel/>
@@ -768,6 +774,27 @@ function fullProgram(request:JsonRecord){const program=textValue(request.program
 function compactScript(script:string){const lines=script.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);if(!lines.length)return i18n.t('tool.bashScript');return lines.length===1?lines[0]:i18n.t('tool.moreLines',{line:lines[0],count:lines.length-1})}
 function latestOutput(value:string,limit=3){return value.trimEnd().split(/\r?\n/).filter(line=>line.trim()!=='').slice(-limit).map(line=>Array.from(line).length>180?`${Array.from(line).slice(0,180).join('')}…`:line).join('\n')}
 function formatDuration(value:unknown,run?:Run){if(typeof value==='number'&&Number.isFinite(value))return value>=1e9?`${(value/1e9).toFixed(2)} s`:`${(value/1e6).toFixed(1)} ms`;if(run?.completed_at){const ms=Date.parse(run.completed_at)-Date.parse(run.started_at);if(Number.isFinite(ms))return ms>=1000?`${(ms/1000).toFixed(2)} s`:`${ms} ms`}return'—'}
+function numberValue(value:unknown){return typeof value==='number'&&Number.isFinite(value)?value:0}
+function cleanFileChangeOutput(value:string){const lines=value.split(/\r?\n/),result:string[]=[];for(let index=0;index<lines.length;index++){if(lines[index]==='__OPS_FILE_VALIDATION_OK__')continue;if(lines[index]==='__OPS_FILE_AFTER__'){index++;continue}result.push(lines[index])}return result.join('\n').trim()}
+
+type DiffRow={kind:'header'|'hunk'|'add'|'delete'|'context'|'meta';oldLine?:number;newLine?:number;text:string}
+function parseDiffRows(diff:string):DiffRow[]{
+	let oldLine=0,newLine=0
+	return diff.replace(/\n$/, '').split('\n').map(line=>{
+		const hunk=line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
+		if(hunk){oldLine=Number(hunk[1]);newLine=Number(hunk[2]);return{kind:'hunk',text:line}}
+		if(line.startsWith('--- ')||line.startsWith('+++ '))return{kind:'header',text:line}
+		if(line.startsWith('+'))return{kind:'add',newLine:newLine++,text:line}
+		if(line.startsWith('-'))return{kind:'delete',oldLine:oldLine++,text:line}
+		if(line.startsWith(' ')){const row={kind:'context' as const,oldLine,newLine,text:line};oldLine++;newLine++;return row}
+		return{kind:'meta',text:line}
+	})
+}
+
+function DiffViewer({change}:{change:JsonRecord}){
+	const {t}=useTranslation(),diff=textValue(change.diff),rows=parseDiffRows(diff)
+	return <section className="diff-viewer"><header><span><FileText size={14}/>{t('tool.fileEdit')}</span><div><em className="add">+{numberValue(change.additions)}</em><em className="delete">-{numberValue(change.deletions)}</em></div></header><div className="diff-scroll" role="table" aria-label={t('tool.diff')}><div className="diff-lines">{rows.map((row,index)=><div className={`diff-line ${row.kind}`} role="row" key={index}><span className="old-line">{row.oldLine??''}</span><span className="new-line">{row.newLine??''}</span><code>{row.text||' '}</code></div>)}</div></div></section>
+}
 
 function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host[]}){
 	const {t}=useTranslation()
@@ -782,9 +809,9 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
   const hostName=hosts.find(host=>host.id===hostID||host.name===hostID)?.name||hostID||'—'
   const status=textValue(payload.status)||textValue(taskPayload?.status)||textValue(resultPayload?.status)||run?.status||'completed'
   const risk=textValue(display?.risk)||textValue(resultPayload?.risk)||run?.risk||''
-  const program=request?fullProgram(request):''
+	const program=request?fullProgram(request):''
 	const script=request?textValue(request.script):''
-	const fileEdit=request?textValue(request.patch)||textValue(request.content):''
+	const change=jsonRecord(request?.change)||jsonRecord(payload.change)||jsonRecord(resultPayload?.change)
   const remotePath=request?textValue(request.remote_path):''
 	const workspaceID=request?textValue(request.workspace_id):''
 	const relativePath=request?textValue(request.relative_path):''
@@ -803,7 +830,8 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const operation=filePath||(script?t('tool.bashScript'):program||toolLabel(entry.tool||'')||t('tool.result'))
   const args=request&&Array.isArray(request.args)?request.args.map(value=>String(value)):[]
   const env=request?jsonRecord(request.env):undefined
-  const stdout=textValue(payload.stdout)||textValue(resultPayload?.stdout)||run?.stdout_redacted||''
+	const rawStdout=textValue(payload.stdout)||textValue(resultPayload?.stdout)||run?.stdout_redacted||''
+	const stdout=change?cleanFileChangeOutput(rawStdout):rawStdout
   const stderr=textValue(payload.stderr)||textValue(resultPayload?.stderr)||run?.stderr_redacted||run?.error||''
   const stdoutPreview=latestOutput(stdout)
 	const commandSummary=transferSummary||filePath||program||(script?compactScript(script):'')||planSummary||operation
@@ -819,7 +847,7 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
         <section className="tool-command-pane">
 		  <div className="tool-command-head"><span>{filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
 			  <div className="tool-command-block">{workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
-		  {filePath&&(script||fileEdit)&&<details className="tool-raw"><summary>{t('tool.fullTransaction')}</summary><pre>{script||fileEdit}</pre></details>}
+		  {change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 		  {program&&<CompactTable title={t('tool.originalArgs')} columns={[t('tool.index'),t('tool.value')]} rows={[[0,textValue(request.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>}
 		  {env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
         </section>
@@ -841,8 +869,8 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 
 function FileMetadataPanel({file}:{file:JsonRecord}){
 		const {t}=useTranslation()
-	const before=textValue(file.before_sha256),after=textValue(file.sha256),backup=textValue(file.backup_path),validator=textValue(file.validator),operationID=textValue(file.operation_id)
-		return <section className="file-metadata-panel"><div className="file-metadata-head"><FileText size={16}/><div><b>{t('tool.fileEvidence')}</b><span>{textValue(file.path)}</span></div>{file.validation_ok===true&&<em><Check size={12}/>{t('tool.validated')}</em>}</div><dl><div><dt>{t('tool.bytesRead')}</dt><dd>{typeof file.returned_bytes==='number'?`${file.returned_bytes} B`:'—'}</dd></div><div><dt>{t('tool.mode')}</dt><dd>{textValue(file.mode)||'—'}</dd></div><div><dt>{t('tool.owner')}</dt><dd>{[textValue(file.owner),textValue(file.group)].filter(Boolean).join(':')||'—'}</dd></div><div><dt>{t('tool.validator')}</dt><dd>{validator||'—'}</dd></div></dl>{operationID&&<div className="hash-row"><span>{t('tool.operationId')}</span><code>{operationID}</code></div>}{before&&<div className="hash-row"><span>{t('tool.before')}</span><code>{before}</code></div>}{after&&<div className="hash-row"><span>{t('tool.after')}</span><code>{after}</code></div>}{backup&&<div className="hash-row"><span>{t('tool.backup')}</span><code>{backup}</code></div>}{file.sensitive===true&&<div className="file-sensitive"><ShieldAlert size={13}/>{t('tool.sensitive')}</div>}</section>
+	const after=textValue(file.sha256),validator=textValue(file.validator)
+		return <section className="file-metadata-panel"><div className="file-metadata-head"><FileText size={16}/><div><b>{t('tool.fileEvidence')}</b><span>{textValue(file.path)}</span></div>{file.validation_ok===true&&<em><Check size={12}/>{t('tool.validated')}</em>}</div><dl><div><dt>{t('tool.bytesRead')}</dt><dd>{typeof file.returned_bytes==='number'?`${file.returned_bytes} B`:'—'}</dd></div><div><dt>{t('tool.mode')}</dt><dd>{textValue(file.mode)||'—'}</dd></div><div><dt>{t('tool.owner')}</dt><dd>{[textValue(file.owner),textValue(file.group)].filter(Boolean).join(':')||'—'}</dd></div><div><dt>{t('tool.validator')}</dt><dd>{validator||'—'}</dd></div></dl>{after&&<div className="hash-row"><span>{t('tool.after')}</span><code>{after}</code></div>}{file.sensitive===true&&<div className="file-sensitive"><ShieldAlert size={13}/>{t('tool.sensitive')}</div>}</section>
 }
 
 function CompactTable({title,columns,rows}:{title:string;columns:string[];rows:Array<Array<unknown>>}){
@@ -928,7 +956,7 @@ function ApprovalDialog({
     request = { request: approval.request_json };
   }
   const script = textValue(request.script);
-  const fileEdit = textValue(request.patch) || textValue(request.content);
+  const change = jsonRecord(request.change);
   const workspaceID = textValue(request.workspace_id);
   const filePath =
     textValue(request.remote_path) || textValue(request.relative_path);
@@ -980,7 +1008,6 @@ function ApprovalDialog({
       ? `${workspaceID}:${relativePath} → ${remotePath}`
     : fullProgram(request) ||
       script ||
-      fileEdit ||
       `${requestMode} ${filePath}`.trim() ||
       t("approval.pendingOperation");
   const hostName = workspaceTransfer || sshTransfer
@@ -1115,19 +1142,19 @@ function ApprovalDialog({
                       : filePath}
                 </b>
                 <span>
-                  {sshTransfer && expectedSHA
+                  {change
+                    ? `${t('tool.fileEdit')} · +${numberValue(change.additions)} / -${numberValue(change.deletions)}`
+                    : sshTransfer && expectedSHA
                     ? `${t("approval.sourceSHA")} · ${expectedSHA}${expectedDestinationSHA ? ` · ${t("approval.destinationSHA")} · ${expectedDestinationSHA}` : ""}`
-                    : expectedSHA
+                    : (workspaceTransfer && expectedSHA)
                       ? `Expected SHA256 · ${expectedSHA}`
-                      : t("approval.unboundVersion")}
+                      : ''}
                   {validator ? ` · Validator ${validator}` : ""}
                 </span>
               </div>
             </div>
           )}
-          <pre className="approval-command-preview">
-            {script || fileEdit || `$ ${operation}`}
-          </pre>
+          {change&&textValue(change.diff)?<DiffViewer change={change}/>:<pre className="approval-command-preview">{script || `$ ${operation}`}</pre>}
           <dl>
             <div>
               <dt>

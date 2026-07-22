@@ -610,7 +610,7 @@ func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath
 	}, actor)
 }
 
-func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePath, content, patchContent, expectedSHA256, validatorID, reason, rollback, actor string) (domain.ExecResult, error) {
+func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePath, diff, validatorID, reason, actor string) (domain.ExecResult, error) {
 	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
@@ -618,27 +618,17 @@ func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePa
 	if workspace.Access != "read_write" {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q is read_only", workspaceID)
 	}
-	expectedSHA256 = strings.ToLower(strings.TrimSpace(expectedSHA256))
-	if expectedSHA256 != "absent" && !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(expectedSHA256) {
-		return domain.ExecResult{}, fmt.Errorf("expected_sha256 must be a 64-character SHA256 or absent")
-	}
-	if (content == "") == (patchContent == "") {
-		return domain.ExecResult{}, fmt.Errorf("exactly one of content or patch is required")
-	}
-	if patchContent != "" && expectedSHA256 == "absent" {
-		return domain.ExecResult{}, fmt.Errorf("patch cannot create a new file; provide content instead")
-	}
-	changeData := content
-	if patchContent != "" {
-		changeData = patchContent
-	}
-	if len(changeData) > 1<<20 || strings.Contains(changeData, "[REDACTED]") || s.redactor.Redact(changeData) != changeData {
+	if len(diff) > 1<<20 || strings.Contains(diff, "[REDACTED]") || s.redactor.Redact(diff) != diff {
 		return domain.ExecResult{}, fmt.Errorf("workspace edit is too large or contains sensitive content")
 	}
-	if strings.TrimSpace(reason) == "" || strings.TrimSpace(rollback) == "" {
-		return domain.ExecResult{}, fmt.Errorf("reason and rollback are required")
+	if strings.TrimSpace(reason) == "" {
+		return domain.ExecResult{}, fmt.Errorf("reason is required")
 	}
 	if _, err := s.workspaceValidator(validatorID, workspace, relativePath); err != nil {
+		return domain.ExecResult{}, err
+	}
+	change, err := buildEditChange(relativePath, diff)
+	if err != nil {
 		return domain.ExecResult{}, err
 	}
 	host, err := s.workspaceHost(ctx, workspaceID)
@@ -647,26 +637,15 @@ func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePa
 	}
 	result, submitErr := s.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecWorkspaceEdit, WorkspaceID: workspaceID, RelativePath: relativePath,
-		Content: content, Patch: patchContent, ExpectedSHA256: expectedSHA256, Validator: validatorID,
-		Reason: reason, ExpectedChanges: "transactionally edit workspace file " + relativePath, Rollback: rollback,
+		Change: &change, Validator: validatorID, Reason: reason, ExpectedChanges: "apply reviewed diff to workspace file " + relativePath,
 	}, actor)
-	metadata := parseFileEditOutput(relativePath, validatorID, result.Stdout)
-	result.File = &metadata
-	if result.ExitCode == 73 {
-		return result, fmt.Errorf("conflict: workspace file existence or content changed after it was read")
+	result.Change = &change
+	if result.Stdout != "" {
+		metadata := parseFileEditOutput(relativePath, validatorID, result.Stdout)
+		result.File = &metadata
 	}
 	if result.ExitCode == 74 {
-		return result, fmt.Errorf("workspace validation failed; the previous file was restored")
-	}
-	if submitErr == nil && result.Status == "completed" {
-		operation := domain.FileOperation{ID: ids.New("fileop"), RunID: result.RunID, HostID: host.ID, Path: relativePath,
-			BackupPath: metadata.BackupPath, BeforeSHA256: metadata.BeforeSHA256, AfterSHA256: metadata.SHA256,
-			Validator: validatorID, Status: "completed", CreatedAt: time.Now().UTC()}
-		if err := s.store.CreateFileOperation(ctx, operation); err != nil {
-			return result, err
-		}
-		result.File.OperationID = operation.ID
-		result.Message = "workspace file edit " + operation.ID + " completed"
+		return result, fmt.Errorf("workspace validation failed; the target file was not changed")
 	}
 	return result, submitErr
 }
@@ -1338,94 +1317,55 @@ func searchWorkspaceFile(path, pattern string, maxMatches int) ([]byte, error) {
 
 func (s *Service) editWorkspaceFile(ctx context.Context, workspace config.Workspace, path string, req domain.ExecRequest) (sshx.RawResult, error) {
 	started := time.Now()
+	if req.Change == nil {
+		return sshx.RawResult{}, fmt.Errorf("workspace file change is missing")
+	}
+	change := *req.Change
+	info, statErr := os.Stat(path)
+	existed := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return sshx.RawResult{}, statErr
+	}
+	if !existed {
+		return sshx.RawResult{ExitCode: 1, Stderr: []byte("workspace edit target does not exist"), Duration: time.Since(started)}, fmt.Errorf("workspace edit target does not exist")
+	}
+	if !info.Mode().IsRegular() {
+		return sshx.RawResult{}, fmt.Errorf("workspace edit target is not a regular file")
+	}
+	mode := info.Mode().Perm()
 	original, err := os.ReadFile(path)
-	existed := err == nil
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err != nil {
 		return sshx.RawResult{}, err
 	}
-	if existed == (req.ExpectedSHA256 == "absent") {
-		return sshx.RawResult{ExitCode: 73, Stderr: []byte("workspace file version conflict"), Duration: time.Since(started)}, fmt.Errorf("workspace file version conflict")
-	}
-	before := "absent"
-	mode := os.FileMode(0o600)
-	if existed {
-		digest := sha256.Sum256(original)
-		before = hex.EncodeToString(digest[:])
-		if before != strings.ToLower(req.ExpectedSHA256) {
-			return sshx.RawResult{ExitCode: 73, Stderr: []byte("workspace file version conflict"), Duration: time.Since(started)}, fmt.Errorf("workspace file version conflict")
-		}
-		info, statErr := os.Stat(path)
-		if statErr != nil {
-			return sshx.RawResult{}, statErr
-		}
-		if !info.Mode().IsRegular() {
-			return sshx.RawResult{}, fmt.Errorf("workspace edit target is not a regular file")
-		}
-		mode = info.Mode().Perm()
-	}
-	updated := req.Content
-	if req.Patch != "" {
-		updated, err = applyUnifiedPatch(string(original), req.Patch)
-		if err != nil {
-			return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
-		}
+	updated, err := applyUnifiedPatch(string(original), change.Diff)
+	if err != nil {
+		return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
 	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
-	backup := ""
 	temporary := filepath.Join(filepath.Dir(path), ".opspilot-"+filepath.Base(path)+"-"+suffix+".tmp")
-	if existed {
-		backup = filepath.Join(filepath.Dir(path), ".opspilot-"+filepath.Base(path)+"-"+suffix+".bak")
-		if err := writeSyncedFile(backup, original, 0o600); err != nil {
-			return sshx.RawResult{}, err
-		}
-	}
 	if err := writeSyncedFile(temporary, []byte(updated), mode); err != nil {
 		return sshx.RawResult{}, err
 	}
 	defer os.Remove(temporary)
-	rollback := func() error {
-		if existed {
-			return replaceLocalFile(backup, path, mode)
-		}
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return removeErr
-		}
-		return syncLocalDirectory(filepath.Dir(path))
-	}
 	validationOutput, err := s.runWorkspaceValidator(ctx, req.Validator, workspace, req.RelativePath, temporary)
 	if err != nil {
 		_ = os.Remove(temporary)
 		return sshx.RawResult{ExitCode: 74, Stdout: validationOutput, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
-	if err := os.Rename(temporary, path); err != nil {
+	err = os.Rename(temporary, path)
+	if err != nil {
 		return sshx.RawResult{}, err
 	}
+	_ = os.Remove(temporary)
 	if err := syncLocalDirectory(filepath.Dir(path)); err != nil {
-		restoreErr := rollback()
-		if restoreErr != nil {
-			err = fmt.Errorf("sync changed workspace directory: %w; automatic rollback failed: %v", err, restoreErr)
-		}
 		return sshx.RawResult{ExitCode: 74, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
-	postOutput, err := s.runWorkspaceValidator(ctx, req.Validator, workspace, req.RelativePath, path)
-	validationOutput = append(validationOutput, postOutput...)
-	if err != nil {
-		restoreErr := rollback()
-		if restoreErr != nil {
-			err = fmt.Errorf("%w; automatic rollback failed: %v", err, restoreErr)
-		}
-		return sshx.RawResult{ExitCode: 74, Stdout: validationOutput, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
-	}
 	afterDigest := sha256.Sum256([]byte(updated))
-	beforeValue := before
-	if existed {
-		beforeValue += "  " + req.RelativePath
+	stdout := ""
+	if req.Validator != "" {
+		stdout = fileValidationMarker + "\n"
 	}
-	stdout := fmt.Sprintf("%s\n%s\n", fileBeforeMarker, beforeValue)
-	if backup != "" {
-		stdout += fmt.Sprintf("%s\n%s\n", fileBackupMarker, filepath.Base(backup))
-	}
-	stdout += fmt.Sprintf("%s\n%s\n%x  %s\n", fileValidationMarker, fileAfterMarker, afterDigest, req.RelativePath)
+	stdout += fmt.Sprintf("%s\n%x  %s\n", fileAfterMarker, afterDigest, req.RelativePath)
 	stdout += string(validationOutput)
 	return sshx.RawResult{ExitCode: 0, Stdout: []byte(stdout), Duration: time.Since(started)}, nil
 }
@@ -1464,41 +1404,6 @@ func (s *Service) runWorkspaceValidator(ctx context.Context, id string, workspac
 	return output.Bytes(), err
 }
 
-func copyLocalFile(source, target string, mode os.FileMode) error {
-	input, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer input.Close()
-	output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
-	if err != nil {
-		return err
-	}
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			_ = os.Remove(target)
-		}
-	}()
-	if _, err := io.Copy(output, input); err != nil {
-		output.Close()
-		return err
-	}
-	if err := output.Chmod(mode); err != nil {
-		output.Close()
-		return err
-	}
-	if err := output.Sync(); err != nil {
-		output.Close()
-		return err
-	}
-	if err := output.Close(); err != nil {
-		return err
-	}
-	succeeded = true
-	return nil
-}
-
 func writeSyncedFile(path string, content []byte, mode os.FileMode) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 	if err != nil {
@@ -1527,18 +1432,6 @@ func writeSyncedFile(path string, content []byte, mode os.FileMode) error {
 	}
 	succeeded = true
 	return nil
-}
-
-func replaceLocalFile(source, target string, mode os.FileMode) error {
-	temporary := filepath.Join(filepath.Dir(target), ".opspilot-rollback-"+ids.New("file")+".tmp")
-	if err := copyLocalFile(source, temporary, mode); err != nil {
-		return err
-	}
-	defer os.Remove(temporary)
-	if err := os.Rename(temporary, target); err != nil {
-		return err
-	}
-	return syncLocalDirectory(filepath.Dir(target))
 }
 
 var hunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)

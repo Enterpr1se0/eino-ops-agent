@@ -52,6 +52,9 @@ VALUES(1,20,1,0,'2026-01-01T00:00:00Z')`); err != nil {
 	if len(settings.ChatImageAllowedTypes) != len(domain.DefaultChatImageAllowedTypes) {
 		t.Fatalf("legacy settings did not receive chat image formats: %#v", settings)
 	}
+	if settings.SystemPrompt != domain.DefaultSystemPrompt || settings.DefaultSystemPrompt != domain.DefaultSystemPrompt {
+		t.Fatalf("legacy settings did not receive the default system prompt: %#v", settings)
+	}
 	settings.ApprovalExplanationsEnabled = true
 	settings.SubagentModelProviderID = "model_fixture"
 	settings.SubagentTimeoutSeconds = 45
@@ -75,5 +78,44 @@ VALUES(1,20,1,0,'2026-01-01T00:00:00Z')`); err != nil {
 	if !settings.ApprovalExplanationsEnabled || settings.AgentMaxIterations != 20 || settings.SubagentModelProviderID != "model_fixture" || settings.SubagentTimeoutSeconds != 45 || settings.WorkspaceShellMode != domain.WorkspaceShellModeDisabled {
 		// Existing installations retain their explicitly stored iteration value.
 		t.Fatalf("migrated explanation setting did not persist: %#v", settings)
+	}
+}
+
+func TestSystemSettingsPersistExplicitEmptySystemPrompt(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/settings.db"
+	st, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := st.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.SystemPrompt != domain.DefaultSystemPrompt || settings.DefaultSystemPrompt != domain.DefaultSystemPrompt {
+		t.Fatalf("unexpected initial prompt settings: %#v", settings)
+	}
+	settings.SystemPrompt = ""
+	if _, err := st.SaveSystemSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	settings, err = reopened.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.SystemPrompt != "" {
+		t.Fatalf("explicit empty system prompt was replaced: %q", settings.SystemPrompt)
+	}
+	if settings.DefaultSystemPrompt != domain.DefaultSystemPrompt {
+		t.Fatalf("default system prompt was not returned separately: %q", settings.DefaultSystemPrompt)
 	}
 }

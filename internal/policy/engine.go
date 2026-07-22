@@ -143,6 +143,10 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 		risk = maxRisk(risk, domain.RiskChange)
 		hits = append(hits, "workspace_file_edit")
 	}
+	if req.Mode == domain.ExecRemoteEdit {
+		risk = maxRisk(risk, domain.RiskChange)
+		hits = append(hits, "ssh_file_edit")
+	}
 	if req.Mode == domain.ExecSSHFileTransfer {
 		risk = maxRisk(risk, domain.RiskChange)
 		hits = append(hits, "ssh_host_file_transfer")
@@ -278,10 +282,15 @@ func shellSource(req domain.ExecRequest) (string, error) {
 	case domain.ExecWorkspaceSearch:
 		return "grep " + shellQuote(req.SearchPattern) + " " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
 	case domain.ExecWorkspaceEdit:
-		if req.WorkspaceID == "" || req.RelativePath == "" || (req.Content == "") == (req.Patch == "") {
-			return "", fmt.Errorf("workspace edit requires a workspace file and exactly one of content or patch")
+		if req.WorkspaceID == "" || req.RelativePath == "" || req.Change == nil || req.Change.Diff == "" {
+			return "", fmt.Errorf("workspace edit requires a workspace file and a structured change")
 		}
 		return "edit " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
+	case domain.ExecRemoteEdit:
+		if req.HostID == "" || !posixpath.IsAbs(req.RemotePath) || req.Change == nil || req.Change.Diff == "" {
+			return "", fmt.Errorf("remote edit requires a host, absolute file path, and structured change")
+		}
+		return "edit " + shellQuote(req.RemotePath), nil
 	case domain.ExecWorkspaceUpload:
 		if req.WorkspaceID == "" || req.RelativePath == "" || req.ExpectedSHA256 == "" || !posixpath.IsAbs(req.RemotePath) {
 			return "", fmt.Errorf("workspace upload requires a workspace file, expected SHA256, and absolute remote path")
