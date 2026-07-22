@@ -3,8 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"path/filepath"
-	"regexp"
+	posixpath "path"
 	"strconv"
 	"strings"
 	"time"
@@ -17,26 +16,41 @@ import (
 const (
 	fileMetaMarker       = "__OPS_FILE_META__"
 	fileContentMarker    = "__OPS_FILE_CONTENT__"
-	fileBeforeMarker     = "__OPS_FILE_BEFORE__"
-	fileBackupMarker     = "__OPS_FILE_BACKUP__"
 	fileAfterMarker      = "__OPS_FILE_AFTER__"
 	fileValidationMarker = "__OPS_FILE_VALIDATION_OK__"
 )
 
-func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, maxBytes int, offsetBytes int64, tailLines int, elevated bool, actor string) (domain.ExecResult, error) {
+func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, metadataOnly bool, maxBytes int, offsetBytes int64, tailLines int, elevated bool, actor string) (domain.ExecResult, error) {
 	if err := validateRemoteFilePath(path); err != nil {
 		return domain.ExecResult{}, err
 	}
-	if offsetBytes < 0 || tailLines < 0 || (offsetBytes > 0 && tailLines > 0) {
-		return domain.ExecResult{}, fmt.Errorf("invalid file range: offset_bytes and tail_lines are non-negative and mutually exclusive")
+	if metadataOnly && (maxBytes != 0 || offsetBytes != 0 || tailLines != 0) {
+		return domain.ExecResult{}, fmt.Errorf("invalid file read range: metadata_only cannot be combined with max_bytes, offset_bytes, or tail_lines")
 	}
-	if tailLines > 5000 {
-		tailLines = 5000
+	if maxBytes < 0 || tailLines < 0 || (offsetBytes != 0 && tailLines > 0) {
+		return domain.ExecResult{}, fmt.Errorf("invalid file range: max_bytes and tail_lines must be non-negative; tail_lines cannot be combined with offset_bytes")
 	}
-	if maxBytes <= 0 || maxBytes > s.limits.ModelOutputBytes {
-		maxBytes = s.limits.ModelOutputBytes
+	result, err := s.Submit(ctx, domain.ExecRequest{
+		HostID: hostID, Mode: domain.ExecRemoteRead, RemotePath: path, MetadataOnly: metadataOnly,
+		MaxBytes: maxBytes, OffsetBytes: offsetBytes, TailLines: tailLines, Elevated: elevated,
+		Reason: "read a bounded remote file with version metadata",
+	}, actor)
+	if result.Stdout != "" {
+		metadata, content := parseFileReadOutput(path, result.Stdout)
+		metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offsetBytes)
+		metadata.ReturnedBytes = len(content)
+		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
+		result.File = &metadata
+		result.Stdout = content
 	}
-	quoted := shellQuote(path)
+	if metadataOnly {
+		result.Stdout = ""
+	}
+	return result, err
+}
+
+func buildRemoteFileReadScript(req domain.ExecRequest) string {
+	quoted := shellQuote(req.RemotePath)
 	lines := []string{
 		"set -e",
 		"printf '" + fileMetaMarker + "\\n'",
@@ -45,26 +59,52 @@ func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, max
 		"printf '" + fileContentMarker + "\\n'",
 	}
 	switch {
-	case tailLines > 0:
-		lines = append(lines, "tail -n "+strconv.Itoa(tailLines)+" -- "+quoted+" | head -c "+strconv.Itoa(maxBytes))
-	case offsetBytes > 0:
-		lines = append(lines, "tail -c +"+strconv.FormatInt(offsetBytes+1, 10)+" -- "+quoted+" | head -c "+strconv.Itoa(maxBytes))
+	case req.MetadataOnly:
+		lines = append(lines, "head -c 1 -- "+quoted)
+	case req.TailLines > 0:
+		command := "tail -n " + strconv.Itoa(req.TailLines) + " -- " + quoted
+		if req.MaxBytes > 0 {
+			command += " | head -c " + strconv.Itoa(req.MaxBytes)
+		}
+		lines = append(lines, command)
+	case req.OffsetBytes < 0:
+		command := "tail -c " + strings.TrimPrefix(strconv.FormatInt(req.OffsetBytes, 10), "-") + " -- " + quoted
+		if req.MaxBytes > 0 {
+			command += " | head -c " + strconv.Itoa(req.MaxBytes)
+		}
+		lines = append(lines, command)
+	case req.OffsetBytes > 0:
+		command := "tail -c +" + strconv.FormatInt(req.OffsetBytes+1, 10) + " -- " + quoted
+		if req.MaxBytes > 0 {
+			command += " | head -c " + strconv.Itoa(req.MaxBytes)
+		}
+		lines = append(lines, command)
 	default:
-		lines = append(lines, "head -c "+strconv.Itoa(maxBytes)+" -- "+quoted)
+		if req.MaxBytes > 0 {
+			lines = append(lines, "head -c "+strconv.Itoa(req.MaxBytes)+" -- "+quoted)
+		} else {
+			lines = append(lines, "cat -- "+quoted)
+		}
 	}
-	result, err := s.Submit(ctx, domain.ExecRequest{
-		HostID: hostID, Mode: domain.ExecScript, Script: strings.Join(lines, "\n"), Elevated: elevated,
-		Reason: "read a bounded remote file with version metadata",
-	}, actor)
-	if result.Stdout != "" {
-		metadata, content := parseFileReadOutput(path, result.Stdout)
-		metadata.OffsetBytes = offsetBytes
-		metadata.ReturnedBytes = len(content)
-		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
-		result.File = &metadata
-		result.Stdout = content
+	return strings.Join(lines, "\n")
+}
+
+func buildRemoteFileSearchScript(req domain.ExecRequest) string {
+	script := "grep -n -F -C " + strconv.Itoa(req.ContextLines) + " -- " + shellQuote(req.SearchPattern) + " " + shellQuote(req.RemotePath)
+	if req.MaxMatches > 0 {
+		script += " | head -n " + strconv.Itoa(req.MaxMatches)
 	}
-	return result, err
+	return script
+}
+
+func resolvedFileOffset(size, requested int64) int64 {
+	if requested >= 0 {
+		return requested
+	}
+	if size <= 0 || requested < -size {
+		return 0
+	}
+	return size + requested
 }
 
 func (s *Service) SearchFile(ctx context.Context, hostID, path, pattern string, contextLines, maxMatches int, elevated bool, actor string) (domain.ExecResult, error) {
@@ -75,230 +115,161 @@ func (s *Service) SearchFile(ctx context.Context, hostID, path, pattern string, 
 	if pattern == "" || len(pattern) > 512 || strings.ContainsAny(pattern, "\x00\r\n") {
 		return domain.ExecResult{}, fmt.Errorf("invalid search pattern: use 1-512 characters on one line")
 	}
-	if contextLines < 0 {
-		return domain.ExecResult{}, fmt.Errorf("invalid context_lines")
+	if contextLines < 0 || maxMatches < 0 {
+		return domain.ExecResult{}, fmt.Errorf("context_lines and max_matches must be non-negative")
 	}
-	if contextLines > 10 {
-		contextLines = 10
-	}
-	if maxMatches <= 0 || maxMatches > 200 {
-		maxMatches = 100
-	}
-	script := "grep -n -F -C " + strconv.Itoa(contextLines) + " -- " + shellQuote(pattern) + " " + shellQuote(path) + " | head -n " + strconv.Itoa(maxMatches)
-	return s.Submit(ctx, domain.ExecRequest{HostID: hostID, Mode: domain.ExecScript, Script: script, Elevated: elevated, Reason: "search bounded literal matches in a remote file"}, actor)
+	return s.Submit(ctx, domain.ExecRequest{
+		HostID: hostID, Mode: domain.ExecRemoteSearch, RemotePath: path, SearchPattern: pattern,
+		ContextLines: contextLines, MaxMatches: maxMatches, Elevated: elevated, Reason: "search literal matches in a remote file",
+	}, actor)
 }
 
-func (s *Service) ApplyRemoteConfig(ctx context.Context, hostID, path, content, patchContent, expectedSHA256, validatorID string, elevated bool, reason, rollback, actor string) (domain.ExecResult, error) {
+func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, diff, validatorID string, elevated bool, reason, actor string) (domain.ExecResult, error) {
 	if err := validateRemoteFilePath(path); err != nil {
 		return domain.ExecResult{}, err
 	}
-	if content != "" && patchContent != "" {
-		return domain.ExecResult{}, fmt.Errorf("content and patch are mutually exclusive")
+	if len(diff) > 1<<20 {
+		return domain.ExecResult{}, fmt.Errorf("file edit exceeds 1 MiB")
 	}
-	if len(content) > 1<<20 || len(patchContent) > 1<<20 {
-		return domain.ExecResult{}, fmt.Errorf("configuration change exceeds 1 MiB")
+	if strings.TrimSpace(reason) == "" {
+		return domain.ExecResult{}, fmt.Errorf("reason is required")
 	}
-	if strings.TrimSpace(reason) == "" || strings.TrimSpace(rollback) == "" {
-		return domain.ExecResult{}, fmt.Errorf("reason and rollback are required")
+	if strings.Contains(diff, "[REDACTED]") || s.redactor.Redact(diff) != diff {
+		return domain.ExecResult{}, fmt.Errorf("file edit contains a secret or redaction placeholder; use a change that does not expose or overwrite secret values")
 	}
-	if expectedSHA256 != "" && expectedSHA256 != "absent" && !regexp.MustCompile(`^[a-fA-F0-9]{64}$`).MatchString(expectedSHA256) {
-		return domain.ExecResult{}, fmt.Errorf("expected_sha256 must be a 64-character SHA256 or absent")
+	if _, err := s.validatorCommandFor(validatorID, "remote", path, path); err != nil {
+		return domain.ExecResult{}, err
 	}
-	changeData := content
-	if patchContent != "" {
-		changeData = patchContent
-	}
-	if strings.Contains(changeData, "[REDACTED]") || s.redactor.Redact(changeData) != changeData {
-		return domain.ExecResult{}, fmt.Errorf("configuration input contains a secret or redaction placeholder; use a change that does not expose or overwrite secret values")
-	}
-	validatorCommand, err := s.validatorCommandFor(validatorID, "remote", path, path)
+	change, err := buildEditChange(path, diff)
 	if err != nil {
 		return domain.ExecResult{}, err
+	}
+	result, submitErr := s.Submit(ctx, domain.ExecRequest{
+		HostID: hostID, Mode: domain.ExecRemoteEdit, Change: &change, Elevated: elevated, Reason: reason,
+		ExpectedChanges: "apply reviewed diff to " + path, RemotePath: path, Validator: validatorID,
+	}, actor)
+	result.Change = &change
+	if result.Stdout != "" {
+		metadata := parseFileEditOutput(path, validatorID, result.Stdout)
+		result.File = &metadata
+	}
+	if result.ExitCode == 74 {
+		return result, fmt.Errorf("validation failed; the target file was not changed")
+	}
+	return result, submitErr
+}
+
+func (s *Service) prepareRemoteFileChange(req domain.ExecRequest) (domain.ExecRequest, error) {
+	if req.Change == nil {
+		return req, fmt.Errorf("remote file change is missing")
 	}
 	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
-	directory := filepath.Dir(path)
-	base := filepath.Base(path)
-	backupPath := filepath.Join(directory, ".opspilot-"+base+"-"+suffix+".bak")
-	tempPath := filepath.Join(directory, ".opspilot-"+base+"-"+suffix+".tmp")
-	tempValidatorCommand, err := s.validatorCommandFor(validatorID, "remote", path, tempPath)
+	tempPath := posixpath.Join(posixpath.Dir(req.RemotePath), ".opspilot-"+posixpath.Base(req.RemotePath)+"-"+suffix+".tmp")
+	validatorCommand, err := s.validatorCommandFor(req.Validator, "remote", req.RemotePath, tempPath)
 	if err != nil {
-		return domain.ExecResult{}, err
+		return req, err
 	}
-	script := buildConfigTransactionScript(path, tempPath, backupPath, content, patchContent, expectedSHA256, tempValidatorCommand, validatorCommand, elevated)
-	result, submitErr := s.Submit(ctx, domain.ExecRequest{
-		HostID: hostID, Mode: domain.ExecScript, Script: script, Elevated: elevated, Reason: reason,
-		ExpectedChanges: "transactionally update configuration file " + path,
-		Rollback:        rollback + "; protected backup: " + backupPath, RemotePath: path, ExpectedSHA256: expectedSHA256, Validator: validatorID,
-	}, actor)
-	metadata := parseConfigTransactionOutput(path, validatorID, result.Stdout)
-	result.File = &metadata
-	if result.ExitCode == 73 {
-		return result, fmt.Errorf("conflict: remote file changed or its existence does not match expected_sha256")
-	}
-	if result.ExitCode == 74 {
-		return result, fmt.Errorf("validation failed; the previous file was restored")
-	}
-	if submitErr == nil && result.Status == "completed" {
-		operation := domain.FileOperation{
-			ID: ids.New("fileop"), RunID: result.RunID, HostID: hostID, Path: path, BackupPath: metadata.BackupPath,
-			BeforeSHA256: metadata.BeforeSHA256, AfterSHA256: metadata.SHA256, Validator: validatorID, Status: "completed", CreatedAt: time.Now().UTC(),
-		}
-		if err := s.store.CreateFileOperation(ctx, operation); err != nil {
-			return result, fmt.Errorf("persist file operation: %w", err)
-		}
-		result.File.OperationID = operation.ID
-		result.File.BackupPath = operation.BackupPath
-		result.Message = "file operation " + operation.ID + " completed"
-		result.NextAction = "verify the consuming service; use ssh_config_restore with operation_id " + operation.ID + " if rollback is required"
-	}
-	return result, submitErr
+	prepared := req
+	prepared.Mode = domain.ExecScript
+	prepared.Script = buildRemoteFileChangeScript(req.RemotePath, tempPath, *req.Change, validatorCommand)
+	return prepared, nil
 }
 
-func (s *Service) ApplyRemoteConfigVersioned(ctx context.Context, hostID, path, content, patchContent, expectedSHA256, validatorID string, elevated bool, reason, rollback, actor string) (domain.ExecResult, error) {
-	if strings.TrimSpace(expectedSHA256) == "" {
-		return domain.ExecResult{}, fmt.Errorf("expected_sha256 is required; read the current file first or use absent for a new file")
-	}
-	return s.ApplyRemoteConfig(ctx, hostID, path, content, patchContent, expectedSHA256, validatorID, elevated, reason, rollback, actor)
-}
-
-func (s *Service) ApplyPatchChecked(ctx context.Context, hostID, cwd, patchContent, expectedSHA256, validatorID string, elevated bool, reason, rollback, actor string) (domain.ExecResult, error) {
-	path, err := singlePatchTarget(cwd, patchContent)
-	if err != nil {
-		return domain.ExecResult{}, err
-	}
-	return s.ApplyRemoteConfig(ctx, hostID, path, "", patchContent, expectedSHA256, validatorID, elevated, reason, rollback, actor)
-}
-
-func (s *Service) RestoreRemoteConfig(ctx context.Context, operationID string, elevated bool, reason, actor string) (domain.ExecResult, error) {
-	operation, err := s.store.GetFileOperation(ctx, strings.TrimSpace(operationID))
-	if err != nil {
-		return domain.ExecResult{}, err
-	}
-	if operation.BackupPath == "" {
-		return domain.ExecResult{}, fmt.Errorf("file operation has no restorable backup")
-	}
-	validatorCommand, err := s.validatorCommandFor(operation.Validator, "remote", operation.Path, operation.Path)
-	if err != nil {
-		return domain.ExecResult{}, err
-	}
-	tempPath := operation.Path + ".opspilot-restore-" + ids.New("file") + ".tmp"
-	preRestorePath := operation.Path + ".opspilot-restore-" + ids.New("file") + ".bak"
-	tempValidatorCommand, err := s.validatorCommandFor(operation.Validator, "remote", operation.Path, tempPath)
-	if err != nil {
-		return domain.ExecResult{}, err
-	}
+func buildRemoteFileChangeScript(path, tempPath string, change domain.FileChange, validatorCommand string) string {
+	pathQ, tempQ := shellQuote(path), shellQuote(tempPath)
+	marker := fileEditHeredocMarker(change.Diff)
 	lines := []string{
 		"set -eu",
-		"trap " + shellQuote("test ! -e "+shellQuote(tempPath)+" || unlink -- "+shellQuote(tempPath)+"; test ! -e "+shellQuote(preRestorePath)+" || unlink -- "+shellQuote(preRestorePath)) + " EXIT",
-		"test -f " + shellQuote(operation.BackupPath),
-		"printf '%s  %s\\n' " + shellQuote(operation.AfterSHA256) + " " + shellQuote(operation.Path) + " | sha256sum -c - || exit 73",
-		"cp -p -- " + shellQuote(operation.Path) + " " + shellQuote(preRestorePath),
-		"chmod 0600 -- " + shellQuote(preRestorePath),
-		"cmp -s -- " + shellQuote(operation.Path) + " " + shellQuote(preRestorePath) + " || exit 73",
-		"sync -f -- " + shellQuote(preRestorePath),
-		"cp -p -- " + shellQuote(operation.BackupPath) + " " + shellQuote(tempPath),
-		"sync -f -- " + shellQuote(tempPath),
-	}
-	if validatorCommand != "" {
-		lines = append(lines, "if ! "+tempValidatorCommand+"; then unlink -- "+shellQuote(tempPath)+"; exit 74; fi")
-	}
-	lines = append(lines,
-		"cmp -s -- "+shellQuote(operation.Path)+" "+shellQuote(preRestorePath)+" || exit 73",
-		"mv -f -- "+shellQuote(tempPath)+" "+shellQuote(operation.Path),
-		"sync -f -- "+shellQuote(operation.Path),
-		"sync -f -- "+shellQuote(filepath.Dir(operation.Path)),
-	)
-	if validatorCommand != "" {
-		lines = append(lines,
-			"if ! "+validatorCommand+"; then",
-			"  cp -p -- "+shellQuote(preRestorePath)+" "+shellQuote(tempPath),
-			"  sync -f -- "+shellQuote(tempPath),
-			"  mv -f -- "+shellQuote(tempPath)+" "+shellQuote(operation.Path),
-			"  sync -f -- "+shellQuote(operation.Path),
-			"  sync -f -- "+shellQuote(filepath.Dir(operation.Path)),
-			"  unlink -- "+shellQuote(preRestorePath),
-			"  exit 74",
-			"fi",
-		)
-	}
-	lines = append(lines, "unlink -- "+shellQuote(preRestorePath), "trap - EXIT", "printf '"+fileAfterMarker+"\\n'", "sha256sum -- "+shellQuote(operation.Path))
-	result, submitErr := s.Submit(ctx, domain.ExecRequest{
-		HostID: operation.HostID, Mode: domain.ExecScript, Script: strings.Join(lines, "\n"), Elevated: elevated,
-		Reason: reason, ExpectedChanges: "restore configuration from audited operation " + operation.ID,
-		Rollback: "reapply the reviewed change from run " + operation.RunID, RemotePath: operation.Path, ExpectedSHA256: operation.AfterSHA256, Validator: operation.Validator,
-	}, actor)
-	metadata := parseConfigTransactionOutput(operation.Path, operation.Validator, result.Stdout)
-	metadata.BeforeSHA256 = operation.AfterSHA256
-	metadata.BackupPath = operation.BackupPath
-	result.File = &metadata
-	if result.ExitCode == 73 {
-		return result, fmt.Errorf("conflict: current file no longer matches the operation being restored")
-	}
-	if result.ExitCode == 74 {
-		return result, fmt.Errorf("validation failed while restoring the backup")
-	}
-	return result, submitErr
-}
-
-func buildConfigTransactionScript(path, tempPath, backupPath, content, patchContent, expectedSHA256, tempValidatorCommand, validatorCommand string, elevated bool) string {
-	pathQ, tempQ, backupQ := shellQuote(path), shellQuote(tempPath), shellQuote(backupPath)
-	lines := []string{"set -eu", "if test -e " + pathQ + "; then", "  ops_had_original=1", "  printf '" + fileBeforeMarker + "\\n'", "  sha256sum -- " + pathQ}
-	if expectedSHA256 == "absent" {
-		lines = append(lines, "  exit 73")
-	} else if expectedSHA256 != "" {
-		lines = append(lines, "  printf '%s  %s\\n' "+shellQuote(strings.ToLower(expectedSHA256))+" "+pathQ+" | sha256sum -c - || exit 73")
-	}
-	lines = append(lines, "  cp -p -- "+pathQ+" "+backupQ, "  chmod 0600 -- "+backupQ, "  cmp -s -- "+pathQ+" "+backupQ+" || exit 73", "  sync -f -- "+backupQ, "  printf '"+fileBackupMarker+"\\n%s\\n' "+backupQ, "else", "  ops_had_original=0", "  printf '"+fileBeforeMarker+"\\nabsent\\n'")
-	if expectedSHA256 != "" && expectedSHA256 != "absent" {
-		lines = append(lines, "  exit 73")
-	}
-	lines = append(lines, "fi", "test ! -e "+tempQ+" || exit 73")
-	marker := configHeredocMarker(content + patchContent)
-	lines = append(lines, "trap "+shellQuote("test ! -e "+tempQ+" || unlink -- "+tempQ)+" EXIT")
-	if patchContent != "" {
-		lines = append(lines, "test -e "+pathQ+" || exit 73", "cp -p -- "+pathQ+" "+tempQ, "patch --batch --forward "+tempQ+" <<'"+marker+"'", patchContent, marker)
-	} else {
-		lines = append(lines, "umask 077", "cat > "+tempQ+" <<'"+marker+"'", content, marker, "if test -e "+pathQ+"; then", "  chmod --reference="+pathQ+" -- "+tempQ)
-		if elevated {
-			lines = append(lines, "  chown --reference="+pathQ+" -- "+tempQ)
-		}
-		lines = append(lines, "else", "  chmod 0600 -- "+tempQ, "fi")
+		"test ! -e " + tempQ,
+		"trap " + shellQuote("test ! -e "+tempQ+" || unlink -- "+tempQ) + " EXIT",
+		"test -f " + pathQ,
+		"cp -p -- " + pathQ + " " + tempQ,
+		"patch --batch --forward --no-backup-if-mismatch " + tempQ + " <<'" + marker + "'",
+		change.Diff,
+		marker,
 	}
 	lines = append(lines, "sync -f -- "+tempQ)
 	if validatorCommand != "" {
-		lines = append(lines, "if ! "+tempValidatorCommand+"; then", "  unlink -- "+tempQ, "  exit 74", "fi")
+		lines = append(lines, "if ! "+validatorCommand+"; then", "  unlink -- "+tempQ, "  exit 74", "fi", "printf '"+fileValidationMarker+"\\n'")
 	}
-	lines = append(lines,
-		"if test \"$ops_had_original\" = 1; then cmp -s -- "+pathQ+" "+backupQ+" || exit 73; else test ! -e "+pathQ+" || exit 73; fi",
-		"mv -f -- "+tempQ+" "+pathQ,
-		"trap - EXIT",
-		"sync -f -- "+pathQ,
-		"sync -f -- "+shellQuote(filepath.Dir(path)),
-	)
-	if validatorCommand != "" {
-		lines = append(lines,
-			"if ! "+validatorCommand+"; then",
-			"  if test -e "+backupQ+"; then",
-			"    cp -p -- "+backupQ+" "+tempQ,
-			"    sync -f -- "+tempQ,
-			"    mv -f -- "+tempQ+" "+pathQ,
-			"    sync -f -- "+pathQ,
-			"  else",
-			"    unlink -- "+pathQ,
-			"  fi",
-			"  sync -f -- "+shellQuote(filepath.Dir(path)),
-			"  exit 74",
-			"fi",
-			"printf '"+fileValidationMarker+"\\n'",
-		)
-	}
-	lines = append(lines, "printf '"+fileAfterMarker+"\\n'", "sha256sum -- "+pathQ)
+	lines = append(lines, "mv -f -- "+tempQ+" "+pathQ)
+	lines = append(lines, "trap - EXIT", "sync -f -- "+pathQ, "sync -f -- "+shellQuote(posixpath.Dir(path)), "printf '"+fileAfterMarker+"\\n'", "sha256sum -- "+pathQ)
 	return strings.Join(lines, "\n")
 }
 
-func configHeredocMarker(content string) string {
+func buildEditChange(path, diff string) (domain.FileChange, error) {
+	diff = strings.ReplaceAll(diff, "\r\n", "\n")
+	if strings.ContainsAny(diff, "\x00\r") {
+		return domain.FileChange{}, fmt.Errorf("unified diff contains unsupported control characters")
+	}
+	lines := strings.Split(diff, "\n")
+	hunks := make([]string, 0, len(lines))
+	seenHunk := false
+	oldExpected, newExpected := 0, 0
+	oldSeen, newSeen := 0, 0
+	additions, deletions := 0, 0
+	finishHunk := func() error {
+		if seenHunk && (oldSeen != oldExpected || newSeen != newExpected) {
+			return fmt.Errorf("unified diff hunk line counts do not match its header")
+		}
+		return nil
+	}
+	for index, line := range lines {
+		if match := hunkHeader.FindStringSubmatch(line); match != nil {
+			if err := finishHunk(); err != nil {
+				return domain.FileChange{}, err
+			}
+			seenHunk = true
+			oldExpected = patchHunkCount(match[2])
+			newExpected = patchHunkCount(match[4])
+			oldSeen, newSeen = 0, 0
+			hunks = append(hunks, line)
+			continue
+		}
+		if !seenHunk {
+			if line == "" || strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") {
+				continue
+			}
+			return domain.FileChange{}, fmt.Errorf("unified diff contains unsupported data before its first hunk")
+		}
+		if line == "" && index == len(lines)-1 {
+			continue
+		}
+		if line == "\\ No newline at end of file" {
+			hunks = append(hunks, line)
+			continue
+		}
+		if line == "" {
+			return domain.FileChange{}, fmt.Errorf("unified diff contains an unprefixed empty line")
+		}
+		switch line[0] {
+		case ' ':
+			oldSeen++
+			newSeen++
+		case '-':
+			oldSeen++
+			deletions++
+		case '+':
+			newSeen++
+			additions++
+		default:
+			return domain.FileChange{}, fmt.Errorf("invalid unified diff line")
+		}
+		hunks = append(hunks, line)
+	}
+	if !seenHunk {
+		return domain.FileChange{}, fmt.Errorf("unified diff contains no hunks")
+	}
+	if err := finishHunk(); err != nil {
+		return domain.FileChange{}, err
+	}
+	normalized := "--- " + path + "\n+++ " + path + "\n" + strings.Join(hunks, "\n") + "\n"
+	return domain.FileChange{Diff: normalized, Additions: additions, Deletions: deletions}, nil
+}
+
+func fileEditHeredocMarker(content string) string {
 	for {
-		marker := "__OPS_CONFIG_" + strings.TrimPrefix(ids.New("cfg"), "cfg_") + "__"
+		marker := "__OPS_FILE_EDIT_" + strings.TrimPrefix(ids.New("edit"), "edit_") + "__"
 		conflict := false
 		for _, line := range strings.Split(content, "\n") {
 			if line == marker {
@@ -334,15 +305,15 @@ func validatorAllowsPath(validator config.Validator, path string) bool {
 	if len(validator.PathPatterns) == 0 {
 		return false
 	}
-	clean := filepath.Clean(path)
+	clean := posixpath.Clean(path)
 	for _, pattern := range validator.PathPatterns {
-		pattern = filepath.Clean(pattern)
-		if strings.HasSuffix(pattern, string(filepath.Separator)+"**") {
-			root := strings.TrimSuffix(pattern, string(filepath.Separator)+"**")
-			if clean == root || strings.HasPrefix(clean, root+string(filepath.Separator)) {
+		pattern = posixpath.Clean(pattern)
+		if strings.HasSuffix(pattern, "/**") {
+			root := strings.TrimSuffix(pattern, "/**")
+			if clean == root || strings.HasPrefix(clean, root+"/") {
 				return true
 			}
-		} else if matched, _ := filepath.Match(pattern, clean); matched {
+		} else if matched, _ := posixpath.Match(pattern, clean); matched {
 			return true
 		}
 	}
@@ -350,7 +321,7 @@ func validatorAllowsPath(validator config.Validator, path string) bool {
 }
 
 func validateRemoteFilePath(path string) error {
-	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\x00\r\n") || filepath.Clean(path) != path {
+	if !posixpath.IsAbs(path) || strings.ContainsAny(path, "\x00\r\n") || posixpath.Clean(path) != path {
 		return fmt.Errorf("remote file path must be a clean absolute path")
 	}
 	return nil
@@ -381,7 +352,7 @@ func parseFileReadOutput(path, output string) (domain.FileMetadata, string) {
 	return metadata, output[contentIndex+len(fileContentMarker)+1:]
 }
 
-func parseConfigTransactionOutput(path, validatorID, output string) domain.FileMetadata {
+func parseFileEditOutput(path, validatorID, output string) domain.FileMetadata {
 	metadata := domain.FileMetadata{Path: path, Validator: validatorID, ValidationOK: validatorID == "" || strings.Contains(output, fileValidationMarker)}
 	lines := strings.Split(output, "\n")
 	for index, line := range lines {
@@ -390,15 +361,6 @@ func parseConfigTransactionOutput(path, validatorID, output string) domain.FileM
 		}
 		value := strings.TrimSpace(lines[index+1])
 		switch strings.TrimSpace(line) {
-		case fileBeforeMarker:
-			if value != "absent" {
-				fields := strings.Fields(value)
-				if len(fields) > 0 {
-					metadata.BeforeSHA256 = fields[0]
-				}
-			}
-		case fileBackupMarker:
-			metadata.BackupPath = value
 		case fileAfterMarker:
 			fields := strings.Fields(value)
 			if len(fields) > 0 {
@@ -407,42 +369,4 @@ func parseConfigTransactionOutput(path, validatorID, output string) domain.FileM
 		}
 	}
 	return metadata
-}
-
-func singlePatchTarget(cwd, patchContent string) (string, error) {
-	if !filepath.IsAbs(cwd) || filepath.Clean(cwd) != cwd {
-		return "", fmt.Errorf("remote working directory must be a clean absolute path")
-	}
-	targets := make(map[string]struct{})
-	for _, line := range strings.Split(patchContent, "\n") {
-		if !strings.HasPrefix(line, "+++ ") {
-			continue
-		}
-		fields := strings.Fields(strings.TrimPrefix(line, "+++ "))
-		if len(fields) == 0 {
-			return "", fmt.Errorf("patch target is missing")
-		}
-		value := fields[0]
-		if value == "/dev/null" {
-			continue
-		}
-		value = strings.TrimPrefix(value, "b/")
-		value = strings.TrimPrefix(value, "a/")
-		if filepath.IsAbs(value) || value == ".." || strings.HasPrefix(value, "../") {
-			return "", fmt.Errorf("patch target escapes the working directory")
-		}
-		targets[value] = struct{}{}
-	}
-	if len(targets) != 1 {
-		return "", fmt.Errorf("remote patch must modify exactly one file; apply multi-file changes as independently approved steps")
-	}
-	var relative string
-	for value := range targets {
-		relative = value
-	}
-	target := filepath.Clean(filepath.Join(cwd, relative))
-	if target != cwd && !strings.HasPrefix(target, cwd+string(filepath.Separator)) {
-		return "", fmt.Errorf("patch target escapes the working directory")
-	}
-	return target, nil
 }

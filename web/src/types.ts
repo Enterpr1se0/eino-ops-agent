@@ -131,6 +131,7 @@ export interface AgentEvent {
 export interface ChatSession {
   id: string
   title: string
+	workspace_id: string
   message_count: number
   updated_at: string
   active: boolean
@@ -172,6 +173,7 @@ export interface AgentPlan {
 
 export interface ChatState {
   active: boolean
+	workspace_id: string
   messages: ChatMessage[]
   plan?: AgentPlan | null
 }
@@ -258,6 +260,8 @@ export interface Health {
 
 export interface SystemSettings {
   agent_max_iterations: number
+  system_prompt: string
+  default_system_prompt: string
   approval_explanations_enabled: boolean
   subagent_model_provider_id: string
   subagent_timeout_seconds: number
@@ -275,6 +279,7 @@ export type WorkspaceShellMode = 'sandbox' | 'host' | 'disabled'
 
 export interface SystemSettingsInput {
   agent_max_iterations: number
+  system_prompt?: string
   approval_explanations_enabled?: boolean
   subagent_model_provider_id?: string
   subagent_timeout_seconds?: number
@@ -292,8 +297,6 @@ export interface WebSearchSettings {
   has_proxy_password: boolean
   timeout_seconds: number
   max_results: number
-  extract_max_content_kib: number
-  extract_max_total_kib: number
   updated_at?: string
 }
 
@@ -308,8 +311,6 @@ export interface WebSearchSettingsInput {
   clear_proxy_password?: boolean
   timeout_seconds: number
   max_results: number
-  extract_max_content_kib: number
-  extract_max_total_kib: number
 }
 
 export interface WebSearchResponse {
@@ -328,7 +329,6 @@ export interface AuthSession {
 }
 
 export interface FileMetadata {
-	operation_id?: string
   path: string
   size?: number
   mode?: string
@@ -336,8 +336,6 @@ export interface FileMetadata {
   group?: string
   modified_unix?: number
   sha256?: string
-  before_sha256?: string
-  backup_path?: string
   validator?: string
   validation_ok?: boolean
   sensitive?: boolean
@@ -376,7 +374,6 @@ export interface WorkspaceFileList {
   workspace_id: string
   path: string
   entries: WorkspaceFileEntry[]
-  truncated?: boolean
 }
 
 export interface WorkspaceFilePreview {
@@ -385,7 +382,6 @@ export interface WorkspaceFilePreview {
   size: number
   sha256: string
   content?: string
-  truncated?: boolean
   binary?: boolean
 }
 

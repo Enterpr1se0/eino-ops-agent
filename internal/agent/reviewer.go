@@ -24,7 +24,10 @@ Explain the exact normalized request in clear Simplified Chinese. Do not invent 
 Return exactly one JSON object with keys: summary, mechanism, effects, risks, beginner_tips, rollback_guide.
 effects, risks, beginner_tips must be JSON string arrays. Keep the response concise and practical.`
 
-const subagentTransportTimeoutGrace = 5 * time.Second
+const (
+	subagentTransportTimeoutGrace = 5 * time.Second
+	maxReviewCompletionTokens     = 768
+)
 
 type ExplanationCoordinator struct {
 	runner *adk.Runner
@@ -47,6 +50,13 @@ func buildReadOnlySubagent(ctx context.Context, cfg config.Model, requestTimeout
 	modelCfg, err := chatModelConfig(cfg, requestTimeout+subagentTransportTimeoutGrace)
 	if err != nil {
 		return nil, err
+	}
+	maxTokens := maxReviewCompletionTokens
+	modelName := strings.ToLower(strings.TrimSpace(cfg.Name))
+	if strings.HasPrefix(modelName, "o1") || strings.HasPrefix(modelName, "o3") || strings.HasPrefix(modelName, "o4") || strings.HasPrefix(modelName, "gpt-5") {
+		modelCfg.MaxCompletionTokens = &maxTokens
+	} else {
+		modelCfg.MaxTokens = &maxTokens
 	}
 	chatModel, err := openai.NewChatModel(ctx, modelCfg)
 	if err != nil {

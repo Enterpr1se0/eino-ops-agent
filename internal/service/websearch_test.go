@@ -60,9 +60,6 @@ func TestTavilyWebSearchUsesConfiguredProxyAndKeepsCredentialsEncrypted(t *testi
 	if !saved.HasAPIKey || !saved.HasProxyPassword || saved.APIKeyCipher != "" || saved.ProxyPasswordCipher != "" {
 		t.Fatalf("public settings exposed or lost credential state: %#v", saved)
 	}
-	if saved.ExtractMaxContentKiB != domain.DefaultWebExtractMaxContentKiB || saved.ExtractMaxTotalKiB != domain.DefaultWebExtractMaxTotalKiB {
-		t.Fatalf("extract limits did not receive defaults: %#v", saved)
-	}
 	serialized, err := json.Marshal(saved)
 	if err != nil {
 		t.Fatal(err)
@@ -130,12 +127,6 @@ func TestWebSearchValidatesConfigurationAndInput(t *testing.T) {
 	}
 	if _, err := normalizeWebSearchRequest(domain.WebSearchRequest{Query: "test", MaxResults: 18}, 17); err == nil {
 		t.Fatal("max_results above the administrator limit was accepted")
-	}
-	if _, err := svc.SaveWebSearchSettings(ctx, domain.WebSearchSettingsInput{
-		BaseURL: domain.DefaultWebSearchBaseURL, TimeoutSeconds: 20, MaxResults: 5,
-		ExtractMaxContentKiB: 64, ExtractMaxTotalKiB: 32,
-	}, "test"); err == nil || !strings.Contains(err.Error(), "must not be less") {
-		t.Fatalf("total extract limit below the per-page limit was accepted: %v", err)
 	}
 	for _, proxyURL := range []string{
 		"http://127.0.0.1:7890", "https://proxy.example:8443", "socks5://127.0.0.1:1080", "socks5h://proxy.example:1080",
@@ -211,7 +202,7 @@ func TestTavilyWebExtractUsesConfiguredProxyAndReturnsPartialResults(t *testing.
 	}
 }
 
-func TestWebExtractValidatesURLsAndBoundsContent(t *testing.T) {
+func TestWebExtractValidatesURLs(t *testing.T) {
 	normalized, err := normalizeWebExtractRequest(domain.WebExtractRequest{URLs: []string{
 		"https://example.com/docs#one", "https://example.com/docs#two",
 	}})
@@ -233,14 +224,9 @@ func TestWebExtractValidatesURLsAndBoundsContent(t *testing.T) {
 	if _, err := normalizeWebExtractRequest(domain.WebExtractRequest{URLs: tooMany}); err == nil {
 		t.Fatal("too many extract URLs were accepted")
 	}
-	limit := domain.DefaultWebExtractMaxContentKiB << 10
-	bounded := boundedWebSearchText(strings.Repeat("a", limit+100), limit)
-	if len(bounded) != limit || !strings.HasSuffix(bounded, "[CONTENT TRUNCATED]") {
-		t.Fatalf("bounded content has length %d and suffix %q", len(bounded), bounded[len(bounded)-20:])
-	}
 }
 
-func TestWebExtractUsesConfiguredContentLimit(t *testing.T) {
+func TestWebExtractPreservesCompleteContent(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/extract" {
@@ -255,7 +241,6 @@ func TestWebExtractUsesConfiguredContentLimit(t *testing.T) {
 
 	_, err := svc.SaveWebSearchSettings(context.Background(), domain.WebSearchSettingsInput{
 		Enabled: true, BaseURL: provider.URL, APIKey: "test-key", TimeoutSeconds: 20, MaxResults: 5,
-		ExtractMaxContentKiB: domain.MinWebExtractMaxContentKiB, ExtractMaxTotalKiB: domain.MinWebExtractMaxTotalKiB,
 	}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -264,8 +249,8 @@ func TestWebExtractUsesConfiguredContentLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Results) != 1 || len(result.Results[0].RawContent) != domain.MinWebExtractMaxContentKiB<<10 || !strings.HasSuffix(result.Results[0].RawContent, "[CONTENT TRUNCATED]") {
-		t.Fatalf("configured content limit was not applied: %#v", result)
+	if len(result.Results) != 1 || len(result.Results[0].RawContent) != 9<<10 {
+		t.Fatalf("complete extracted content was not preserved: %#v", result)
 	}
 }
 

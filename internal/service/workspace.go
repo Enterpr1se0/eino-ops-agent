@@ -21,6 +21,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/fsnotify/fsnotify"
+
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/ids"
@@ -57,7 +59,16 @@ type WorkspaceFileList struct {
 	WorkspaceID string               `json:"workspace_id"`
 	Path        string               `json:"path"`
 	Entries     []WorkspaceFileEntry `json:"entries"`
-	Truncated   bool                 `json:"truncated,omitempty"`
+}
+
+type WorkspaceFileChange struct {
+	WorkspaceID string `json:"workspace_id"`
+	Path        string `json:"path"`
+}
+
+type WorkspaceFileWatch struct {
+	Changes <-chan WorkspaceFileChange
+	Errors  <-chan error
 }
 
 type WorkspaceFilePreview struct {
@@ -66,7 +77,6 @@ type WorkspaceFilePreview struct {
 	Size        int64  `json:"size"`
 	SHA256      string `json:"sha256"`
 	Content     string `json:"content,omitempty"`
-	Truncated   bool   `json:"truncated,omitempty"`
 	Binary      bool   `json:"binary,omitempty"`
 }
 
@@ -78,7 +88,10 @@ type WorkspaceDeleteResult struct {
 	SHA256      string `json:"sha256,omitempty"`
 }
 
-const maxWorkspaceUploadBytes = 100 << 20
+const (
+	maxWorkspaceUploadBytes = 100 << 20
+	workspaceWatchDebounce  = 120 * time.Millisecond
+)
 
 var workspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
@@ -364,12 +377,8 @@ func (s *Service) ListAdminWorkspaceFiles(workspaceID, relativePath string) (Wor
 	if err != nil {
 		return WorkspaceFileList{}, err
 	}
-	result := WorkspaceFileList{WorkspaceID: workspace.ID, Path: relativePath, Entries: make([]WorkspaceFileEntry, 0, min(len(entries), 200))}
+	result := WorkspaceFileList{WorkspaceID: workspace.ID, Path: relativePath, Entries: make([]WorkspaceFileEntry, 0, len(entries))}
 	for _, entry := range entries {
-		if len(result.Entries) == 200 {
-			result.Truncated = true
-			break
-		}
 		if entry.Type()&os.ModeSymlink != 0 || isSensitiveWorkspaceComponent(entry.Name()) {
 			continue
 		}
@@ -394,6 +403,101 @@ func (s *Service) ListAdminWorkspaceFiles(workspaceID, relativePath string) (Wor
 	return result, nil
 }
 
+// WatchAdminWorkspaceFiles subscribes to operating-system file notifications for
+// one visible Workspace directory. It deliberately watches only that directory:
+// changes below a child directory cannot alter the current listing, and avoiding
+// recursive watches keeps large projects from consuming one watch per folder.
+func (s *Service) WatchAdminWorkspaceFiles(ctx context.Context, workspaceID, relativePath string) (WorkspaceFileWatch, error) {
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return WorkspaceFileWatch{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	relativePath = strings.TrimSpace(relativePath)
+	if relativePath == "" {
+		relativePath = "."
+	}
+	directory, err := s.resolveWorkspacePath(workspace, relativePath, false)
+	if err != nil {
+		return WorkspaceFileWatch{}, err
+	}
+	info, err := os.Stat(directory)
+	if err != nil {
+		return WorkspaceFileWatch{}, err
+	}
+	if !info.IsDir() {
+		return WorkspaceFileWatch{}, fmt.Errorf("workspace watch target is not a directory")
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return WorkspaceFileWatch{}, fmt.Errorf("create workspace file watcher: %w", err)
+	}
+	if err := watcher.Add(directory); err != nil {
+		_ = watcher.Close()
+		return WorkspaceFileWatch{}, fmt.Errorf("watch workspace directory: %w", err)
+	}
+
+	changes := make(chan WorkspaceFileChange, 1)
+	errors := make(chan error, 1)
+	go func() {
+		defer close(changes)
+		defer close(errors)
+		defer watcher.Close()
+
+		var debounce *time.Timer
+		var debounceC <-chan time.Time
+		stopDebounce := func() {
+			if debounce != nil && !debounce.Stop() {
+				select {
+				case <-debounce.C:
+				default:
+				}
+			}
+		}
+		defer stopDebounce()
+		schedule := func() {
+			if debounce == nil {
+				debounce = time.NewTimer(workspaceWatchDebounce)
+			} else {
+				stopDebounce()
+				debounce.Reset(workspaceWatchDebounce)
+			}
+			debounceC = debounce.C
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, open := <-watcher.Events:
+				if !open {
+					return
+				}
+				if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0 {
+					schedule()
+				}
+			case watchErr, open := <-watcher.Errors:
+				if !open {
+					return
+				}
+				select {
+				case errors <- fmt.Errorf("workspace file watcher failed: %w", watchErr):
+				default:
+				}
+				return
+			case <-debounceC:
+				debounceC = nil
+				select {
+				case changes <- WorkspaceFileChange{WorkspaceID: workspace.ID, Path: relativePath}:
+				default:
+				}
+			}
+		}
+	}()
+
+	return WorkspaceFileWatch{Changes: changes, Errors: errors}, nil
+}
+
 func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (WorkspaceFilePreview, error) {
 	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
@@ -413,14 +517,9 @@ func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (W
 	if err != nil || !info.Mode().IsRegular() {
 		return WorkspaceFilePreview{}, fmt.Errorf("workspace preview target is not a regular file")
 	}
-	const previewLimit = 1 << 20
-	data, err := io.ReadAll(io.LimitReader(file, previewLimit+1))
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return WorkspaceFilePreview{}, err
-	}
-	truncated := len(data) > previewLimit
-	if truncated {
-		data = data[:previewLimit]
 	}
 	digest := sha256.New()
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
@@ -432,7 +531,7 @@ func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (W
 	binary := bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data)
 	result := WorkspaceFilePreview{
 		WorkspaceID: workspace.ID, Path: relativePath, Size: info.Size(), SHA256: hex.EncodeToString(digest.Sum(nil)),
-		Truncated: truncated, Binary: binary,
+		Binary: binary,
 	}
 	if !binary {
 		result.Content = string(data)
@@ -582,22 +681,28 @@ func (s *Service) UploadWorkspaceFile(ctx context.Context, workspaceID, targetPa
 }
 
 func (s *Service) ReadWorkspaceFile(ctx context.Context, workspaceID, relativePath string, maxBytes int, offset int64, actor string) (domain.ExecResult, error) {
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	if _, err := s.resolveWorkspacePath(workspace, relativePath, false); err != nil {
+		return domain.ExecResult{}, err
+	}
 	host, err := s.workspaceHost(ctx, workspaceID)
 	if err != nil {
 		return domain.ExecResult{}, err
-	}
-	if maxBytes <= 0 || maxBytes > s.limits.ModelOutputBytes {
-		maxBytes = s.limits.ModelOutputBytes
 	}
 	result, err := s.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecWorkspaceRead, WorkspaceID: workspaceID, RelativePath: relativePath,
 		MaxBytes: maxBytes, OffsetBytes: offset, Reason: "read a bounded file from an allowlisted workspace",
 	}, actor)
-	metadata, content := parseFileReadOutput(relativePath, result.Stdout)
-	metadata.OffsetBytes = offset
-	metadata.ReturnedBytes = len(content)
-	metadata.Sensitive = strings.Contains(content, "[REDACTED]")
-	result.File, result.Stdout = &metadata, content
+	if result.Stdout != "" {
+		metadata, content := parseFileReadOutput(relativePath, result.Stdout)
+		metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offset)
+		metadata.ReturnedBytes = len(content)
+		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
+		result.File, result.Stdout = &metadata, content
+	}
 	return result, err
 }
 
@@ -606,10 +711,17 @@ func (s *Service) ListWorkspaceFiles(ctx context.Context, workspaceID, relativeP
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
-	return s.Submit(ctx, domain.ExecRequest{HostID: host.ID, Mode: domain.ExecWorkspaceList, WorkspaceID: workspaceID, RelativePath: relativePath, Reason: "list an allowlisted workspace directory"}, actor)
+	return s.Submit(ctx, domain.ExecRequest{HostID: host.ID, Mode: domain.ExecWorkspaceDirectoryList, WorkspaceID: workspaceID, RelativePath: relativePath, Reason: "list an allowlisted workspace directory"}, actor)
 }
 
-func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath, pattern string, maxMatches int, actor string) (domain.ExecResult, error) {
+func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath, pattern string, contextLines, maxMatches int, actor string) (domain.ExecResult, error) {
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	if _, err := s.resolveWorkspacePath(workspace, relativePath, false); err != nil {
+		return domain.ExecResult{}, err
+	}
 	host, err := s.workspaceHost(ctx, workspaceID)
 	if err != nil {
 		return domain.ExecResult{}, err
@@ -618,16 +730,16 @@ func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath
 	if pattern == "" || len(pattern) > 512 || strings.ContainsAny(pattern, "\x00\r\n") {
 		return domain.ExecResult{}, fmt.Errorf("invalid workspace search pattern")
 	}
-	if maxMatches <= 0 || maxMatches > 200 {
-		maxMatches = 100
+	if contextLines < 0 || maxMatches < 0 {
+		return domain.ExecResult{}, fmt.Errorf("workspace search context_lines and max_matches must be non-negative")
 	}
 	return s.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecWorkspaceSearch, WorkspaceID: workspaceID, RelativePath: relativePath,
-		SearchPattern: pattern, MaxBytes: maxMatches, Reason: "search literal text in an allowlisted workspace file",
+		SearchPattern: pattern, ContextLines: contextLines, MaxMatches: maxMatches, Reason: "search literal text in an allowlisted workspace file",
 	}, actor)
 }
 
-func (s *Service) ApplyWorkspacePatch(ctx context.Context, workspaceID, relativePath, patchContent, expectedSHA256, validatorID, reason, rollback, actor string) (domain.ExecResult, error) {
+func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePath, diff, validatorID, reason, actor string) (domain.ExecResult, error) {
 	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
@@ -635,13 +747,17 @@ func (s *Service) ApplyWorkspacePatch(ctx context.Context, workspaceID, relative
 	if workspace.Access != "read_write" {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q is read_only", workspaceID)
 	}
-	if !regexp.MustCompile(`^[a-fA-F0-9]{64}$`).MatchString(expectedSHA256) {
-		return domain.ExecResult{}, fmt.Errorf("expected_sha256 is required for workspace patches")
+	if len(diff) > 1<<20 || strings.Contains(diff, "[REDACTED]") || s.redactor.Redact(diff) != diff {
+		return domain.ExecResult{}, fmt.Errorf("workspace edit is too large or contains sensitive content")
 	}
-	if strings.TrimSpace(patchContent) == "" || len(patchContent) > 1<<20 || strings.Contains(patchContent, "[REDACTED]") || s.redactor.Redact(patchContent) != patchContent {
-		return domain.ExecResult{}, fmt.Errorf("workspace patch is empty, too large, or contains sensitive content")
+	if strings.TrimSpace(reason) == "" {
+		return domain.ExecResult{}, fmt.Errorf("reason is required")
 	}
 	if _, err := s.workspaceValidator(validatorID, workspace, relativePath); err != nil {
+		return domain.ExecResult{}, err
+	}
+	change, err := buildEditChange(relativePath, diff)
+	if err != nil {
 		return domain.ExecResult{}, err
 	}
 	host, err := s.workspaceHost(ctx, workspaceID)
@@ -649,27 +765,16 @@ func (s *Service) ApplyWorkspacePatch(ctx context.Context, workspaceID, relative
 		return domain.ExecResult{}, err
 	}
 	result, submitErr := s.Submit(ctx, domain.ExecRequest{
-		HostID: host.ID, Mode: domain.ExecWorkspacePatch, WorkspaceID: workspaceID, RelativePath: relativePath,
-		Script: patchContent, ExpectedSHA256: strings.ToLower(expectedSHA256), Validator: validatorID,
-		Reason: reason, ExpectedChanges: "transactionally patch workspace file " + relativePath, Rollback: rollback,
+		HostID: host.ID, Mode: domain.ExecWorkspaceEdit, WorkspaceID: workspaceID, RelativePath: relativePath,
+		Change: &change, Validator: validatorID, Reason: reason, ExpectedChanges: "apply reviewed diff to workspace file " + relativePath,
 	}, actor)
-	metadata := parseConfigTransactionOutput(relativePath, validatorID, result.Stdout)
-	result.File = &metadata
-	if result.ExitCode == 73 {
-		return result, fmt.Errorf("conflict: workspace file changed after it was read")
+	result.Change = &change
+	if result.Stdout != "" {
+		metadata := parseFileEditOutput(relativePath, validatorID, result.Stdout)
+		result.File = &metadata
 	}
 	if result.ExitCode == 74 {
-		return result, fmt.Errorf("workspace validation failed; the previous file was restored")
-	}
-	if submitErr == nil && result.Status == "completed" {
-		operation := domain.FileOperation{ID: ids.New("fileop"), RunID: result.RunID, HostID: host.ID, Path: relativePath,
-			BackupPath: metadata.BackupPath, BeforeSHA256: metadata.BeforeSHA256, AfterSHA256: metadata.SHA256,
-			Validator: validatorID, Status: "completed", CreatedAt: time.Now().UTC()}
-		if err := s.store.CreateFileOperation(ctx, operation); err != nil {
-			return result, err
-		}
-		result.File.OperationID = operation.ID
-		result.Message = "workspace file operation " + operation.ID + " completed"
+		return result, fmt.Errorf("workspace validation failed; the target file was not changed")
 	}
 	return result, submitErr
 }
@@ -768,7 +873,7 @@ func (s *Service) prepareWorkspaceUpload(req domain.ExecRequest) (domain.ExecReq
 
 func isWorkspaceMode(mode domain.ExecMode) bool {
 	switch mode {
-	case domain.ExecWorkspaceRead, domain.ExecWorkspaceList, domain.ExecWorkspaceSearch, domain.ExecWorkspacePatch, domain.ExecWorkspaceShell:
+	case domain.ExecWorkspaceRead, domain.ExecWorkspaceDirectoryList, domain.ExecWorkspaceSearch, domain.ExecWorkspaceEdit, domain.ExecWorkspaceShell:
 		return true
 	default:
 		return false
@@ -787,23 +892,23 @@ func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest) 
 		result.Duration = time.Since(started)
 		return redactWorkspaceResult(result, err, workspace.Root)
 	}
-	path, err := s.resolveWorkspacePath(workspace, req.RelativePath, req.Mode == domain.ExecWorkspacePatch)
+	path, err := s.resolveWorkspacePath(workspace, req.RelativePath, req.Mode == domain.ExecWorkspaceEdit)
 	if err != nil {
 		return sshx.RawResult{}, err
 	}
 	switch req.Mode {
 	case domain.ExecWorkspaceRead:
 		result.Stdout, err = readWorkspaceFile(path, req.RelativePath, req.MaxBytes, req.OffsetBytes)
-	case domain.ExecWorkspaceList:
+	case domain.ExecWorkspaceDirectoryList:
 		result.Stdout, err = listWorkspaceDirectory(path)
 	case domain.ExecWorkspaceSearch:
-		result.Stdout, err = searchWorkspaceFile(path, req.SearchPattern, req.MaxBytes)
-	case domain.ExecWorkspacePatch:
+		result.Stdout, err = searchWorkspaceFile(path, req.SearchPattern, req.ContextLines, req.MaxMatches)
+	case domain.ExecWorkspaceEdit:
 		if workspace.Access != "read_write" {
 			err = fmt.Errorf("workspace %q is read_only", workspace.ID)
 			break
 		}
-		result, err = s.patchWorkspaceFile(ctx, workspace, path, req)
+		result, err = s.editWorkspaceFile(ctx, workspace, path, req)
 	default:
 		err = fmt.Errorf("unsupported workspace operation %q", req.Mode)
 	}
@@ -897,6 +1002,11 @@ func (s *Service) workspaceSandboxExecutable() (string, error) {
 		return "", fmt.Errorf("workspace shell sandbox %q is unavailable; install bubblewrap or configure workspace_sandbox_path: %w", configured, err)
 	}
 	return filepath.Abs(path)
+}
+
+func workspaceSandboxSupportsDisableUserns(sandbox string) bool {
+	output, err := exec.Command(sandbox, "--help").CombinedOutput()
+	return err == nil && bytes.Contains(output, []byte("--disable-userns"))
 }
 
 func workspaceHostShellExecutable() (string, string, error) {
@@ -1018,13 +1128,17 @@ func (s *Service) executeWorkspaceSandboxShell(ctx context.Context, workspace co
 		mountMode = "--ro-bind"
 	}
 	args := []string{
-		"--die-with-parent", "--new-session", "--unshare-all", "--unshare-user", "--disable-userns", "--cap-drop", "ALL",
+		"--die-with-parent", "--new-session", "--unshare-all", "--unshare-user", "--cap-drop", "ALL",
 		"--ro-bind", "/usr", "/usr",
 		"--ro-bind-try", "/lib", "/lib",
 		"--ro-bind-try", "/lib64", "/lib64",
 		"--symlink", "usr/bin", "/bin", "--symlink", "usr/sbin", "/sbin",
 		"--dir", "/etc", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
 		"--dir", "/workspace", mountMode, root, "/workspace",
+	}
+	if workspaceSandboxSupportsDisableUserns(sandbox) {
+		// Older distribution bubblewrap releases reject this optional hardening flag.
+		args = append([]string{"--disable-userns"}, args...)
 	}
 	for _, mask := range masks {
 		if mask.directory {
@@ -1144,18 +1258,14 @@ func workspaceHostEnvironment(workspaceRoot string, input map[string]string) []s
 }
 
 func (s *Service) runWorkspaceProcess(execCtx context.Context, command *exec.Cmd, timeout int, operation string) (sshx.RawResult, error) {
-	maxOutput := s.limits.MaxOutputBytes
-	if maxOutput <= 0 {
-		maxOutput = 10 << 20
-	}
-	stdout := &workspaceLimitBuffer{limit: maxOutput}
-	stderr := &workspaceLimitBuffer{limit: maxOutput}
+	stdout := &workspaceCaptureBuffer{}
+	stderr := &workspaceCaptureBuffer{}
 	command.Stdout, command.Stderr = stdout, stderr
 	started := time.Now()
 	runErr := command.Run()
 	result := sshx.RawResult{
 		ExitCode: workspaceExitCode(runErr), Stdout: stdout.Bytes(), Stderr: stderr.Bytes(),
-		Truncated: stdout.truncated || stderr.truncated, Duration: time.Since(started),
+		Duration: time.Since(started),
 	}
 	if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
 		return result, fmt.Errorf("workspace %s timed out after %s", operation, time.Duration(timeout)*time.Second)
@@ -1169,29 +1279,15 @@ func (s *Service) runWorkspaceProcess(execCtx context.Context, command *exec.Cmd
 	return result, nil
 }
 
-type workspaceLimitBuffer struct {
-	buffer    bytes.Buffer
-	limit     int
-	truncated bool
+type workspaceCaptureBuffer struct {
+	buffer bytes.Buffer
 }
 
-func (b *workspaceLimitBuffer) Write(data []byte) (int, error) {
-	original := len(data)
-	remaining := b.limit - b.buffer.Len()
-	if remaining <= 0 {
-		b.truncated = true
-		return original, nil
-	}
-	if len(data) > remaining {
-		_, _ = b.buffer.Write(data[:remaining])
-		b.truncated = true
-		return original, nil
-	}
-	_, _ = b.buffer.Write(data)
-	return original, nil
+func (b *workspaceCaptureBuffer) Write(data []byte) (int, error) {
+	return b.buffer.Write(data)
 }
 
-func (b *workspaceLimitBuffer) Bytes() []byte { return bytes.Clone(b.buffer.Bytes()) }
+func (b *workspaceCaptureBuffer) Bytes() []byte { return bytes.Clone(b.buffer.Bytes()) }
 
 func workspaceExitCode(err error) int {
 	if err == nil {
@@ -1265,13 +1361,16 @@ func readWorkspaceFile(path, displayPath string, maxBytes int, offset int64) ([]
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("workspace target is not a regular file")
 	}
-	if offset < 0 {
-		return nil, fmt.Errorf("offset_bytes cannot be negative")
-	}
-	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+	resolvedOffset := resolvedFileOffset(info.Size(), offset)
+	if _, err := file.Seek(resolvedOffset, io.SeekStart); err != nil {
 		return nil, err
 	}
-	content, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)))
+	var content []byte
+	if maxBytes > 0 {
+		content, err = io.ReadAll(io.LimitReader(file, int64(maxBytes)))
+	} else {
+		content, err = io.ReadAll(file)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1319,56 +1418,97 @@ func isSensitiveWorkspaceComponent(name string) bool {
 	return strings.HasPrefix(lower, ".env") || strings.HasPrefix(lower, ".opspilot-") || lower == ".ssh" || lower == ".data" || lower == "master.key" || strings.Contains(lower, "credential")
 }
 
-func searchWorkspaceFile(path, pattern string, maxMatches int) ([]byte, error) {
+func searchWorkspaceFile(path, pattern string, contextLines, maxMatches int) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	scanner := bufio.NewScanner(io.LimitReader(file, 10<<20))
-	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64<<10), int(^uint(0)>>1))
 	var output strings.Builder
-	line := 0
-	matches := 0
+	type bufferedLine struct {
+		number  int
+		content string
+		match   bool
+	}
+	before := make([]bufferedLine, 0, contextLines)
+	line, outputLines, lastOutputLine, afterRemaining := 0, 0, 0, 0
+	writeLine := func(item bufferedLine) bool {
+		if item.number <= lastOutputLine {
+			return true
+		}
+		if maxMatches > 0 && outputLines >= maxMatches {
+			return false
+		}
+		separator := "-"
+		if item.match {
+			separator = ":"
+		}
+		fmt.Fprintf(&output, "%d%s%s\n", item.number, separator, item.content)
+		lastOutputLine = item.number
+		outputLines++
+		return true
+	}
 	for scanner.Scan() {
 		line++
-		if strings.Contains(scanner.Text(), pattern) {
-			fmt.Fprintf(&output, "%d:%s\n", line, scanner.Text())
-			matches++
-			if matches >= maxMatches {
-				break
+		item := bufferedLine{number: line, content: scanner.Text()}
+		item.match = strings.Contains(item.content, pattern)
+		if item.match {
+			for _, previous := range before {
+				if !writeLine(previous) {
+					return []byte(output.String()), nil
+				}
+			}
+			if !writeLine(item) {
+				return []byte(output.String()), nil
+			}
+			afterRemaining = contextLines
+		} else if afterRemaining > 0 {
+			if !writeLine(item) {
+				return []byte(output.String()), nil
+			}
+			afterRemaining--
+		}
+		if contextLines > 0 {
+			before = append(before, item)
+			if len(before) > contextLines {
+				before = before[len(before)-contextLines:]
 			}
 		}
 	}
 	return []byte(output.String()), scanner.Err()
 }
 
-func (s *Service) patchWorkspaceFile(ctx context.Context, workspace config.Workspace, path string, req domain.ExecRequest) (sshx.RawResult, error) {
+func (s *Service) editWorkspaceFile(ctx context.Context, workspace config.Workspace, path string, req domain.ExecRequest) (sshx.RawResult, error) {
 	started := time.Now()
+	if req.Change == nil {
+		return sshx.RawResult{}, fmt.Errorf("workspace file change is missing")
+	}
+	change := *req.Change
+	info, statErr := os.Stat(path)
+	existed := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return sshx.RawResult{}, statErr
+	}
+	if !existed {
+		return sshx.RawResult{ExitCode: 1, Stderr: []byte("workspace edit target does not exist"), Duration: time.Since(started)}, fmt.Errorf("workspace edit target does not exist")
+	}
+	if !info.Mode().IsRegular() {
+		return sshx.RawResult{}, fmt.Errorf("workspace edit target is not a regular file")
+	}
+	mode := info.Mode().Perm()
 	original, err := os.ReadFile(path)
 	if err != nil {
 		return sshx.RawResult{}, err
 	}
-	digest := sha256.Sum256(original)
-	before := hex.EncodeToString(digest[:])
-	if before != strings.ToLower(req.ExpectedSHA256) {
-		return sshx.RawResult{ExitCode: 73, Stderr: []byte("workspace file version conflict"), Duration: time.Since(started)}, fmt.Errorf("workspace file version conflict")
-	}
-	updated, err := applyUnifiedPatch(string(original), req.Script)
+	updated, err := applyUnifiedPatch(string(original), change.Diff)
 	if err != nil {
 		return sshx.RawResult{ExitCode: 1, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return sshx.RawResult{}, err
-	}
 	suffix := time.Now().UTC().Format("20060102T150405Z") + "-" + ids.New("file")
-	backup := filepath.Join(filepath.Dir(path), ".opspilot-"+filepath.Base(path)+"-"+suffix+".bak")
 	temporary := filepath.Join(filepath.Dir(path), ".opspilot-"+filepath.Base(path)+"-"+suffix+".tmp")
-	if err := writeSyncedFile(backup, original, 0o600); err != nil {
-		return sshx.RawResult{}, err
-	}
-	if err := writeSyncedFile(temporary, []byte(updated), info.Mode().Perm()); err != nil {
+	if err := writeSyncedFile(temporary, []byte(updated), mode); err != nil {
 		return sshx.RawResult{}, err
 	}
 	defer os.Remove(temporary)
@@ -1377,27 +1517,20 @@ func (s *Service) patchWorkspaceFile(ctx context.Context, workspace config.Works
 		_ = os.Remove(temporary)
 		return sshx.RawResult{ExitCode: 74, Stdout: validationOutput, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
-	if err := os.Rename(temporary, path); err != nil {
+	err = os.Rename(temporary, path)
+	if err != nil {
 		return sshx.RawResult{}, err
 	}
+	_ = os.Remove(temporary)
 	if err := syncLocalDirectory(filepath.Dir(path)); err != nil {
-		restoreErr := replaceLocalFile(backup, path, info.Mode().Perm())
-		if restoreErr != nil {
-			err = fmt.Errorf("sync changed workspace directory: %w; automatic rollback failed: %v", err, restoreErr)
-		}
 		return sshx.RawResult{ExitCode: 74, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
 	}
-	postOutput, err := s.runWorkspaceValidator(ctx, req.Validator, workspace, req.RelativePath, path)
-	validationOutput = append(validationOutput, postOutput...)
-	if err != nil {
-		restoreErr := replaceLocalFile(backup, path, info.Mode().Perm())
-		if restoreErr != nil {
-			err = fmt.Errorf("%w; automatic rollback failed: %v", err, restoreErr)
-		}
-		return sshx.RawResult{ExitCode: 74, Stdout: validationOutput, Stderr: []byte(err.Error()), Duration: time.Since(started)}, err
-	}
 	afterDigest := sha256.Sum256([]byte(updated))
-	stdout := fmt.Sprintf("%s\n%s  %s\n%s\n%s\n%s\n%s\n%x  %s\n", fileBeforeMarker, before, req.RelativePath, fileBackupMarker, filepath.Base(backup), fileValidationMarker, fileAfterMarker, afterDigest, req.RelativePath)
+	stdout := ""
+	if req.Validator != "" {
+		stdout = fileValidationMarker + "\n"
+	}
+	stdout += fmt.Sprintf("%s\n%x  %s\n", fileAfterMarker, afterDigest, req.RelativePath)
 	stdout += string(validationOutput)
 	return sshx.RawResult{ExitCode: 0, Stdout: []byte(stdout), Duration: time.Since(started)}, nil
 }
@@ -1433,45 +1566,7 @@ func (s *Service) runWorkspaceValidator(ctx context.Context, id string, workspac
 	var output bytes.Buffer
 	command.Stdout, command.Stderr = &output, &output
 	err = command.Run()
-	if output.Len() > s.limits.ModelOutputBytes {
-		return output.Bytes()[:s.limits.ModelOutputBytes], err
-	}
 	return output.Bytes(), err
-}
-
-func copyLocalFile(source, target string, mode os.FileMode) error {
-	input, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer input.Close()
-	output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
-	if err != nil {
-		return err
-	}
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			_ = os.Remove(target)
-		}
-	}()
-	if _, err := io.Copy(output, input); err != nil {
-		output.Close()
-		return err
-	}
-	if err := output.Chmod(mode); err != nil {
-		output.Close()
-		return err
-	}
-	if err := output.Sync(); err != nil {
-		output.Close()
-		return err
-	}
-	if err := output.Close(); err != nil {
-		return err
-	}
-	succeeded = true
-	return nil
 }
 
 func writeSyncedFile(path string, content []byte, mode os.FileMode) error {
@@ -1502,18 +1597,6 @@ func writeSyncedFile(path string, content []byte, mode os.FileMode) error {
 	}
 	succeeded = true
 	return nil
-}
-
-func replaceLocalFile(source, target string, mode os.FileMode) error {
-	temporary := filepath.Join(filepath.Dir(target), ".opspilot-rollback-"+ids.New("file")+".tmp")
-	if err := copyLocalFile(source, temporary, mode); err != nil {
-		return err
-	}
-	defer os.Remove(temporary)
-	if err := os.Rename(temporary, target); err != nil {
-		return err
-	}
-	return syncLocalDirectory(filepath.Dir(target))
 }
 
 var hunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)

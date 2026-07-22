@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
@@ -46,6 +47,103 @@ func newWorkspaceService(t *testing.T, access string) (*Service, string) {
 		t.Fatal(err)
 	}
 	return svc, filepath.Join(workspaceRoot, "project")
+}
+
+func TestConversationWorkspaceBindingIsAuthoritative(t *testing.T) {
+	svc, _ := newWorkspaceService(t, "read_write")
+	ctx := context.Background()
+	if _, err := svc.CreateAdminWorkspace(ctx, domain.WorkspaceInput{ID: "other", Access: "read_only"}, "web-user"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := svc.PrepareChatSession(ctx, "session-workspace", "project", "web-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.WorkspaceID != "project" {
+		t.Fatalf("bound Workspace = %q", session.WorkspaceID)
+	}
+	capability, err := svc.SessionWorkspace(WithSessionID(ctx, session.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capability.ID != "project" || capability.Access != "read_write" {
+		t.Fatalf("session capability = %#v", capability)
+	}
+	if _, err := svc.PrepareChatSession(ctx, session.ID, "other", "web-user"); err == nil || !strings.Contains(err.Error(), "switch it before sending") {
+		t.Fatalf("mismatched request Workspace was accepted: %v", err)
+	}
+	unbound, err := svc.SetChatSessionWorkspace(ctx, session.ID, "", "web-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unbound.WorkspaceID != "" {
+		t.Fatalf("unbound Workspace = %q", unbound.WorkspaceID)
+	}
+	if _, err := svc.SessionWorkspace(WithSessionID(ctx, session.ID)); err == nil || !strings.Contains(err.Error(), "no Workspace is bound") {
+		t.Fatalf("unbound conversation resolved a Workspace: %v", err)
+	}
+	if _, err := svc.SetChatSessionWorkspace(ctx, session.ID, "missing", "web-user"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing Workspace was accepted: %v", err)
+	}
+	if _, err := svc.SetChatSessionWorkspace(ctx, session.ID, "project", "web-user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteAdminWorkspace(ctx, "project", "web-user"); err != nil {
+		t.Fatal(err)
+	}
+	afterDelete, err := svc.GetChatSession(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterDelete.WorkspaceID != "" {
+		t.Fatalf("deleted Workspace remains bound: %q", afterDelete.WorkspaceID)
+	}
+}
+
+func runApprovedWorkspaceAccess(t *testing.T, svc *Service, invoke func(context.Context) (domain.ExecResult, error)) domain.ExecResult {
+	t.Helper()
+	base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	notifications := make(chan domain.ExecResult, 1)
+	ctx := WithApprovalNotifier(WithBlockingApprovals(base), func(result domain.ExecResult) {
+		notifications <- result
+	})
+	type outcome struct {
+		result domain.ExecResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := invoke(ctx)
+		done <- outcome{result: result, err: err}
+	}()
+	var pending domain.ExecResult
+	select {
+	case pending = <-notifications:
+	case <-base.Done():
+		t.Fatal("timed out waiting for Workspace file approval")
+	}
+	if pending.Status != "approval_required" || pending.Risk != domain.RiskReadOnly || pending.ApprovalID == "" {
+		t.Fatalf("Workspace file access skipped approval: %#v", pending)
+	}
+	select {
+	case early := <-done:
+		t.Fatalf("Workspace file access returned before approval: %#v", early)
+	default:
+	}
+	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed file access", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case completed := <-done:
+		if completed.err != nil {
+			t.Fatal(completed.err)
+		}
+		return completed.result
+	case <-base.Done():
+		t.Fatal("timed out waiting for approved Workspace file access")
+		return domain.ExecResult{}
+	}
 }
 
 func TestWorkspaceAdminCreateUpdateAndRemove(t *testing.T) {
@@ -121,15 +219,14 @@ func TestWorkspaceReadPatchAndTraversalProtection(t *testing.T) {
 	if err := os.WriteFile(path, []byte("port=8080\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	read, err := svc.ReadWorkspaceFile(context.Background(), "project", "app.conf", 1024, 0, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	read := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.ReadWorkspaceFile(ctx, "project", "app.conf", 0, 0, "test")
+	})
 	if read.Status != "completed" || read.Stdout != "port=8080\n" || read.File == nil || read.File.SHA256 == "" {
 		t.Fatalf("unexpected workspace read: %#v", read)
 	}
 	patch := "--- app.conf\n+++ app.conf\n@@ -1,1 +1,1 @@\n-port=8080\n+port=9090\n"
-	pending, err := svc.ApplyWorkspacePatch(context.Background(), "project", "app.conf", patch, read.File.SHA256, "", "change port", "restore backup", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "change port", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,19 +246,134 @@ func TestWorkspaceReadPatchAndTraversalProtection(t *testing.T) {
 	}
 }
 
-func TestWorkspacePatchDetectsVersionConflict(t *testing.T) {
+func TestWorkspaceReadPreservesCompleteLargeFile(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_only")
+	want := strings.Repeat("workspace-file-data\n", 20_000) + "workspace-file-end\n"
+	if err := os.WriteFile(filepath.Join(root, "large.log"), []byte(want), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	result := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.ReadWorkspaceFile(ctx, "project", "large.log", 0, 0, "test")
+	})
+	if result.Stdout != want || result.File == nil || result.File.ReturnedBytes != len(want) {
+		t.Fatalf("complete workspace file was not returned: got=%d want=%d metadata=%#v", len(result.Stdout), len(want), result.File)
+	}
+}
+
+func TestWorkspaceReadNegativeOffsetReadsFromFileEnd(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_only")
+	if err := os.WriteFile(filepath.Join(root, "tail.log"), []byte("0123456789"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	result := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.ReadWorkspaceFile(ctx, "project", "tail.log", 0, -4, "test")
+	})
+	if result.Stdout != "6789" || result.File == nil || result.File.OffsetBytes != 6 || result.File.ReturnedBytes != 4 {
+		t.Fatalf("negative Workspace offset returned %#v", result)
+	}
+
+	result = runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.ReadWorkspaceFile(ctx, "project", "tail.log", 0, -100, "test")
+	})
+	if result.Stdout != "0123456789" || result.File == nil || result.File.OffsetBytes != 0 {
+		t.Fatalf("oversized negative Workspace offset returned %#v", result)
+	}
+}
+
+func TestWorkspaceSearchReturnsLiteralMatchesWithContext(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_only")
+	content := "before\nneedle one\nmiddle\nneedle two\nafter\n"
+	if err := os.WriteFile(filepath.Join(root, "search.log"), []byte(content), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	result := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.SearchWorkspace(ctx, "project", "search.log", "needle", 1, 4, "test")
+	})
+	want := "1-before\n2:needle one\n3-middle\n4:needle two\n"
+	if result.Stdout != want {
+		t.Fatalf("Workspace search output = %q, want %q", result.Stdout, want)
+	}
+	if _, err := svc.SearchWorkspace(context.Background(), "project", "search.log", "needle", -1, 0, "test"); err == nil {
+		t.Fatal("Workspace search accepted negative context_lines")
+	}
+}
+
+func TestWorkspaceFileAccessRequiresFreshApproval(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_only")
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte("token: fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithSessionID(context.Background(), "file-read-session")
+	pending, err := svc.ReadWorkspaceFile(ctx, "project", "config.yaml", 0, 0, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != "approval_required" || pending.Risk != domain.RiskReadOnly || pending.Stdout != "" {
+		t.Fatalf("file content was available before approval: %#v", pending)
+	}
+	if _, err := svc.ApproveWithScope(context.Background(), pending.ApprovalID, "reviewed", "session", "operator"); err == nil || !strings.Contains(err.Error(), "one-time") {
+		t.Fatalf("file read accepted session approval: %v", err)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
+	if err != nil || approved.Status != "completed" || !strings.Contains(approved.Stdout, "token: fixture") {
+		t.Fatalf("approved file access failed: %#v err=%v", approved, err)
+	}
+}
+
+func TestWorkspacePatchUsesCurrentContextWithoutSHABinding(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
 	path := filepath.Join(root, "app.conf")
 	_ = os.WriteFile(path, []byte("a\n"), 0o600)
-	stale := fmt.Sprintf("%x", sha256.Sum256([]byte("old\n")))
 	patch := "--- app.conf\n+++ app.conf\n@@ -1 +1 @@\n-a\n+b\n"
-	pending, err := svc.ApplyWorkspacePatch(context.Background(), "project", "app.conf", patch, stale, "", "change", "restore", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "change", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
-	if err == nil || result.ExitCode != 73 {
-		t.Fatalf("expected conflict, got %#v err=%v", result, err)
+	if err != nil || result.Status != "completed" {
+		t.Fatalf("context-matched edit failed: %#v err=%v", result, err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "b\n" {
+		t.Fatalf("edit result=%q err=%v", content, err)
+	}
+}
+
+func TestWorkspaceFileEditPreservesMode(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	existingPath := filepath.Join(root, "app.conf")
+	if err := os.WriteFile(existingPath, []byte("enabled=false\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	patch := "@@ -1 +1 @@\n-enabled=false\n+enabled=true\n"
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "", "enable app", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(existingPath)
+	if err != nil || string(content) != "enabled=true\n" {
+		t.Fatalf("replacement content=%q err=%v", content, err)
+	}
+	info, err := os.Stat(existingPath)
+	if err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("replacement mode=%v err=%v", info, err)
+	}
+}
+
+func TestWorkspaceFileEditRejectsMalformedDiffAndMissingTarget(t *testing.T) {
+	svc, _ := newWorkspaceService(t, "read_write")
+	if _, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", "not a diff", "", "change", "test"); err == nil || !strings.Contains(err.Error(), "unified diff") {
+		t.Fatalf("malformed diff was accepted: %v", err)
+	}
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "missing.conf", "@@ -1 +1 @@\n-old\n+new\n", "", "change", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator"); err == nil || !strings.Contains(result.Stderr, "does not exist") {
+		t.Fatalf("missing edit target was accepted: result=%#v err=%v", result, err)
 	}
 }
 
@@ -194,35 +406,34 @@ func TestWorkspaceListHidesSensitiveControlPlaneNames(t *testing.T) {
 	}
 }
 
-func TestWorkspacePostValidationFailureRestoresOriginalAtomically(t *testing.T) {
+func TestWorkspacePreValidationFailureDoesNotTouchOriginal(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_write")
 	path := filepath.Join(root, "app.conf")
 	if err := os.WriteFile(path, []byte("port=8080\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	validator := filepath.Join(t.TempDir(), "validate-fixture")
-	validatorBody := "#!/bin/sh\ncase \"$1\" in *.tmp) exit 0;; *) exit 1;; esac\n"
+	validatorBody := "#!/bin/sh\nexit 1\n"
 	if err := os.WriteFile(validator, []byte(validatorBody), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	svc.validators["fixture"] = config.Validator{ID: "fixture", Scope: "workspace", Program: validator, Args: []string{"{{path}}"}, TimeoutSeconds: 5, PathPatterns: []string{filepath.Join(root, "**")}}
-	expected := fmt.Sprintf("%x", sha256.Sum256([]byte("port=8080\n")))
 	patch := "@@ -1 +1 @@\n-port=8080\n+port=9090\n"
-	pending, err := svc.ApplyWorkspacePatch(context.Background(), "project", "app.conf", patch, expected, "fixture", "change port", "restore backup", "test")
+	pending, err := svc.EditWorkspaceFile(context.Background(), "project", "app.conf", patch, "fixture", "change port", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
 	if err == nil || result.ExitCode != 74 {
-		t.Fatalf("expected post-validation rollback, result=%#v err=%v", result, err)
+		t.Fatalf("expected pre-validation failure, result=%#v err=%v", result, err)
 	}
 	content, readErr := os.ReadFile(path)
 	if readErr != nil || string(content) != "port=8080\n" {
-		t.Fatalf("automatic rollback did not restore the original: content=%q err=%v", content, readErr)
+		t.Fatalf("failed validation touched the original: content=%q err=%v", content, readErr)
 	}
 	info, statErr := os.Stat(path)
 	if statErr != nil || info.Mode().Perm() != 0o640 {
-		t.Fatalf("automatic rollback did not preserve mode: info=%#v err=%v", info, statErr)
+		t.Fatalf("failed validation changed file mode: info=%#v err=%v", info, statErr)
 	}
 }
 
@@ -269,7 +480,7 @@ func TestWorkspaceAdminUploadIsAtomicAndNeverOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.Path != "main.go" || preview.Content != string(content) || preview.SHA256 != wantSHA || preview.Binary || preview.Truncated {
+	if preview.Path != "main.go" || preview.Content != string(content) || preview.SHA256 != wantSHA || preview.Binary {
 		t.Fatalf("unexpected workspace preview: %#v", preview)
 	}
 	deleted, err := svc.DeleteAdminWorkspaceEntry(context.Background(), "project", "main.go", "admin-web")
@@ -288,6 +499,51 @@ func TestWorkspaceAdminUploadIsAtomicAndNeverOverwrites(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, ".opspilot-trash")); !os.IsNotExist(err) {
 		t.Fatalf("delete created a recovery directory: %v", err)
+	}
+}
+
+func TestWorkspaceFileWatchReportsExternalDirectoryChanges(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	ctx, cancel := context.WithCancel(context.Background())
+	watch, err := svc.WatchAdminWorkspaceFiles(ctx, "project", ".")
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(root, "external.txt")
+	for _, change := range []func() error{
+		func() error { return os.WriteFile(path, []byte("first"), 0o600) },
+		func() error { return os.WriteFile(path, []byte("second version"), 0o600) },
+		func() error { return os.Remove(path) },
+	} {
+		if err := change(); err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		select {
+		case event := <-watch.Changes:
+			if event.WorkspaceID != "project" || event.Path != "." {
+				cancel()
+				t.Fatalf("unexpected workspace change: %#v", event)
+			}
+		case watchErr := <-watch.Errors:
+			cancel()
+			t.Fatalf("workspace watcher failed: %v", watchErr)
+		case <-time.After(3 * time.Second):
+			cancel()
+			t.Fatal("timed out waiting for workspace file change")
+		}
+	}
+
+	cancel()
+	select {
+	case _, open := <-watch.Changes:
+		if open {
+			t.Fatal("workspace change channel remained open after cancellation")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("workspace watcher did not stop after cancellation")
 	}
 }
 
@@ -541,6 +797,20 @@ func TestWorkspaceShellBackendValidation(t *testing.T) {
 	}
 	if err := validateRequestLimits(valid, limits, nil); err != nil {
 		t.Fatalf("valid workspace shell backend was rejected: %v", err)
+	}
+}
+
+func TestWorkspaceCaptureBufferPreservesCompleteOutput(t *testing.T) {
+	payload := bytes.Repeat([]byte("workspace-output-"), 100_000)
+	buffer := &workspaceCaptureBuffer{}
+	for offset := 0; offset < len(payload); offset += 8191 {
+		end := min(offset+8191, len(payload))
+		if _, err := buffer.Write(payload[offset:end]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := buffer.Bytes(); !bytes.Equal(got, payload) {
+		t.Fatalf("captured workspace output differs: got=%d want=%d", len(got), len(payload))
 	}
 }
 

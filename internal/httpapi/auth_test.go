@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -22,33 +24,56 @@ func TestWebAuthenticationCookieAndCSRF(t *testing.T) {
 	}
 	defer st.Close()
 	auth := security.NewWebAuth(st, time.Hour)
-	if err := auth.Initialize(ctx, "correct horse battery staple"); err != nil {
-		t.Fatal(err)
-	}
-	handler := New(nil, nil, auth).Handler()
+	handler := New(nil, nil, auth, Options{}).Handler()
 
-	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"password":"correct horse battery staple"}`))
-	login.Header.Set("Content-Type", "application/json")
-	login.RemoteAddr = "127.0.0.1:12345"
-	loginResponse := httptest.NewRecorder()
-	handler.ServeHTTP(loginResponse, login)
-	if loginResponse.Code != http.StatusOK {
-		t.Fatalf("login status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/status", nil)
+	statusResponse := httptest.NewRecorder()
+	handler.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), `"initialized":false`) {
+		t.Fatalf("initial auth status=%d body=%s", statusResponse.Code, statusResponse.Body.String())
+	}
+
+	initialize := httptest.NewRequest(http.MethodPost, "/api/v1/auth/initialize", bytes.NewBufferString(`{"password":"correct horse battery staple"}`))
+	initialize.Header.Set("Content-Type", "application/json")
+	initialize.RemoteAddr = "127.0.0.1:12345"
+	initializeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(initializeResponse, initialize)
+	if initializeResponse.Code != http.StatusCreated {
+		t.Fatalf("initialize status=%d body=%s", initializeResponse.Code, initializeResponse.Body.String())
 	}
 	var session struct {
 		CSRF string `json:"csrf_token"`
 	}
-	if err := json.Unmarshal(loginResponse.Body.Bytes(), &session); err != nil || session.CSRF == "" {
-		t.Fatalf("invalid login response: %v %s", err, loginResponse.Body.String())
+	if err := json.Unmarshal(initializeResponse.Body.Bytes(), &session); err != nil || session.CSRF == "" {
+		t.Fatalf("invalid initialization response: %v %s", err, initializeResponse.Body.String())
 	}
 	var cookie *http.Cookie
-	for _, candidate := range loginResponse.Result().Cookies() {
+	for _, candidate := range initializeResponse.Result().Cookies() {
 		if candidate.Name == security.SessionCookieName {
 			cookie = candidate
 		}
 	}
 	if cookie == nil || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode {
 		t.Fatalf("secure session cookie missing: %#v", cookie)
+	}
+	initializedStatus := httptest.NewRequest(http.MethodGet, "/api/v1/auth/status", nil)
+	initializedStatusResponse := httptest.NewRecorder()
+	handler.ServeHTTP(initializedStatusResponse, initializedStatus)
+	if initializedStatusResponse.Code != http.StatusOK || !strings.Contains(initializedStatusResponse.Body.String(), `"initialized":true`) {
+		t.Fatalf("initialized auth status=%d body=%s", initializedStatusResponse.Code, initializedStatusResponse.Body.String())
+	}
+	secondInitialize := httptest.NewRequest(http.MethodPost, "/api/v1/auth/initialize", bytes.NewBufferString(`{"password":"different secure password"}`))
+	secondInitializeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(secondInitializeResponse, secondInitialize)
+	if secondInitializeResponse.Code != http.StatusConflict {
+		t.Fatalf("second initialization status=%d body=%s", secondInitializeResponse.Code, secondInitializeResponse.Body.String())
+	}
+
+	unauthenticatedExport := httptest.NewRequest(http.MethodGet, "/api/v1/logs/export", nil)
+	unauthenticatedExportResponse := httptest.NewRecorder()
+	handler.ServeHTTP(unauthenticatedExportResponse, unauthenticatedExport)
+	if unauthenticatedExportResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated log export returned %d", unauthenticatedExportResponse.Code)
 	}
 
 	withoutCSRF := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", bytes.NewBufferString(`{}`))
@@ -75,10 +100,19 @@ func TestWebAuthenticationCookieAndCSRF(t *testing.T) {
 	if staleResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("logged out cookie returned %d", staleResponse.Code)
 	}
+
+	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"password":"correct horse battery staple"}`))
+	login.Header.Set("Content-Type", "application/json")
+	login.RemoteAddr = "127.0.0.1:12345"
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, login)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
+	}
 }
 
 func TestUnknownAPIRouteReturnsJSONNotSPA(t *testing.T) {
-	handler := New(nil, nil, nil).Handler()
+	handler := New(nil, nil, nil, Options{}).Handler()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/no-such-endpoint", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -115,7 +149,7 @@ func TestSPAHandlerServesAssetsAndIndexFallback(t *testing.T) {
 }
 
 func TestAgentToolsEndpointReportsAnUnloadedRuntimeWithoutPanicking(t *testing.T) {
-	handler := New(nil, nil, nil).Handler()
+	handler := New(nil, nil, nil, Options{}).Handler()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/agent/tools", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -136,8 +170,49 @@ func TestAgentToolsEndpointReportsAnUnloadedRuntimeWithoutPanicking(t *testing.T
 	}
 }
 
+func TestLogExportReturnsDownloadableZip(t *testing.T) {
+	handler := New(nil, nil, nil, Options{Version: "test-version"}).Handler()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/logs/export", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("log export status=%d body=%s", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "application/zip" {
+		t.Fatalf("log export content type = %q", contentType)
+	}
+	if disposition := response.Header().Get("Content-Disposition"); !strings.HasPrefix(disposition, "attachment;") || !strings.Contains(disposition, "opspilot-diagnostics-") {
+		t.Fatalf("log export content disposition = %q", disposition)
+	}
+	archive, err := zip.NewReader(bytes.NewReader(response.Body.Bytes()), int64(response.Body.Len()))
+	if err != nil {
+		t.Fatalf("parse log export: %v", err)
+	}
+	if len(archive.File) != 2 || archive.File[0].Name != "diagnostics.json" || archive.File[1].Name != "ops-agent-memory.jsonl" {
+		t.Fatalf("unexpected log export entries: %#v", archive.File)
+	}
+	manifest, err := archive.File[0].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manifest.Close()
+	var diagnostics struct {
+		SchemaVersion int `json:"schema_version"`
+		Application   struct {
+			Version string `json:"version"`
+		} `json:"application"`
+	}
+	if err := json.NewDecoder(manifest).Decode(&diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	if diagnostics.SchemaVersion != 1 || diagnostics.Application.Version != "test-version" {
+		t.Fatalf("unexpected diagnostics: %#v", diagnostics)
+	}
+}
+
 func TestCancelChatSessionReportsUnavailableRuntime(t *testing.T) {
-	handler := New(nil, nil, nil).Handler()
+	handler := New(nil, nil, nil, Options{}).Handler()
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/chat/session_test/cancel", bytes.NewBufferString(`{}`))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

@@ -30,7 +30,7 @@ func TestEnsureDefaultFileCreatesLoadableConfigWithoutOverwriting(t *testing.T) 
 	if err := yaml.Unmarshal(data, &loaded); err != nil {
 		t.Fatalf("parse generated configuration: %v", err)
 	}
-	if loaded.ListenAddress != Default().ListenAddress || loaded.DatabasePath != Default().DatabasePath {
+	if loaded.ListenAddress != Default().ListenAddress || loaded.DatabasePath != Default().DatabasePath || loaded.Logging.Level != "debug" {
 		t.Fatalf("generated defaults were not preserved: %#v", loaded)
 	}
 

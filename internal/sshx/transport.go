@@ -3,9 +3,11 @@ package sshx
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
-	"path/filepath"
+	posixpath "path"
 	"regexp"
 	"strings"
 	"sync"
@@ -15,11 +17,10 @@ import (
 )
 
 type RawResult struct {
-	ExitCode  int
-	Stdout    []byte
-	Stderr    []byte
-	Truncated bool
-	Duration  time.Duration
+	ExitCode int
+	Stdout   []byte
+	Stderr   []byte
+	Duration time.Duration
 }
 
 type HostInfo struct {
@@ -34,6 +35,7 @@ type HostKey struct {
 	Lines       string `json:"lines"`
 	Fingerprint string `json:"fingerprint"`
 	Algorithm   string `json:"algorithm,omitempty"`
+	Trusted     bool   `json:"trusted"`
 }
 
 // ConnectionSpec is resolved by the control plane. Jumps are ordered from the
@@ -149,16 +151,44 @@ func applyElevation(host domain.Host, req domain.ExecRequest, command string, st
 		if stdin == nil {
 			stdin = strings.NewReader("")
 		}
-		return "sudo -S -p '' -- " + wrapped, io.MultiReader(strings.NewReader(host.SudoPassword+"\n"), stdin), nil
+		// Frame the command input with a random marker. When sudo has a cached
+		// credential (or otherwise does not prompt), it leaves the password unread
+		// and would otherwise pass it to the elevated command. The gate below
+		// discards everything through the marker before starting the real command,
+		// regardless of whether sudo consumed the password line. For `bash -se`,
+		// this prevents the password from becoming the first script command.
+		marker, err := newSudoInputMarker(host.SudoPassword)
+		if err != nil {
+			return "", nil, err
+		}
+		const inputVariable = "OPSPILOT_SUDO_INPUT"
+		gate := "set +x; while IFS= read -r " + inputVariable + "; do " +
+			"if [ \"$" + inputVariable + "\" = " + shellQuote(marker) + " ]; then " +
+			"unset " + inputVariable + "; exec " + wrapped + "; fi; done; exit 1"
+		framedInput := io.MultiReader(strings.NewReader(host.SudoPassword+"\n"+marker+"\n"), stdin)
+		return "sudo -S -p '' -- bash -c " + shellQuote(gate), framedInput, nil
 	default:
 		return "", nil, fmt.Errorf("managed sudo is disabled for this host")
+	}
+}
+
+func newSudoInputMarker(password string) (string, error) {
+	var entropy [16]byte
+	for {
+		if _, err := rand.Read(entropy[:]); err != nil {
+			return "", fmt.Errorf("generate managed sudo input marker: %w", err)
+		}
+		marker := "__OPSPILOT_SUDO_INPUT_" + hex.EncodeToString(entropy[:]) + "__"
+		if marker != password {
+			return marker, nil
+		}
 	}
 }
 
 func remotePrefix(cwd string, env map[string]string) (string, error) {
 	var parts []string
 	if cwd != "" {
-		if !filepath.IsAbs(cwd) {
+		if !posixpath.IsAbs(cwd) {
 			return "", fmt.Errorf("cwd must be an absolute path")
 		}
 		parts = append(parts, "cd -- "+shellQuote(cwd)+" &&")
@@ -201,11 +231,9 @@ func validateHost(host domain.Host) error {
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
 
-type limitBuffer struct {
-	mu        sync.Mutex
-	buf       bytes.Buffer
-	limit     int
-	truncated bool
+type captureBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
 }
 
 type callbackWriter struct {
@@ -218,36 +246,18 @@ func (w callbackWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func newLimitBuffer(limit int) *limitBuffer { return &limitBuffer{limit: limit} }
+func newCaptureBuffer() *captureBuffer { return &captureBuffer{} }
 
-func (b *limitBuffer) Write(data []byte) (int, error) {
+func (b *captureBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	original := len(data)
-	remaining := b.limit - b.buf.Len()
-	if remaining <= 0 {
-		b.truncated = true
-		return original, nil
-	}
-	if len(data) > remaining {
-		_, _ = b.buf.Write(data[:remaining])
-		b.truncated = true
-		return original, nil
-	}
-	_, _ = b.buf.Write(data)
-	return original, nil
+	return b.buf.Write(data)
 }
 
-func (b *limitBuffer) Bytes() []byte {
+func (b *captureBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return bytes.Clone(b.buf.Bytes())
-}
-
-func (b *limitBuffer) Truncated() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.truncated
 }
 
 func sortStrings(values []string) {

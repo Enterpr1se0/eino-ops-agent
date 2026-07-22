@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
+	posixpath "path"
 	"regexp"
 	"sort"
 	"strings"
@@ -38,8 +38,13 @@ var safePrograms = stringSet(
 	"free", "getent", "grep", "head", "hostname", "id", "ip", "journalctl", "last", "ls", "lscpu",
 	"lsblk", "lsof", "netstat", "pgrep", "printenv", "ps", "pwd", "ss", "stat", "tail", "top",
 	"uname", "uptime", "vmstat", "wc", "who", "whoami",
-	"cmp", "printf", "sha256sum", "sync", "test", "timeout",
+	"cmp", "printf", "set", "sha256sum", "sync", "test", "timeout",
 )
+
+// These otherwise read-only programs can disclose arbitrary file content.
+// They share the same approval boundary as the structured file-read tools so
+// an Agent cannot bypass a reviewed read by switching to ssh_exec.
+var fileContentPrograms = stringSet("cat", "cut", "grep", "head", "less", "more", "tail")
 
 var changePrograms = stringSet(
 	"apt", "apt-get", "apk", "brew", "cargo", "chgrp", "chmod", "chown", "cp", "dnf", "docker",
@@ -139,14 +144,29 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 			hits = append(hits, "workspace_sandbox_shell")
 		}
 	}
+	if req.Mode == domain.ExecWorkspaceEdit {
+		risk = maxRisk(risk, domain.RiskChange)
+		hits = append(hits, "workspace_file_edit")
+	}
+	if req.Mode == domain.ExecRemoteEdit {
+		risk = maxRisk(risk, domain.RiskChange)
+		hits = append(hits, "ssh_file_edit")
+	}
 	if req.Mode == domain.ExecSSHFileTransfer {
 		risk = maxRisk(risk, domain.RiskChange)
 		hits = append(hits, "ssh_host_file_transfer")
+	}
+	fileContentAccess := isFileContentAccess(req.Mode) || hasFileContentProgram(hits)
+	if fileContentAccess {
+		hits = append(hits, "file_content_access")
 	}
 
 	sort.Strings(hits)
 	switch risk {
 	case domain.RiskReadOnly:
+		if fileContentAccess {
+			return domain.Decision{Risk: risk, Action: domain.ActionApprove, Reason: "reading file content requires human approval", RuleHits: unique(hits)}
+		}
 		return domain.Decision{Risk: risk, Action: domain.ActionAllow, Reason: "read-only command", RuleHits: unique(hits)}
 	case domain.RiskChange:
 		return domain.Decision{Risk: risk, Action: domain.ActionApprove, Reason: "operation may change remote state", RuleHits: unique(hits)}
@@ -155,6 +175,25 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 	default:
 		return domain.Decision{Risk: domain.RiskForbidden, Action: domain.ActionDeny, Reason: "operation is forbidden", RuleHits: unique(hits)}
 	}
+}
+
+func isFileContentAccess(mode domain.ExecMode) bool {
+	switch mode {
+	case domain.ExecRemoteRead, domain.ExecRemoteSearch, domain.ExecWorkspaceRead, domain.ExecWorkspaceSearch:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasFileContentProgram(hits []string) bool {
+	for _, hit := range hits {
+		program, ok := strings.CutPrefix(hit, "read_program:")
+		if ok && fileContentPrograms[program] {
+			return true
+		}
+	}
+	return false
 }
 
 func analyzeShell(source string) (domain.RiskLevel, []string, error) {
@@ -269,14 +308,32 @@ func shellSource(req domain.ExecRequest) (string, error) {
 		return req.Script, nil
 	case domain.ExecWorkspaceRead:
 		return "cat " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
-	case domain.ExecWorkspaceList:
+	case domain.ExecWorkspaceDirectoryList:
 		return "ls " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
 	case domain.ExecWorkspaceSearch:
 		return "grep " + shellQuote(req.SearchPattern) + " " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
-	case domain.ExecWorkspacePatch:
-		return "patch " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
+	case domain.ExecRemoteRead:
+		if !posixpath.IsAbs(req.RemotePath) {
+			return "", fmt.Errorf("remote file read requires an absolute path")
+		}
+		return "cat " + shellQuote(req.RemotePath), nil
+	case domain.ExecRemoteSearch:
+		if !posixpath.IsAbs(req.RemotePath) || req.SearchPattern == "" {
+			return "", fmt.Errorf("remote file search requires an absolute path and pattern")
+		}
+		return "grep " + shellQuote(req.SearchPattern) + " " + shellQuote(req.RemotePath), nil
+	case domain.ExecWorkspaceEdit:
+		if req.WorkspaceID == "" || req.RelativePath == "" || req.Change == nil || req.Change.Diff == "" {
+			return "", fmt.Errorf("workspace edit requires a workspace file and a structured change")
+		}
+		return "edit " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
+	case domain.ExecRemoteEdit:
+		if req.HostID == "" || !posixpath.IsAbs(req.RemotePath) || req.Change == nil || req.Change.Diff == "" {
+			return "", fmt.Errorf("remote edit requires a host, absolute file path, and structured change")
+		}
+		return "edit " + shellQuote(req.RemotePath), nil
 	case domain.ExecWorkspaceUpload:
-		if req.WorkspaceID == "" || req.RelativePath == "" || req.ExpectedSHA256 == "" || !filepath.IsAbs(req.RemotePath) {
+		if req.WorkspaceID == "" || req.RelativePath == "" || req.ExpectedSHA256 == "" || !posixpath.IsAbs(req.RemotePath) {
 			return "", fmt.Errorf("workspace upload requires a workspace file, expected SHA256, and absolute remote path")
 		}
 		return "sftp put " + shellQuote(req.WorkspaceID+"/"+req.RelativePath) + " " + shellQuote(req.RemotePath), nil
@@ -322,7 +379,7 @@ func ruleMatches(rule Rule, host domain.Host, source string, req domain.ExecRequ
 	if len(rule.Paths) > 0 {
 		matched := false
 		for _, path := range rule.Paths {
-			if strings.HasPrefix(filepath.Clean(req.Cwd), filepath.Clean(path)) || strings.Contains(source, path) {
+			if strings.HasPrefix(posixpath.Clean(req.Cwd), posixpath.Clean(path)) || strings.Contains(source, path) {
 				matched = true
 				break
 			}
@@ -348,7 +405,7 @@ func maxRisk(left, right domain.RiskLevel) domain.RiskLevel {
 
 func baseProgram(value string) string {
 	value = strings.Trim(value, "'\"")
-	return filepath.Base(value)
+	return posixpath.Base(value)
 }
 
 func printNode(node syntax.Node) string {

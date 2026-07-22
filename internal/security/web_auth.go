@@ -20,10 +20,7 @@ import (
 
 const SessionCookieName = "opspilot_session"
 
-// GenerateAdminPassword returns a random password suitable for first startup.
-func GenerateAdminPassword() (string, error) {
-	return randomToken(18)
-}
+var ErrAlreadyInitialized = errors.New("administrator password is already initialized")
 
 type WebAuth struct {
 	store      *store.Store
@@ -37,22 +34,37 @@ func NewWebAuth(st *store.Store, sessionTTL time.Duration) *WebAuth {
 	return &WebAuth{store: st, sessionTTL: sessionTTL}
 }
 
-func (a *WebAuth) Initialize(ctx context.Context, bootstrapPassword string) error {
+func (a *WebAuth) IsInitialized(ctx context.Context) (bool, error) {
 	_, err := a.store.AdminPasswordHash(ctx)
 	if err == nil {
-		return nil
+		return true, nil
 	}
-	if !errors.Is(err, store.ErrNotFound) {
-		return err
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
 	}
-	if err := validateAdminPassword(bootstrapPassword); err != nil {
-		return fmt.Errorf("OPS_AGENT_ADMIN_PASSWORD is required for first start: %w", err)
+	return false, err
+}
+
+func (a *WebAuth) InitializePassword(ctx context.Context, password string) (string, domain.WebSession, error) {
+	if initialized, err := a.IsInitialized(ctx); err != nil {
+		return "", domain.WebSession{}, err
+	} else if initialized {
+		return "", domain.WebSession{}, ErrAlreadyInitialized
 	}
-	hash, err := hashAdminPassword(bootstrapPassword)
+	if err := validateAdminPassword(password); err != nil {
+		return "", domain.WebSession{}, err
+	}
+	hash, err := hashAdminPassword(password)
 	if err != nil {
-		return err
+		return "", domain.WebSession{}, err
 	}
-	return a.store.SetAdminPasswordHash(ctx, hash)
+	if err := a.store.CreateAdminPasswordHash(ctx, hash); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return "", domain.WebSession{}, ErrAlreadyInitialized
+		}
+		return "", domain.WebSession{}, err
+	}
+	return a.createSession(ctx)
 }
 
 func (a *WebAuth) Login(ctx context.Context, password string) (string, domain.WebSession, error) {
@@ -64,6 +76,10 @@ func (a *WebAuth) Login(ctx context.Context, password string) (string, domain.We
 	if err != nil || !valid {
 		return "", domain.WebSession{}, fmt.Errorf("invalid administrator credentials")
 	}
+	return a.createSession(ctx)
+}
+
+func (a *WebAuth) createSession(ctx context.Context) (string, domain.WebSession, error) {
 	token, err := randomToken(32)
 	if err != nil {
 		return "", domain.WebSession{}, err

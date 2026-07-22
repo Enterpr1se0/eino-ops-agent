@@ -16,7 +16,7 @@ database_path: .data/ops-agent.db
 policy_path: ""
 
 web_auth:
-  # The initial password is printed once in the startup window, never saved here.
+  # The administrator creates a password in the Web UI on first start.
   secure_cookies: false
 
 workspace_dir: workspace
@@ -25,7 +25,7 @@ workspace_sandbox_path: bwrap
 validators: []
 
 logging:
-  level: info
+  level: debug
   format: text
   file: .data/ops-agent.log
   add_source: false
@@ -43,8 +43,6 @@ model:
 limits:
   sync_timeout_seconds: 60
   max_timeout_seconds: 600
-  max_output_bytes: 10485760
-  model_output_bytes: 32768
   global_concurrency: 8
   host_concurrency: 2
 `

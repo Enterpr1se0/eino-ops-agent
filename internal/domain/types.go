@@ -162,6 +162,8 @@ const (
 
 type SystemSettings struct {
 	AgentMaxIterations          int       `json:"agent_max_iterations"`
+	SystemPrompt                string    `json:"system_prompt"`
+	DefaultSystemPrompt         string    `json:"default_system_prompt"`
 	ApprovalExplanationsEnabled bool      `json:"approval_explanations_enabled"`
 	SubagentModelProviderID     string    `json:"subagent_model_provider_id"`
 	SubagentTimeoutSeconds      int       `json:"subagent_timeout_seconds"`
@@ -177,6 +179,7 @@ type SystemSettings struct {
 
 type SystemSettingsInput struct {
 	AgentMaxIterations          int      `json:"agent_max_iterations"`
+	SystemPrompt                *string  `json:"system_prompt,omitempty"`
 	ApprovalExplanationsEnabled *bool    `json:"approval_explanations_enabled,omitempty"`
 	SubagentModelProviderID     *string  `json:"subagent_model_provider_id,omitempty"`
 	SubagentTimeoutSeconds      *int     `json:"subagent_timeout_seconds,omitempty"`
@@ -192,44 +195,34 @@ const (
 	DefaultWebSearchMaxResults     = 10
 	MinWebSearchMaxResults         = 1
 	MaxWebSearchMaxResults         = 20
-	DefaultWebExtractMaxContentKiB = 32
-	MinWebExtractMaxContentKiB     = 8
-	MaxWebExtractMaxContentKiB     = 128
-	DefaultWebExtractMaxTotalKiB   = 128
-	MinWebExtractMaxTotalKiB       = 32
-	MaxWebExtractMaxTotalKiB       = 512
 )
 
 type WebSearchSettings struct {
-	Enabled              bool      `json:"enabled"`
-	Provider             string    `json:"provider"`
-	BaseURL              string    `json:"base_url"`
-	APIKeyCipher         string    `json:"-"`
-	HasAPIKey            bool      `json:"has_api_key"`
-	ProxyURL             string    `json:"proxy_url,omitempty"`
-	ProxyUsername        string    `json:"proxy_username,omitempty"`
-	ProxyPasswordCipher  string    `json:"-"`
-	HasProxyPassword     bool      `json:"has_proxy_password"`
-	TimeoutSeconds       int       `json:"timeout_seconds"`
-	MaxResults           int       `json:"max_results"`
-	ExtractMaxContentKiB int       `json:"extract_max_content_kib"`
-	ExtractMaxTotalKiB   int       `json:"extract_max_total_kib"`
-	UpdatedAt            time.Time `json:"updated_at"`
+	Enabled             bool      `json:"enabled"`
+	Provider            string    `json:"provider"`
+	BaseURL             string    `json:"base_url"`
+	APIKeyCipher        string    `json:"-"`
+	HasAPIKey           bool      `json:"has_api_key"`
+	ProxyURL            string    `json:"proxy_url,omitempty"`
+	ProxyUsername       string    `json:"proxy_username,omitempty"`
+	ProxyPasswordCipher string    `json:"-"`
+	HasProxyPassword    bool      `json:"has_proxy_password"`
+	TimeoutSeconds      int       `json:"timeout_seconds"`
+	MaxResults          int       `json:"max_results"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 type WebSearchSettingsInput struct {
-	Enabled              bool   `json:"enabled"`
-	BaseURL              string `json:"base_url"`
-	APIKey               string `json:"api_key,omitempty"`
-	ClearAPIKey          bool   `json:"clear_api_key,omitempty"`
-	ProxyURL             string `json:"proxy_url,omitempty"`
-	ProxyUsername        string `json:"proxy_username,omitempty"`
-	ProxyPassword        string `json:"proxy_password,omitempty"`
-	ClearProxyPassword   bool   `json:"clear_proxy_password,omitempty"`
-	TimeoutSeconds       int    `json:"timeout_seconds"`
-	MaxResults           int    `json:"max_results"`
-	ExtractMaxContentKiB int    `json:"extract_max_content_kib"`
-	ExtractMaxTotalKiB   int    `json:"extract_max_total_kib"`
+	Enabled            bool   `json:"enabled"`
+	BaseURL            string `json:"base_url"`
+	APIKey             string `json:"api_key,omitempty"`
+	ClearAPIKey        bool   `json:"clear_api_key,omitempty"`
+	ProxyURL           string `json:"proxy_url,omitempty"`
+	ProxyUsername      string `json:"proxy_username,omitempty"`
+	ProxyPassword      string `json:"proxy_password,omitempty"`
+	ClearProxyPassword bool   `json:"clear_proxy_password,omitempty"`
+	TimeoutSeconds     int    `json:"timeout_seconds"`
+	MaxResults         int    `json:"max_results"`
 }
 
 type WebSearchRequest struct {
@@ -344,6 +337,7 @@ type WebSession struct {
 type ChatSession struct {
 	ID           string    `json:"id"`
 	Title        string    `json:"title"`
+	WorkspaceID  string    `json:"workspace_id"`
 	MessageCount int       `json:"message_count"`
 	UpdatedAt    time.Time `json:"updated_at"`
 	Active       bool      `json:"active"`
@@ -388,15 +382,18 @@ type AgentPlanStep struct {
 type ExecMode string
 
 const (
-	ExecProgram         ExecMode = "program"
-	ExecScript          ExecMode = "script"
-	ExecWorkspaceRead   ExecMode = "workspace_read"
-	ExecWorkspaceList   ExecMode = "workspace_list"
-	ExecWorkspaceSearch ExecMode = "workspace_search"
-	ExecWorkspacePatch  ExecMode = "workspace_patch"
-	ExecWorkspaceUpload ExecMode = "workspace_upload"
-	ExecWorkspaceShell  ExecMode = "workspace_shell"
-	ExecSSHFileTransfer ExecMode = "ssh_file_transfer"
+	ExecProgram                ExecMode = "program"
+	ExecScript                 ExecMode = "script"
+	ExecWorkspaceRead          ExecMode = "workspace_read"
+	ExecWorkspaceDirectoryList ExecMode = "workspace_directory_list"
+	ExecWorkspaceSearch        ExecMode = "workspace_search"
+	ExecWorkspaceEdit          ExecMode = "workspace_edit"
+	ExecRemoteRead             ExecMode = "remote_read"
+	ExecRemoteSearch           ExecMode = "remote_search"
+	ExecRemoteEdit             ExecMode = "remote_edit"
+	ExecWorkspaceUpload        ExecMode = "workspace_upload"
+	ExecWorkspaceShell         ExecMode = "workspace_shell"
+	ExecSSHFileTransfer        ExecMode = "ssh_file_transfer"
 )
 
 type ExecRequest struct {
@@ -405,6 +402,7 @@ type ExecRequest struct {
 	Program                   string            `json:"program,omitempty" jsonschema:"remote executable name for program mode"`
 	Args                      []string          `json:"args,omitempty" jsonschema:"separate arguments; do not include shell quoting"`
 	Script                    string            `json:"script,omitempty" jsonschema:"bash script content for script mode"`
+	Change                    *FileChange       `json:"change,omitempty"`
 	Cwd                       string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory, or a clean workspace-relative directory for workspace_shell"`
 	Env                       map[string]string `json:"env,omitempty" jsonschema:"non-secret environment values"`
 	Elevated                  bool              `json:"elevated,omitempty" jsonschema:"request root through the host sudo policy; never pass sudo or a password as a program or argument"`
@@ -424,8 +422,12 @@ type ExecRequest struct {
 	RelativePath              string            `json:"relative_path,omitempty" jsonschema:"path relative to the workspace root"`
 	ExpectedSHA256            string            `json:"expected_sha256,omitempty" jsonschema:"workspace file version observed before mutation"`
 	Validator                 string            `json:"validator,omitempty" jsonschema:"allowlisted validator identifier"`
-	SearchPattern             string            `json:"search_pattern,omitempty" jsonschema:"literal workspace search pattern"`
-	OffsetBytes               int64             `json:"offset_bytes,omitempty" jsonschema:"bounded file read offset"`
+	SearchPattern             string            `json:"search_pattern,omitempty" jsonschema:"literal file search pattern"`
+	ContextLines              int               `json:"context_lines,omitempty" jsonschema:"lines around each file search match"`
+	MaxMatches                int               `json:"max_matches,omitempty" jsonschema:"maximum file search result lines; zero means unlimited"`
+	MetadataOnly              bool              `json:"metadata_only,omitempty" jsonschema:"return remote file metadata without content"`
+	TailLines                 int               `json:"tail_lines,omitempty" jsonschema:"number of final remote file lines to return"`
+	OffsetBytes               int64             `json:"offset_bytes,omitempty" jsonschema:"file read offset; negative values count from the end"`
 	MaxBytes                  int               `json:"max_bytes,omitempty" jsonschema:"bounded file read length"`
 	LocalPath                 string            `json:"-"`
 }
@@ -439,6 +441,11 @@ type ToolMeta struct {
 	NextAction  string `json:"next_action,omitempty"`
 }
 
+type ToolFailure struct {
+	ToolMeta
+	Status string `json:"status"`
+}
+
 type ExecResult struct {
 	ToolMeta
 	RunID               string        `json:"run_id"`
@@ -450,15 +457,14 @@ type ExecResult struct {
 	ExitCode            int           `json:"exit_code,omitempty"`
 	Stdout              string        `json:"stdout,omitempty"`
 	Stderr              string        `json:"stderr,omitempty"`
-	Truncated           bool          `json:"truncated,omitempty"`
 	Duration            time.Duration `json:"duration,omitempty"`
 	PolicyHits          []string      `json:"policy_hits,omitempty"`
 	CompletedAt         time.Time     `json:"completed_at,omitempty"`
 	File                *FileMetadata `json:"file,omitempty"`
+	Change              *FileChange   `json:"change,omitempty"`
 }
 
 type FileMetadata struct {
-	OperationID   string `json:"operation_id,omitempty"`
 	Path          string `json:"path"`
 	Size          int64  `json:"size,omitempty"`
 	Mode          string `json:"mode,omitempty"`
@@ -466,8 +472,6 @@ type FileMetadata struct {
 	Group         string `json:"group,omitempty"`
 	ModifiedUnix  int64  `json:"modified_unix,omitempty"`
 	SHA256        string `json:"sha256,omitempty"`
-	BeforeSHA256  string `json:"before_sha256,omitempty"`
-	BackupPath    string `json:"backup_path,omitempty"`
 	Validator     string `json:"validator,omitempty"`
 	ValidationOK  bool   `json:"validation_ok,omitempty"`
 	Sensitive     bool   `json:"sensitive,omitempty"`
@@ -475,17 +479,10 @@ type FileMetadata struct {
 	ReturnedBytes int    `json:"returned_bytes,omitempty"`
 }
 
-type FileOperation struct {
-	ID           string    `json:"id"`
-	RunID        string    `json:"run_id"`
-	HostID       string    `json:"host_id"`
-	Path         string    `json:"path"`
-	BackupPath   string    `json:"backup_path"`
-	BeforeSHA256 string    `json:"before_sha256"`
-	AfterSHA256  string    `json:"after_sha256"`
-	Validator    string    `json:"validator,omitempty"`
-	Status       string    `json:"status"`
-	CreatedAt    time.Time `json:"created_at"`
+type FileChange struct {
+	Diff      string `json:"diff"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
 }
 
 type Decision struct {
@@ -535,7 +532,6 @@ type Run struct {
 	StderrRedacted string         `json:"stderr_redacted,omitempty"`
 	StdoutCipher   string         `json:"-"`
 	StderrCipher   string         `json:"-"`
-	Truncated      bool           `json:"truncated"`
 	Error          string         `json:"error,omitempty"`
 	AIReviewJSON   string         `json:"-"`
 	AIReview       *CommandReview `json:"ai_review,omitempty"`

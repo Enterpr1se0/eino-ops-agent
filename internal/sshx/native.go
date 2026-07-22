@@ -74,12 +74,8 @@ func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection Co
 	timeout := effectiveTimeout(req.TimeoutSeconds, t.limits)
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
-	maxBytes := t.limits.MaxOutputBytes
-	if maxBytes <= 0 {
-		maxBytes = 10 << 20
-	}
-	stdout := newLimitBuffer(maxBytes)
-	stderr := newLimitBuffer(maxBytes)
+	stdout := newCaptureBuffer()
+	stderr := newCaptureBuffer()
 	stdoutWriter, stderrWriter := io.Writer(stdout), io.Writer(stderr)
 	if callback != nil {
 		stdoutWriter = io.MultiWriter(stdout, callbackWriter{stream: "stdout", callback: callback})
@@ -113,7 +109,7 @@ func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection Co
 		case <-done:
 		case <-time.After(time.Second):
 		}
-		result := RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Truncated: stdout.Truncated() || stderr.Truncated(), Duration: time.Since(started)}
+		result := RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Duration: time.Since(started)}
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
@@ -123,10 +119,10 @@ func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection Co
 		return result, execCtx.Err()
 	}
 	if ctx.Err() != nil {
-		return RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Truncated: stdout.Truncated() || stderr.Truncated(), Duration: time.Since(started)}, ctx.Err()
+		return RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Duration: time.Since(started)}, ctx.Err()
 	}
 	if execCtx.Err() != nil {
-		result := RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Truncated: stdout.Truncated() || stderr.Truncated(), Duration: time.Since(started)}
+		result := RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Duration: time.Since(started)}
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
@@ -134,11 +130,10 @@ func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection Co
 	}
 
 	result := RawResult{
-		ExitCode:  nativeExitCode(runErr),
-		Stdout:    stdout.Bytes(),
-		Stderr:    stderr.Bytes(),
-		Truncated: stdout.Truncated() || stderr.Truncated(),
-		Duration:  time.Since(started),
+		ExitCode: nativeExitCode(runErr),
+		Stdout:   stdout.Bytes(),
+		Stderr:   stderr.Bytes(),
+		Duration: time.Since(started),
 	}
 	if runErr != nil {
 		var exitErr *ssh.ExitError
@@ -251,7 +246,27 @@ func (t *NativeSSHTransport) ScanHostKey(ctx context.Context, connection Connect
 	line := knownhosts.Line([]string{knownhosts.Normalize(address)}, captured)
 	return HostKey{
 		Lines: line + "\n", Fingerprint: ssh.FingerprintSHA256(captured), Algorithm: captured.Type(),
+		Trusted: t.isHostKeyTrusted(connection.Target, address, captured),
 	}, nil
+}
+
+type knownHostAddress string
+
+func (address knownHostAddress) Network() string { return "tcp" }
+func (address knownHostAddress) String() string  { return string(address) }
+
+func (t *NativeSSHTransport) isHostKeyTrusted(host domain.Host, address string, key ssh.PublicKey) bool {
+	t.knownHostsMu.Lock()
+	defer t.knownHostsMu.Unlock()
+	knownHostsPath := t.knownHostsPath(host)
+	if knownHostsPath == "" {
+		return false
+	}
+	callback, err := knownhosts.New(knownHostsPath)
+	if err != nil {
+		return false
+	}
+	return callback(address, knownHostAddress(address), key) == nil
 }
 
 func (t *NativeSSHTransport) TrustHostKey(ctx context.Context, connection ConnectionSpec, expectedFingerprint string) (HostKey, error) {
@@ -282,6 +297,7 @@ func (t *NativeSSHTransport) TrustHostKey(ctx context.Context, connection Connec
 	line := strings.TrimSpace(key.Lines)
 	for _, existingLine := range strings.Split(string(existing), "\n") {
 		if strings.TrimSpace(existingLine) == line {
+			key.Trusted = true
 			return key, nil
 		}
 	}
@@ -304,6 +320,7 @@ func (t *NativeSSHTransport) TrustHostKey(ctx context.Context, connection Connec
 	if err := file.Sync(); err != nil {
 		return HostKey{}, fmt.Errorf("sync known_hosts: %w", err)
 	}
+	key.Trusted = true
 	return key, nil
 }
 

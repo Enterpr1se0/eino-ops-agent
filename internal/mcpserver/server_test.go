@@ -30,21 +30,41 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspaceShellFound := false
-	taskGetFound := false
+	taskFound := false
 	fileTransferFound := false
+	fileReadFound := false
+	fileEditFound := false
+	historyFound := false
+	skillFound := false
 	backgroundInputs := map[string]bool{"ssh_exec": false, "ssh_run_script": false}
 	for _, registered := range result.Tools {
-		for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list"} {
+		for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_list", "workspace_file_list", "workspace_file_read", "workspace_file_edit", "workspace_file_upload", "workspace_shell", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get"} {
 			if registered.Name == retired {
 				t.Fatalf("retired %s tool remains in the MCP catalog", retired)
 			}
 		}
-		if registered.Name == "workspace_shell" {
-			workspaceShellFound = true
+		if registered.Name == "ssh_file_edit" {
+			fileEditFound = true
 		}
-		if registered.Name == "ssh_task_get" {
-			taskGetFound = true
+		if registered.Name == "ssh_task" {
+			schemaJSON, marshalErr := json.Marshal(registered.InputSchema)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			taskFound = strings.Contains(string(schemaJSON), `"action"`)
+		}
+		if registered.Name == "ssh_file_read" {
+			schemaJSON, marshalErr := json.Marshal(registered.InputSchema)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			fileReadFound = strings.Contains(string(schemaJSON), `"metadata_only"`) && strings.Contains(string(schemaJSON), `"pattern"`)
+		}
+		if registered.Name == "ssh_history" {
+			historyFound = true
+		}
+		if registered.Name == "ops_skill" {
+			skillFound = true
 		}
 		if registered.Name == "ssh_file_transfer" {
 			schemaJSON, marshalErr := json.Marshal(registered.InputSchema)
@@ -61,13 +81,13 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 			backgroundInputs[registered.Name] = strings.Contains(string(schemaJSON), `"background"`)
 		}
 	}
-	if !workspaceShellFound {
-		t.Fatal("workspace_shell is missing from the MCP catalog")
+	if !fileEditFound {
+		t.Fatal("ssh_file_edit is missing from the MCP catalog")
 	}
-	if !taskGetFound || !backgroundInputs["ssh_exec"] || !backgroundInputs["ssh_run_script"] {
-		t.Fatalf("merged background task interface is incomplete: task_get=%v inputs=%#v", taskGetFound, backgroundInputs)
+	if !taskFound || !backgroundInputs["ssh_exec"] || !backgroundInputs["ssh_run_script"] {
+		t.Fatalf("merged background task interface is incomplete: task=%v inputs=%#v", taskFound, backgroundInputs)
 	}
-	if !fileTransferFound {
-		t.Fatal("ssh_file_transfer is missing or has an incomplete MCP schema")
+	if !fileTransferFound || !fileReadFound || !historyFound || !skillFound {
+		t.Fatalf("merged read tools are incomplete: transfer=%v file_read=%v history=%v skill=%v", fileTransferFound, fileReadFound, historyFound, skillFound)
 	}
 }

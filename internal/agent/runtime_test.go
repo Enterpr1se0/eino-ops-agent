@@ -11,10 +11,12 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
+	"eino-ops-agent/internal/policy"
+	"eino-ops-agent/internal/security"
+	"eino-ops-agent/internal/service"
 	"eino-ops-agent/internal/store"
 
 	"github.com/cloudwego/eino/adk"
@@ -120,6 +122,116 @@ func TestProviderRejectsEmptyResponse(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("empty model response was accepted")
+	}
+}
+
+func TestRuntimeReloadAppliesCompleteSystemPromptToExistingConversation(t *testing.T) {
+	type wireMessage struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	requests := make(chan []wireMessage, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Messages []wireMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode model request: %v", err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		requests <- request.Messages
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-prompt\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":null}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-prompt\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime-prompt.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, err := policy.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Model = config.Model{APIKey: "fixture-key", BaseURL: server.URL + "/v1", Name: "fixture-model"}
+	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	firstPrompt := "first complete system prompt"
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations, SystemPrompt: &firstPrompt,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := New(ctx, cfg.Model, svc, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Query(ctx, "same_session", "first turn", nil); err != nil {
+		t.Fatal(err)
+	}
+	assertSystemPrompt := func(want string) {
+		t.Helper()
+		select {
+		case messages := <-requests:
+			for _, message := range messages {
+				if message.Role == "system" {
+					if message.Content != want {
+						t.Fatalf("system prompt = %q, want %q", message.Content, want)
+					}
+					return
+				}
+			}
+			t.Fatalf("model request did not contain a system prompt: %#v", messages)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for model request")
+		}
+	}
+	assertSystemPrompt(firstPrompt)
+
+	secondPrompt := "replacement prompt without the built-in instructions"
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations, SystemPrompt: &secondPrompt,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Query(ctx, "same_session", "second turn", nil); err != nil {
+		t.Fatal(err)
+	}
+	assertSystemPrompt(secondPrompt)
+
+	emptyPrompt := ""
+	if _, err := svc.SaveSystemSettings(ctx, domain.SystemSettingsInput{
+		AgentMaxIterations: domain.DefaultAgentMaxIterations, SystemPrompt: &emptyPrompt,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Query(ctx, "same_session", "third turn", nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case messages := <-requests:
+		for _, message := range messages {
+			if message.Role == "system" && message.Content != "" {
+				t.Fatalf("empty prompt fell back to non-empty system prompt: %q", message.Content)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for model request using empty prompt")
 	}
 }
 
@@ -298,6 +410,48 @@ func TestQueryRetriesEmptyResponseWithoutDuplicatingUserMessage(t *testing.T) {
 	}
 }
 
+func TestQueryInjectsPersistedPlanBeforeCurrentUser(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	_, err = st.ReplaceAgentPlan(ctx, domain.AgentPlan{
+		SessionID: "session_plan_context",
+		Goal:      "Repair the API",
+		Status:    "active",
+		Steps: []domain.AgentPlanStep{
+			{Number: 1, Title: "Inspect logs", Status: "completed", Evidence: "timeout observed"},
+			{Number: 2, Title: "Fix timeout", Status: "in_progress"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{
+		{adk.EventFromMessage(schema.AssistantMessage("continuing the current step", nil), nil, schema.Assistant, "")},
+	}}
+	runtime := &Runtime{runner: runner, store: st}
+	if _, err := runtime.Query(ctx, "session_plan_context", "continue", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, inputs := runner.snapshot()
+	if len(inputs) != 1 || len(inputs[0]) != 2 {
+		t.Fatalf("model inputs = %#v", inputs)
+	}
+	planMessage, userMessage := inputs[0][0], inputs[0][1]
+	if planMessage.Role != schema.System || !strings.Contains(planMessage.Content, "Repair the API") || !strings.Contains(planMessage.Content, `"status":"in_progress"`) || !strings.Contains(planMessage.Content, "untrusted data") {
+		t.Fatalf("plan context = %#v", planMessage)
+	}
+	if strings.Contains(planMessage.Content, "session_plan_context") {
+		t.Fatalf("plan context exposed the internal session id: %s", planMessage.Content)
+	}
+	if userMessage.Role != schema.User || userMessage.Content != "continue" {
+		t.Fatalf("current user message = %#v", userMessage)
+	}
+}
+
 func TestQueryRejectsRepeatedEmptyResponseAndExcludesFailedTurn(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
@@ -375,6 +529,136 @@ func TestQueryDoesNotRetryAfterToolActivityWithoutFinalAnswer(t *testing.T) {
 	}
 }
 
+func TestQueryPersistsOnlyTerminalAssistantOutput(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	toolCall := schema.ToolCall{
+		ID: "call-1", Type: "function",
+		Function: schema.FunctionCall{Name: "ssh_exec", Arguments: `{}`},
+	}
+	preamble := schema.AssistantMessage("I will inspect the host.", []schema.ToolCall{toolCall})
+	preamble.ResponseMeta = &schema.ResponseMeta{FinishReason: "tool_calls"}
+	terminal := schema.AssistantMessage("Host memory is stable.", nil)
+	terminal.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop"}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(preamble, nil, schema.Assistant, ""),
+		adk.EventFromMessage(schema.ToolMessage("tool completed", "call-1", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec"),
+		adk.EventFromMessage(terminal, nil, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st}
+
+	answer, err := runtime.Query(ctx, "session_terminal", "inspect host", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Host memory is stable." {
+		t.Fatalf("answer = %q", answer)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_terminal", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "assistant" || messages[2].Content != answer {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+}
+
+func TestQueryRejectsReasoningOnlyTerminalOutputAfterToolActivity(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	toolCall := schema.ToolCall{
+		ID: "call-1", Type: "function",
+		Function: schema.FunctionCall{Name: "ssh_exec", Arguments: `{}`},
+	}
+	preamble := schema.AssistantMessage("I will inspect the host.", []schema.ToolCall{toolCall})
+	preamble.ResponseMeta = &schema.ResponseMeta{FinishReason: "tool_calls"}
+	reasoningOnly := &schema.Message{
+		Role: schema.Assistant, ReasoningContent: "I have the latest data and will summarize it.",
+		ResponseMeta: &schema.ResponseMeta{FinishReason: "stop"},
+	}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(preamble, nil, schema.Assistant, ""),
+		adk.EventFromMessage(schema.ToolMessage("tool completed", "call-1", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec"),
+		adk.EventFromMessage(reasoningOnly, nil, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st}
+	var emitted []Event
+
+	_, err = runtime.Query(ctx, "session_reasoning_only", "inspect host", func(event Event) {
+		emitted = append(emitted, event)
+	})
+	if !errors.Is(err, ErrEmptyResponse) {
+		t.Fatalf("error = %v", err)
+	}
+	calls, _ := runner.snapshot()
+	if calls != 1 {
+		t.Fatalf("unsafe retry after tool activity: calls = %d", calls)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_reasoning_only", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 || messages[0].Role != "user" || messages[0].Status != "failed" || messages[1].Role != "tool" || messages[2].Role != "reasoning" {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+	for _, event := range emitted {
+		if event.Type == "done" {
+			t.Fatalf("reasoning-only query emitted done: %#v", emitted)
+		}
+	}
+}
+
+func TestQueryStreamingPersistsOnlyTerminalAssistantOutput(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	toolCall := schema.ToolCall{
+		ID: "call-1", Type: "function",
+		Function: schema.FunctionCall{Name: "ssh_exec", Arguments: `{}`},
+	}
+	preambleStream := schema.StreamReaderFromArray([]*schema.Message{
+		{Role: schema.Assistant, Content: "I will "},
+		{Role: schema.Assistant, Content: "inspect.", ToolCalls: []schema.ToolCall{toolCall}, ResponseMeta: &schema.ResponseMeta{FinishReason: "tool_calls"}},
+	})
+	terminalStream := schema.StreamReaderFromArray([]*schema.Message{
+		{Role: schema.Assistant, ReasoningContent: "The command completed successfully."},
+		{Role: schema.Assistant, Content: "Host memory "},
+		{Role: schema.Assistant, Content: "is stable.", ResponseMeta: &schema.ResponseMeta{FinishReason: "stop"}},
+	})
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(nil, preambleStream, schema.Assistant, ""),
+		adk.EventFromMessage(schema.ToolMessage("tool completed", "call-1", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec"),
+		adk.EventFromMessage(nil, terminalStream, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st}
+
+	answer, err := runtime.Query(ctx, "session_stream_terminal", "inspect host", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Host memory is stable." {
+		t.Fatalf("answer = %q", answer)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_stream_terminal", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 4 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "reasoning" || messages[3].Role != "assistant" || messages[3].Content != answer {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+}
+
 func TestNextQueryReceivesToolEvidenceFromFailedTurn(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
@@ -436,8 +720,42 @@ func TestBuildModelContextPreservesTurnBoundaries(t *testing.T) {
 	if messages[5].Content != incompleteTurnContext {
 		t.Fatalf("incomplete turn marker = %q", messages[5].Content)
 	}
-	if stats.StoredTurns != 3 || stats.IncludedTurns != 3 || stats.ToolResults != 2 || stats.Truncated {
+	if stats.StoredTurns != 3 || stats.IncludedTurns != 3 || stats.ToolResults != 2 {
 		t.Fatalf("context stats = %#v", stats)
+	}
+}
+
+func TestBuildModelContextPreservesCompleteToolEvidence(t *testing.T) {
+	first := "first-start\n" + strings.Repeat("甲", 50_000) + "\nfirst-end"
+	second := "second-start\n" + strings.Repeat("乙", 50_000) + "\nsecond-end"
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "inspect complete output", Status: "completed"},
+		{Role: "tool", ToolName: "ssh_exec", Content: first, Status: "completed"},
+		{Role: "tool", ToolName: "workspace_shell", Content: second, Status: "completed"},
+	}
+	messages, stats := buildModelContext(history, "continue")
+	if len(messages) != 3 {
+		t.Fatalf("model messages = %#v", messages)
+	}
+	evidence := messages[1].Content
+	for _, expected := range []string{first, second} {
+		if !strings.Contains(evidence, expected) {
+			t.Fatalf("complete tool evidence was not preserved: evidence_bytes=%d expected_bytes=%d", len(evidence), len(expected))
+		}
+	}
+	if stats.ToolResults != 2 || stats.IncludedTurns != 1 {
+		t.Fatalf("context stats = %#v", stats)
+	}
+}
+
+func TestBuildModelContextExcludesUIToolDisplayMetadata(t *testing.T) {
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "inspect host", Status: "completed"},
+		{Role: "tool", ToolName: "ssh_host_inspect", Content: `{"status":"completed","hostname":"demo","_display":{"arguments":{"host_id":"host-demo"},"request":{"host_id":"host-demo","program":"uname"}}}`, Status: "completed"},
+	}
+	messages, _ := buildModelContext(history, "continue")
+	if len(messages) != 3 || strings.Contains(messages[1].Content, "_display") || strings.Contains(messages[1].Content, "arguments") || !strings.Contains(messages[1].Content, `"hostname":"demo"`) {
+		t.Fatalf("UI-only Tool display metadata leaked into model context: %#v", messages)
 	}
 }
 
@@ -485,19 +803,8 @@ func TestBuildMultimodalModelContextIncludesAllImages(t *testing.T) {
 			t.Fatalf("image part %d data = %q, err = %v", index, decoded, err)
 		}
 	}
-	if stats.Images != 3 || stats.ImageBytes != int64(len(historyImage)+len(currentImageOne)+len(currentImageTwo)) || stats.Truncated {
+	if stats.Images != 3 || stats.ImageBytes != int64(len(historyImage)+len(currentImageOne)+len(currentImageTwo)) {
 		t.Fatalf("multimodal context stats = %#v", stats)
-	}
-}
-
-func TestTruncateModelTextKeepsValidUTF8AndBothEnds(t *testing.T) {
-	value := strings.Repeat("开头", 100) + " middle " + strings.Repeat("结尾", 100)
-	truncated := truncateModelText(value, 180)
-	if !utf8.ValidString(truncated) || len(truncated) > 180 {
-		t.Fatalf("invalid truncation length=%d value=%q", len(truncated), truncated)
-	}
-	if !strings.HasPrefix(truncated, "开头") || !strings.HasSuffix(truncated, "结尾") || !strings.Contains(truncated, "truncated") {
-		t.Fatalf("truncation did not preserve both ends: %q", truncated)
 	}
 }
 
@@ -537,5 +844,20 @@ func TestToolHistoryIsEnrichedWithCompleteAuditedCommand(t *testing.T) {
 	nested := runtime.enrichToolContent(ctx, `{"task":{"id":"task_display","run_id":"run_display","status":"failed"},"result":{"run_id":"run_display","status":"failed","stderr":"command failed"}}`)
 	if !strings.Contains(nested, `"_display"`) || !strings.Contains(nested, `"stderr":"command failed"`) {
 		t.Fatalf("nested task result was not enriched without losing stderr: %s", nested)
+	}
+	failedBeforeRun := runtime.enrichToolContent(ctx, `{"ok":false,"status":"failed","message":"host is unavailable"}`, &capturedToolCall{
+		Name:      "ssh_host_inspect",
+		Arguments: `{"host_id":"host_display"}`,
+	})
+	if !strings.Contains(failedBeforeRun, `"arguments":{"host_id":"host_display"}`) || !strings.Contains(failedBeforeRun, `"tool_name":"ssh_host_inspect"`) {
+		t.Fatalf("tool call arguments were not preserved before an audit run existed: %s", failedBeforeRun)
+	}
+	workspaceCall := runtime.enrichToolContent(ctx, `{"ok":false,"status":"failed"}`, &capturedToolCall{
+		Name:      "workspace_file_read",
+		Arguments: `{"path":"README.md"}`,
+		Workspace: "workspace-demo",
+	})
+	if !strings.Contains(workspaceCall, `"workspace_id":"workspace-demo"`) {
+		t.Fatalf("conversation workspace target was not preserved: %s", workspaceCall)
 	}
 }

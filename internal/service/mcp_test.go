@@ -61,9 +61,11 @@ func TestManagedMCPServerInjectsNamespacedToolAndCanBeDisabled(t *testing.T) {
 	if !ok {
 		t.Fatalf("MCP tool is not invokable: %T", loaded[0])
 	}
-	output, err := invokable.InvokableRun(context.Background(), `{"message":"hello"}`)
-	if err != nil || !strings.Contains(output, "hello") {
-		t.Fatalf("MCP invocation output=%q err=%v", output, err)
+	largeMessage := "mcp-start-" + strings.Repeat("m", 200<<10) + "-mcp-end"
+	arguments, _ := json.Marshal(map[string]string{"message": largeMessage})
+	output, err := invokable.InvokableRun(context.Background(), string(arguments))
+	if err != nil || !strings.Contains(output, largeMessage) {
+		t.Fatalf("complete MCP invocation output was not preserved: bytes=%d err=%v", len(output), err)
 	}
 
 	server, err = svc.SetMCPServerEnabled(context.Background(), server.ID, false, "test")
@@ -75,6 +77,60 @@ func TestManagedMCPServerInjectsNamespacedToolAndCanBeDisabled(t *testing.T) {
 	}
 	if _, err := invokable.InvokableRun(context.Background(), `{"message":"again"}`); err == nil || !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("stale MCP wrapper remained callable: %v", err)
+	}
+}
+
+func TestMCPToolErrorReturnsStructuredEnvelope(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	t.Cleanup(svc.CloseMCPServers)
+	remote := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1.0.0"}, nil)
+	mcp.AddTool(remote, &mcp.Tool{Name: "always_fail", Description: "Return a tool-level error."},
+		func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{Text: "fixture provider failure"}},
+			}, nil, nil
+		})
+	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return remote }, nil)
+	httpServer := httptest.NewServer(streamable)
+	defer httpServer.Close()
+
+	server, err := svc.SaveMCPServer(context.Background(), domain.MCPServerInput{
+		Name: "Failing MCP", Transport: domain.MCPTransportStreamableHTTP, URL: httpServer.URL, Enabled: true,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := svc.MCPTools()
+	if server.Status != "ready" || len(tools) != 1 {
+		t.Fatalf("unexpected MCP runtime: server=%#v tools=%d", server, len(tools))
+	}
+	invokable, ok := tools[0].(tool.InvokableTool)
+	if !ok {
+		t.Fatalf("MCP tool is not invokable: %T", tools[0])
+	}
+	output, err := invokable.InvokableRun(context.Background(), `{}`)
+	if err != nil {
+		t.Fatalf("MCP tool-level error escaped as a Go error: %v", err)
+	}
+	var envelope struct {
+		ToolVersion        string             `json:"tool_version"`
+		OK                 bool               `json:"ok"`
+		Status             string             `json:"status"`
+		Code               string             `json:"code"`
+		Message            string             `json:"message"`
+		NextAction         string             `json:"next_action"`
+		ContentIsUntrusted bool               `json:"content_is_untrusted"`
+		Result             mcp.CallToolResult `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.ToolVersion != "1.1" || envelope.OK || envelope.Status != "failed" || envelope.Code != "provider_failed" || !envelope.ContentIsUntrusted {
+		t.Fatalf("unexpected MCP failure envelope: %#v", envelope)
+	}
+	if envelope.Message == "" || envelope.NextAction == "" || !envelope.Result.IsError || len(envelope.Result.Content) != 1 {
+		t.Fatalf("MCP failure evidence was not preserved: %#v", envelope)
 	}
 }
 

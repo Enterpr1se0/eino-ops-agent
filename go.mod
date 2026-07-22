@@ -7,6 +7,7 @@ require (
 	github.com/cloudwego/eino v0.9.12
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/eino-contrib/jsonschema v1.0.3
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/pkg/sftp v1.13.11
 	golang.org/x/crypto v0.54.0

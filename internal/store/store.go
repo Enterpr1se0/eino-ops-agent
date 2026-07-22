@@ -17,7 +17,24 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound              = errors.New("not found")
+	ErrAlreadyExists         = errors.New("already exists")
+	ErrInvalidPlanTransition = errors.New("invalid plan transition")
+)
+
+type PlanTransitionError struct {
+	StepNumber int
+	Status     string
+}
+
+func (e *PlanTransitionError) Error() string {
+	return fmt.Sprintf("invalid plan transition: step %d is %s, not in_progress", e.StepNumber, e.Status)
+}
+
+func (e *PlanTransitionError) Unwrap() error {
+	return ErrInvalidPlanTransition
+}
 
 type Store struct {
 	db *sql.DB
@@ -53,6 +70,21 @@ func (s *Store) AdminPasswordHash(ctx context.Context) (string, error) {
 		return "", ErrNotFound
 	}
 	return hash, err
+}
+
+func (s *Store) CreateAdminPasswordHash(ctx context.Context, hash string) error {
+	result, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO admin_credentials(id,password_hash,updated_at) VALUES(1,?,?)`, hash, formatTime(time.Now().UTC()))
+	if err != nil {
+		return err
+	}
+	created, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if created != 1 {
+		return ErrAlreadyExists
+	}
+	return nil
 }
 
 func (s *Store) SetAdminPasswordHash(ctx context.Context, hash string) error {
@@ -96,30 +128,6 @@ func (s *Store) DeleteWebSession(ctx context.Context, tokenHash string) error {
 func (s *Store) DeleteAllWebSessions(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM web_sessions`)
 	return err
-}
-
-func (s *Store) CreateFileOperation(ctx context.Context, operation domain.FileOperation) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO file_operations(id,run_id,host_id,path,backup_path,before_sha256,after_sha256,validator,status,created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?)`, operation.ID, operation.RunID, operation.HostID, operation.Path, operation.BackupPath,
-		operation.BeforeSHA256, operation.AfterSHA256, operation.Validator, operation.Status, formatTime(operation.CreatedAt))
-	return err
-}
-
-func (s *Store) GetFileOperation(ctx context.Context, id string) (domain.FileOperation, error) {
-	var operation domain.FileOperation
-	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id,run_id,host_id,path,backup_path,before_sha256,after_sha256,validator,status,created_at FROM file_operations WHERE id=?`, id).Scan(
-		&operation.ID, &operation.RunID, &operation.HostID, &operation.Path, &operation.BackupPath, &operation.BeforeSHA256,
-		&operation.AfterSHA256, &operation.Validator, &operation.Status, &created,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.FileOperation{}, ErrNotFound
-	}
-	if err != nil {
-		return domain.FileOperation{}, err
-	}
-	operation.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	return operation, nil
 }
 
 func (s *Store) UpsertTask(ctx context.Context, task domain.Task, result domain.ExecResult, taskError string) error {
@@ -251,7 +259,12 @@ func (s *Store) UpdateWorkspace(ctx context.Context, workspace domain.Workspace)
 }
 
 func (s *Store) DeleteWorkspace(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM workspaces WHERE id=?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=?`, id)
 	if err != nil {
 		return err
 	}
@@ -259,7 +272,10 @@ func (s *Store) DeleteWorkspace(ctx context.Context, id string) error {
 	if count == 0 {
 		return ErrNotFound
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `UPDATE chat_sessions SET workspace_id='' WHERE workspace_id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func scanWorkspace(row scanner) (domain.Workspace, error) {
@@ -312,7 +328,6 @@ CREATE TABLE IF NOT EXISTS runs (
   stderr_redacted TEXT NOT NULL DEFAULT '',
   stdout_cipher TEXT NOT NULL DEFAULT '',
   stderr_cipher TEXT NOT NULL DEFAULT '',
-  truncated INTEGER NOT NULL DEFAULT 0,
   error TEXT NOT NULL DEFAULT '',
   ai_review_json TEXT NOT NULL DEFAULT '',
   started_at TEXT NOT NULL,
@@ -347,6 +362,12 @@ CREATE TABLE IF NOT EXISTS audit_events (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  session_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS chat_messages (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -405,21 +426,6 @@ CREATE TABLE IF NOT EXISTS session_approval_grants (
 	  expires_at TEXT NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at);
-CREATE TABLE IF NOT EXISTS file_operations (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  host_id TEXT NOT NULL,
-  path TEXT NOT NULL,
-  backup_path TEXT NOT NULL DEFAULT '',
-  before_sha256 TEXT NOT NULL DEFAULT '',
-  after_sha256 TEXT NOT NULL DEFAULT '',
-  validator TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  FOREIGN KEY(run_id) REFERENCES runs(id),
-  FOREIGN KEY(host_id) REFERENCES hosts(id)
-);
-CREATE INDEX IF NOT EXISTS idx_file_operations_host_created ON file_operations(host_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL DEFAULT '',
@@ -456,6 +462,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_model_providers_active ON model_providers(
 CREATE TABLE IF NOT EXISTS system_settings (
   id INTEGER PRIMARY KEY CHECK(id=1),
   agent_max_iterations INTEGER NOT NULL,
+  system_prompt TEXT DEFAULT NULL,
   approval_explanations_enabled INTEGER NOT NULL DEFAULT 1,
   subagent_model_provider_id TEXT NOT NULL DEFAULT '',
   subagent_timeout_seconds INTEGER NOT NULL DEFAULT 30,
@@ -505,18 +512,23 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
   proxy_password_cipher TEXT NOT NULL DEFAULT '',
   timeout_seconds INTEGER NOT NULL DEFAULT 20,
   max_results INTEGER NOT NULL DEFAULT 10,
-  extract_max_content_kib INTEGER NOT NULL DEFAULT 32,
-  extract_max_total_kib INTEGER NOT NULL DEFAULT 128,
   updated_at TEXT NOT NULL
 );
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO chat_sessions(session_id,workspace_id,created_at,updated_at)
+SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY session_id`); err != nil {
+		return err
+	}
 	if err := s.migrateManagedWorkspaces(ctx); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name IN ('ssh_approval_status','ssh_task_start','ssh_task_status','ssh_task_tail','ssh_task_list')`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS file_operations`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name IN ('ssh_approval_status','ssh_task_start','ssh_task_status','ssh_task_tail','ssh_task_list','ssh_file_restore','ssh_file_create','workspace_file_create','ssh_file_search','workspace_file_search','workspace_list')`); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(id,agent_max_iterations,updated_at) VALUES(1,?,?)`,
@@ -540,9 +552,8 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		`ALTER TABLE model_providers ADD COLUMN proxy_url TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN proxy_password_cipher TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE web_search_settings ADD COLUMN extract_max_content_kib INTEGER NOT NULL DEFAULT 32`,
-		`ALTER TABLE web_search_settings ADD COLUMN extract_max_total_kib INTEGER NOT NULL DEFAULT 128`,
 		`ALTER TABLE system_settings ADD COLUMN chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]'`,
+		`ALTER TABLE system_settings ADD COLUMN system_prompt TEXT DEFAULT NULL`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
@@ -659,7 +670,6 @@ func (s *Store) migrateNativeOnlyHosts(ctx context.Context) error {
 	defer tx.Rollback()
 	for _, statement := range []string{
 		`DELETE FROM approvals`,
-		`DELETE FROM file_operations`,
 		`DELETE FROM tasks`,
 		`DELETE FROM runs`,
 		`DELETE FROM hosts`,
@@ -904,15 +914,17 @@ func (s *Store) GetSystemSettings(ctx context.Context) (domain.SystemSettings, e
 	var settings domain.SystemSettings
 	var explanationsEnabled int
 	var imageTypesJSON string
+	var systemPrompt sql.NullString
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,
+	err := s.db.QueryRowContext(ctx, `SELECT agent_max_iterations,system_prompt,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,
 chat_image_allowed_types_json,workspace_shell_mode,updated_at FROM system_settings WHERE id=1`).Scan(
-		&settings.AgentMaxIterations, &explanationsEnabled, &settings.SubagentModelProviderID, &settings.SubagentTimeoutSeconds,
+		&settings.AgentMaxIterations, &systemPrompt, &explanationsEnabled, &settings.SubagentModelProviderID, &settings.SubagentTimeoutSeconds,
 		&imageTypesJSON, &settings.WorkspaceShellMode, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.SystemSettings{
 			AgentMaxIterations: domain.DefaultAgentMaxIterations, ApprovalExplanationsEnabled: true,
+			SystemPrompt: domain.DefaultSystemPrompt, DefaultSystemPrompt: domain.DefaultSystemPrompt,
 			SubagentTimeoutSeconds: domain.DefaultSubagentTimeoutSeconds, WorkspaceShellMode: domain.WorkspaceShellModeSandbox,
 			ChatImageAllowedTypes: append([]string(nil), domain.DefaultChatImageAllowedTypes...),
 		}, nil
@@ -921,6 +933,12 @@ chat_image_allowed_types_json,workspace_shell_mode,updated_at FROM system_settin
 		return domain.SystemSettings{}, err
 	}
 	settings.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	settings.DefaultSystemPrompt = domain.DefaultSystemPrompt
+	if systemPrompt.Valid {
+		settings.SystemPrompt = systemPrompt.String
+	} else {
+		settings.SystemPrompt = domain.DefaultSystemPrompt
+	}
 	settings.ApprovalExplanationsEnabled = explanationsEnabled != 0
 	if err := json.Unmarshal([]byte(imageTypesJSON), &settings.ChatImageAllowedTypes); err != nil || len(settings.ChatImageAllowedTypes) == 0 {
 		settings.ChatImageAllowedTypes = append([]string(nil), domain.DefaultChatImageAllowedTypes...)
@@ -937,14 +955,15 @@ func (s *Store) SaveSystemSettings(ctx context.Context, settings domain.SystemSe
 	if err != nil {
 		return domain.SystemSettings{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,updated_at) VALUES(1,?,?,?,?,?,?,?)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO system_settings(id,agent_max_iterations,system_prompt,approval_explanations_enabled,subagent_model_provider_id,subagent_timeout_seconds,chat_image_allowed_types_json,workspace_shell_mode,updated_at) VALUES(1,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET agent_max_iterations=excluded.agent_max_iterations,
+system_prompt=excluded.system_prompt,
 approval_explanations_enabled=excluded.approval_explanations_enabled,
 subagent_model_provider_id=excluded.subagent_model_provider_id,
 subagent_timeout_seconds=excluded.subagent_timeout_seconds,
 chat_image_allowed_types_json=excluded.chat_image_allowed_types_json,
 workspace_shell_mode=excluded.workspace_shell_mode,updated_at=excluded.updated_at`,
-		settings.AgentMaxIterations, boolInt(settings.ApprovalExplanationsEnabled), settings.SubagentModelProviderID,
+		settings.AgentMaxIterations, settings.SystemPrompt, boolInt(settings.ApprovalExplanationsEnabled), settings.SubagentModelProviderID,
 		settings.SubagentTimeoutSeconds, string(imageTypesJSON), settings.WorkspaceShellMode, formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.SystemSettings{}, err
@@ -956,16 +975,15 @@ func (s *Store) GetWebSearchSettings(ctx context.Context) (domain.WebSearchSetti
 	var settings domain.WebSearchSettings
 	var enabled int
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,extract_max_content_kib,extract_max_total_kib,updated_at
+	err := s.db.QueryRowContext(ctx, `SELECT enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,updated_at
 FROM web_search_settings WHERE id=1`).Scan(
 		&enabled, &settings.Provider, &settings.BaseURL, &settings.APIKeyCipher, &settings.ProxyURL, &settings.ProxyUsername,
-		&settings.ProxyPasswordCipher, &settings.TimeoutSeconds, &settings.MaxResults, &settings.ExtractMaxContentKiB, &settings.ExtractMaxTotalKiB, &updated,
+		&settings.ProxyPasswordCipher, &settings.TimeoutSeconds, &settings.MaxResults, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.WebSearchSettings{
 			Provider: "tavily", BaseURL: domain.DefaultWebSearchBaseURL,
 			TimeoutSeconds: domain.DefaultWebSearchTimeoutSeconds, MaxResults: domain.DefaultWebSearchMaxResults,
-			ExtractMaxContentKiB: domain.DefaultWebExtractMaxContentKiB, ExtractMaxTotalKiB: domain.DefaultWebExtractMaxTotalKiB,
 		}, nil
 	}
 	if err != nil {
@@ -978,14 +996,14 @@ FROM web_search_settings WHERE id=1`).Scan(
 
 func (s *Store) SaveWebSearchSettings(ctx context.Context, settings domain.WebSearchSettings) (domain.WebSearchSettings, error) {
 	settings.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO web_search_settings(id,enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,extract_max_content_kib,extract_max_total_kib,updated_at)
-VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO web_search_settings(id,enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,updated_at)
+VALUES(1,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,provider=excluded.provider,base_url=excluded.base_url,
 api_key_cipher=excluded.api_key_cipher,proxy_url=excluded.proxy_url,proxy_username=excluded.proxy_username,
 proxy_password_cipher=excluded.proxy_password_cipher,timeout_seconds=excluded.timeout_seconds,max_results=excluded.max_results,
-extract_max_content_kib=excluded.extract_max_content_kib,extract_max_total_kib=excluded.extract_max_total_kib,updated_at=excluded.updated_at`,
+updated_at=excluded.updated_at`,
 		boolInt(settings.Enabled), settings.Provider, settings.BaseURL, settings.APIKeyCipher, settings.ProxyURL, settings.ProxyUsername,
-		settings.ProxyPasswordCipher, settings.TimeoutSeconds, settings.MaxResults, settings.ExtractMaxContentKiB, settings.ExtractMaxTotalKiB, formatTime(settings.UpdatedAt))
+		settings.ProxyPasswordCipher, settings.TimeoutSeconds, settings.MaxResults, formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.WebSearchSettings{}, err
 	}
@@ -1042,7 +1060,6 @@ func (s *Store) DeleteHost(ctx context.Context, id string) error {
 	}{
 		{`DELETE FROM session_approval_grants WHERE session_id IN (SELECT DISTINCT session_id FROM runs WHERE host_id=? AND session_id<>'')`, []any{id}},
 		{`DELETE FROM approvals WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
-		{`DELETE FROM file_operations WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
 		{`DELETE FROM tasks WHERE host_id=? OR run_id IN (SELECT id FROM runs WHERE host_id=?)`, []any{id, id}},
 		{`DELETE FROM runs WHERE host_id=?`, []any{id}},
 	}
@@ -1098,28 +1115,30 @@ func (s *Store) UpdateRun(ctx context.Context, run domain.Run) error {
 		completed = formatTime(run.CompletedAt)
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE runs SET status=?,exit_code=?,stdout_redacted=?,stderr_redacted=?,
-stdout_cipher=?,stderr_cipher=?,truncated=?,error=?,completed_at=? WHERE id=?`, run.Status, run.ExitCode,
-		run.StdoutRedacted, run.StderrRedacted, run.StdoutCipher, run.StderrCipher, boolInt(run.Truncated),
-		run.Error, completed, run.ID)
+stdout_cipher=?,stderr_cipher=?,error=?,completed_at=? WHERE id=?`, run.Status, run.ExitCode,
+		run.StdoutRedacted, run.StderrRedacted, run.StdoutCipher, run.StderrCipher, run.Error, completed, run.ID)
 	return err
 }
 
 func (s *Store) GetRun(ctx context.Context, id string) (domain.Run, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
-exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,truncated,error,ai_review_json,started_at,completed_at
+exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
 FROM runs WHERE id=?`, id)
 	return scanRun(row)
 }
 
 func (s *Store) SearchRuns(ctx context.Context, query, hostID string, limit int) ([]domain.Run, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
 	pattern := "%" + strings.ReplaceAll(query, "%", "\\%") + "%"
-	rows, err := s.db.QueryContext(ctx, `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
-exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,truncated,error,ai_review_json,started_at,completed_at
+	statement := `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
+exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
 FROM runs WHERE (?='' OR host_id=?) AND (?='' OR request_json LIKE ? ESCAPE '\' OR stdout_redacted LIKE ? ESCAPE '\'
-OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC LIMIT ?`, hostID, hostID, query, pattern, pattern, pattern, limit)
+		OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC`
+	arguments := []any{hostID, hostID, query, pattern, pattern, pattern}
+	if limit > 0 {
+		statement += " LIMIT ?"
+		arguments = append(arguments, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, statement, arguments...)
 	if err != nil {
 		return nil, err
 	}
@@ -1139,17 +1158,15 @@ func scanRun(row scanner) (domain.Run, error) {
 	var run domain.Run
 	var started string
 	var completed sql.NullString
-	var truncated int
 	err := row.Scan(&run.ID, &run.SessionID, &run.HostID, &run.RequestJSON, &run.RequestCipher, &run.RequestDigest, &run.Risk,
 		&run.Status, &run.ExitCode, &run.StdoutRedacted, &run.StderrRedacted, &run.StdoutCipher,
-		&run.StderrCipher, &truncated, &run.Error, &run.AIReviewJSON, &started, &completed)
+		&run.StderrCipher, &run.Error, &run.AIReviewJSON, &started, &completed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Run{}, ErrNotFound
 	}
 	if err != nil {
 		return domain.Run{}, err
 	}
-	run.Truncated = truncated != 0
 	if run.AIReviewJSON != "" {
 		var review domain.CommandReview
 		if json.Unmarshal([]byte(run.AIReviewJSON), &review) == nil {
@@ -1409,8 +1426,14 @@ func (s *Store) appendChatMessageWithAttachments(ctx context.Context, sessionID,
 		return "", err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO chat_sessions(session_id,workspace_id,created_at,updated_at) VALUES(?,?,?,?)`, sessionID, "", now, now); err != nil {
+		return "", err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO chat_messages(id,session_id,role,content,tool_name,status,created_at)
 VALUES(?,?,?,?,?,?,?)`, id, sessionID, role, content, toolName, status, now); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE chat_sessions SET updated_at=? WHERE session_id=?`, now, sessionID); err != nil {
 		return "", err
 	}
 	for _, attachment := range attachments {
@@ -1519,7 +1542,7 @@ func (s *Store) AdvanceAgentPlan(ctx context.Context, sessionID string, stepNumb
 		return domain.AgentPlan{}, err
 	}
 	if currentStatus != "in_progress" {
-		return domain.AgentPlan{}, fmt.Errorf("invalid plan transition: step %d is %s, not in_progress", stepNumber, currentStatus)
+		return domain.AgentPlan{}, &PlanTransitionError{StepNumber: stepNumber, Status: currentStatus}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE agent_plan_steps SET status=?,evidence=?,updated_at=? WHERE session_id=? AND step_number=?`,
 		status, evidence, formatTime(now), sessionID, stepNumber); err != nil {
@@ -1565,57 +1588,50 @@ func (s *Store) ListChatModelMessages(ctx context.Context, sessionID string, lim
 // ListChatContextMessages returns the persisted, provider-relevant transcript.
 // Reasoning is deliberately excluded, while tool evidence and failed turns are
 // retained so the next model run can recover operational state.
-func (s *Store) ListChatContextMessages(ctx context.Context, sessionID string, limit int) ([]domain.ChatMessage, bool, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 500
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,role,content,tool_name,status,created_at FROM (
-SELECT id,role,content,tool_name,status,created_at FROM chat_messages
+func (s *Store) ListChatContextMessages(ctx context.Context, sessionID string) ([]domain.ChatMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,role,content,tool_name,status,created_at FROM chat_messages
 WHERE session_id=? AND role IN ('user','assistant','tool') AND status IN ('completed','failed')
-ORDER BY created_at DESC LIMIT ?)
-ORDER BY created_at`, sessionID, limit+1)
+ORDER BY created_at`, sessionID)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	defer rows.Close()
-	result := make([]domain.ChatMessage, 0, limit+1)
+	result := make([]domain.ChatMessage, 0)
 	for rows.Next() {
 		var message domain.ChatMessage
 		var created string
 		if err := rows.Scan(&message.ID, &message.Role, &message.Content, &message.ToolName, &message.Status, &created); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		message.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		result = append(result, message)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if err := rows.Close(); err != nil {
-		return nil, false, err
-	}
-	truncated := len(result) > limit
-	if truncated {
-		result = result[len(result)-limit:]
+		return nil, err
 	}
 	if err := s.loadChatAttachments(ctx, result, true); err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return result, truncated, nil
+	return result, nil
 }
 
 func (s *Store) listChatMessages(ctx context.Context, sessionID string, limit int, modelOnly bool) ([]domain.ChatMessage, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
 	filter := ""
 	if modelOnly {
 		filter = " AND role IN ('user','assistant') AND status='completed'"
 	}
-	query := `SELECT id,role,content,tool_name,status,created_at FROM (
+	query := `SELECT id,role,content,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at`
+	args := []any{sessionID}
+	if limit > 0 {
+		query = `SELECT id,role,content,tool_name,status,created_at FROM (
 SELECT id,role,content,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at DESC LIMIT ?)
 ORDER BY created_at`
-	rows, err := s.db.QueryContext(ctx, query, sessionID, limit)
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1690,19 +1706,61 @@ WHERE attachments.id=? AND messages.session_id=?`, attachmentID, sessionID).Scan
 	return attachment, err
 }
 
+func (s *Store) CreateChatSession(ctx context.Context, sessionID, workspaceID string) (domain.ChatSession, error) {
+	now := formatTime(time.Now().UTC())
+	result, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO chat_sessions(session_id,workspace_id,created_at,updated_at) VALUES(?,?,?,?)`, sessionID, workspaceID, now, now)
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	created, err := result.RowsAffected()
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	if created != 1 {
+		return domain.ChatSession{}, ErrAlreadyExists
+	}
+	return s.GetChatSession(ctx, sessionID)
+}
+
+func (s *Store) GetChatSession(ctx context.Context, sessionID string) (domain.ChatSession, error) {
+	var session domain.ChatSession
+	var updated string
+	err := s.db.QueryRowContext(ctx, `SELECT session_id,workspace_id,updated_at FROM chat_sessions WHERE session_id=?`, sessionID).Scan(&session.ID, &session.WorkspaceID, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ChatSession{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	session.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return session, nil
+}
+
+func (s *Store) SetChatSessionWorkspace(ctx context.Context, sessionID, workspaceID string) (domain.ChatSession, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE chat_sessions SET workspace_id=?,updated_at=? WHERE session_id=?`, workspaceID, formatTime(time.Now().UTC()), sessionID)
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return domain.ChatSession{}, ErrNotFound
+	}
+	return s.GetChatSession(ctx, sessionID)
+}
+
 func (s *Store) ListChatSessions(ctx context.Context, limit int) ([]domain.ChatSession, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT messages.session_id,
+SELECT sessions.session_id,
   COALESCE(NULLIF((SELECT trim(substr(first.content,1,80)) FROM chat_messages AS first
-    WHERE first.session_id=messages.session_id AND first.role='user'
-    ORDER BY first.created_at ASC LIMIT 1),''),'Image') AS title,
-  count(*),max(messages.created_at)
-FROM chat_messages AS messages
-GROUP BY messages.session_id
-ORDER BY max(messages.created_at) DESC
+    WHERE first.session_id=sessions.session_id AND first.role='user'
+    ORDER BY first.created_at ASC LIMIT 1),''),'New conversation') AS title,
+  sessions.workspace_id,
+  (SELECT count(*) FROM chat_messages AS messages WHERE messages.session_id=sessions.session_id),
+  sessions.updated_at
+FROM chat_sessions AS sessions
+ORDER BY sessions.updated_at DESC
 LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -1712,7 +1770,7 @@ LIMIT ?`, limit)
 	for rows.Next() {
 		var session domain.ChatSession
 		var updated string
-		if err := rows.Scan(&session.ID, &session.Title, &session.MessageCount, &updated); err != nil {
+		if err := rows.Scan(&session.ID, &session.Title, &session.WorkspaceID, &session.MessageCount, &updated); err != nil {
 			return nil, err
 		}
 		session.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
@@ -1727,13 +1785,16 @@ func (s *Store) DeleteChatSession(ctx context.Context, sessionID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `DELETE FROM chat_messages WHERE session_id=?`, sessionID)
+	result, err := tx.ExecContext(ctx, `DELETE FROM chat_sessions WHERE session_id=?`, sessionID)
 	if err != nil {
 		return err
 	}
 	count, _ := result.RowsAffected()
 	if count == 0 {
 		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chat_messages WHERE session_id=?`, sessionID); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM checkpoints WHERE id=?`, sessionID); err != nil {
 		return err

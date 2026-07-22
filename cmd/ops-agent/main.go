@@ -37,17 +37,17 @@ import (
 const version = "0.1.0"
 
 type application struct {
-	config  config.Config
-	store   *store.Store
-	service *service.Service
-	agent   *agent.Runtime
+	config    config.Config
+	store     *store.Store
+	service   *service.Service
+	agent     *agent.Runtime
+	startedAt time.Time
 }
 
 type serveOptions struct {
-	QuickStart        bool
-	ConfigPath        string
-	ConfigCreated     bool
-	GeneratedPassword string
+	QuickStart    bool
+	ConfigPath    string
+	ConfigCreated bool
 }
 
 func main() {
@@ -97,23 +97,10 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer app.store.Close()
 	defer app.service.CloseMCPServers()
-	generatedPassword := ""
-	if quickStart && app.config.WebAuth.BootstrapPassword == "" {
-		if _, err := app.store.AdminPasswordHash(ctx); errors.Is(err, store.ErrNotFound) {
-			generatedPassword, err = security.GenerateAdminPassword()
-			if err != nil {
-				return fmt.Errorf("generate initial administrator password: %w", err)
-			}
-			app.config.WebAuth.BootstrapPassword = generatedPassword
-		} else if err != nil {
-			return fmt.Errorf("read administrator password state: %w", err)
-		}
-	}
-
 	switch args[0] {
 	case "serve":
 		return serve(ctx, app, serveOptions{
-			QuickStart: quickStart, ConfigPath: configPath, ConfigCreated: configCreated, GeneratedPassword: generatedPassword,
+			QuickStart: quickStart, ConfigPath: configPath, ConfigCreated: configCreated,
 		})
 	case "mcp":
 		return mcpserver.New(app.service, version).Run(ctx)
@@ -171,7 +158,7 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 		return nil, err
 	}
 	slog.InfoContext(ctx, "application initialized", "component", "server", "duration_ms", time.Since(started).Milliseconds(), "agent_available", runtime.Available())
-	return &application{config: cfg, store: st, service: svc, agent: runtime}, nil
+	return &application{config: cfg, store: st, service: svc, agent: runtime, startedAt: started.UTC()}, nil
 }
 
 func prepareQuickStart() (string, bool, error) {
@@ -212,11 +199,14 @@ func serve(ctx context.Context, app *application, options serveOptions) error {
 	}
 	defer listener.Close()
 	webAuth := security.NewWebAuth(app.store, app.config.WebAuth.SessionTTL)
-	if err := webAuth.Initialize(ctx, app.config.WebAuth.BootstrapPassword); err != nil {
-		return fmt.Errorf("initialize web authentication: %w", err)
-	}
 	server := &http.Server{
-		Addr: app.config.ListenAddress, Handler: httpapi.New(app.service, app.agent, webAuth, app.config.WebAuth.SecureCookies).Handler(),
+		Addr: app.config.ListenAddress,
+		Handler: httpapi.New(app.service, app.agent, webAuth, httpapi.Options{
+			SecureCookies: app.config.WebAuth.SecureCookies,
+			Version:       version,
+			StartedAt:     app.startedAt,
+			Logging:       app.config.Logging,
+		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	shutdownCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -263,11 +253,8 @@ func printQuickStart(options serveOptions, url string) {
 	} else {
 		fmt.Println("Configuration:", options.ConfigPath)
 	}
-	if options.GeneratedPassword != "" {
-		fmt.Println("Initial administrator password:", options.GeneratedPassword)
-		fmt.Println("Change this password after signing in. It will not be shown again.")
-	}
 	fmt.Println("Open:", url)
+	fmt.Println("On first start, create the administrator password in the Web interface.")
 	fmt.Println("Press Ctrl+C to stop OpsPilot.")
 	fmt.Println()
 }
@@ -288,7 +275,7 @@ func adminCommand(ctx context.Context, app *application, args []string) error {
 	if len(args) != 1 || args[0] != "reset-password" {
 		return fmt.Errorf("admin command requires reset-password")
 	}
-	password := app.config.WebAuth.BootstrapPassword
+	password := strings.TrimSpace(os.Getenv("OPS_AGENT_ADMIN_PASSWORD"))
 	if password == "" {
 		return fmt.Errorf("OPS_AGENT_ADMIN_PASSWORD is required to reset the administrator password")
 	}

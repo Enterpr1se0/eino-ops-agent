@@ -2,41 +2,36 @@ package security
 
 import (
 	"regexp"
-	"strings"
 )
 
 type Redactor struct {
-	patterns []*regexp.Regexp
+	rules []redactionRule
+}
+
+type redactionRule struct {
+	pattern     *regexp.Regexp
+	replacement string
 }
 
 func NewRedactor() *Redactor {
-	expressions := []string{
-		`(?i)(authorization\s*:\s*(?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]+`,
-		`(?i)((?:password|passwd|api[_-]?key|access[_-]?token|secret)\s*[=:]\s*)[^\s,;]+`,
-		`AKIA[0-9A-Z]{16}`,
-		`gh[pousr]_[A-Za-z0-9]{20,}`,
-		`sk-[A-Za-z0-9_-]{16,}`,
-		`-----BEGIN (?:OPENSSH|RSA|EC|DSA)? ?PRIVATE KEY-----[\s\S]*?-----END (?:OPENSSH|RSA|EC|DSA)? ?PRIVATE KEY-----`,
+	rules := []redactionRule{
+		{regexp.MustCompile(`(?i)(\bauthorization\s*:\s*(?:bearer|basic)\s+)[^\s,;]+`), `${1}[REDACTED]`},
+		{regexp.MustCompile(`(?i)(\b(?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{4,}`), `${1}[REDACTED]`},
+		{regexp.MustCompile(`(?i)((?:["']?\b(?:password|passwd|sudo_password|proxy_password|api[_-]?key|access[_-]?token|secret|client_secret)["']?)\s*[=:]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)`), `${1}[REDACTED]`},
+		{regexp.MustCompile(`(?i)(--(?:password|passwd|sudo-password|proxy-password|api[-_]?key|access[-_]?token|token|secret)(?:=|\s+))(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&]+)`), `${1}[REDACTED]`},
+		{regexp.MustCompile(`(?i)(\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@`), `${1}[REDACTED]@`},
+		{regexp.MustCompile(`AKIA[0-9A-Z]{16}`), `[REDACTED]`},
+		{regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`), `[REDACTED]`},
+		{regexp.MustCompile(`sk-[A-Za-z0-9_-]{16,}`), `[REDACTED]`},
+		{regexp.MustCompile(`-----BEGIN (?:OPENSSH|RSA|EC|DSA)? ?PRIVATE KEY-----[\s\S]*?-----END (?:OPENSSH|RSA|EC|DSA)? ?PRIVATE KEY-----`), `[REDACTED]`},
 	}
-	patterns := make([]*regexp.Regexp, 0, len(expressions))
-	for _, expression := range expressions {
-		patterns = append(patterns, regexp.MustCompile(expression))
-	}
-	return &Redactor{patterns: patterns}
+	return &Redactor{rules: rules}
 }
 
 func (r *Redactor) Redact(input string) string {
 	result := input
-	for _, pattern := range r.patterns {
-		result = pattern.ReplaceAllStringFunc(result, func(match string) string {
-			if index := strings.IndexAny(match, "=:"); index >= 0 && !strings.Contains(match[:index], "PRIVATE KEY") {
-				return match[:index+1] + "[REDACTED]"
-			}
-			if index := strings.Index(strings.ToLower(match), "bearer "); index >= 0 {
-				return match[:index+7] + "[REDACTED]"
-			}
-			return "[REDACTED]"
-		})
+	for _, rule := range r.rules {
+		result = rule.pattern.ReplaceAllString(result, rule.replacement)
 	}
 	return result
 }

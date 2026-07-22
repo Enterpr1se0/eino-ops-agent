@@ -3,6 +3,11 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,12 +20,50 @@ import (
 	"eino-ops-agent/internal/sshx"
 	"eino-ops-agent/internal/store"
 
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
+	toolutils "github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 type backgroundToolTransport struct {
 	started chan domain.ExecRequest
 	release chan struct{}
+}
+
+type fileReadToolTransport struct {
+	request   domain.ExecRequest
+	callCount int
+}
+
+type toolFailureLoopModel struct {
+	calls  int
+	inputs [][]*schema.Message
+}
+
+func (m *toolFailureLoopModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.calls++
+	m.inputs = append(m.inputs, append([]*schema.Message(nil), input...))
+	if m.calls == 1 {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "call-invalid", Function: schema.FunctionCall{Name: "raw_failure", Arguments: `{"value":"x"}`},
+		}}), nil
+	}
+	return schema.AssistantMessage("handled the tool failure", nil), nil
+}
+
+func (m *toolFailureLoopModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (m *toolFailureLoopModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
 }
 
 func (t *backgroundToolTransport) Exec(ctx context.Context, _ sshx.ConnectionSpec, request domain.ExecRequest) (sshx.RawResult, error) {
@@ -31,6 +74,25 @@ func (t *backgroundToolTransport) Exec(ctx context.Context, _ sshx.ConnectionSpe
 	case <-ctx.Done():
 		return sshx.RawResult{}, ctx.Err()
 	}
+}
+
+func (t *fileReadToolTransport) Exec(_ context.Context, _ sshx.ConnectionSpec, request domain.ExecRequest) (sshx.RawResult, error) {
+	t.request = request
+	t.callCount++
+	stdout := "__OPS_FILE_META__\n15\t640\tops\tops\t1700000000\n" + strings.Repeat("a", 64) + "  /etc/example.conf\n__OPS_FILE_CONTENT__\nsecret contents"
+	return sshx.RawResult{Stdout: []byte(stdout)}, nil
+}
+
+func (*fileReadToolTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
+	return sshx.HostInfo{}, nil
+}
+
+func (*fileReadToolTransport) ScanHostKey(context.Context, sshx.ConnectionSpec) (sshx.HostKey, error) {
+	return sshx.HostKey{}, nil
+}
+
+func (*fileReadToolTransport) TrustHostKey(context.Context, sshx.ConnectionSpec, string) (sshx.HostKey, error) {
+	return sshx.HostKey{}, nil
 }
 
 func (*backgroundToolTransport) Probe(context.Context, sshx.ConnectionSpec) (sshx.HostInfo, error) {
@@ -72,8 +134,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 31 {
-		t.Fatalf("built-in catalog size=%d, want 31", len(descriptors))
+	if len(descriptors) != 20 {
+		t.Fatalf("built-in catalog size=%d, want 20", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -107,6 +169,45 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		if descriptor.Name == "ssh_run_script" && !strings.Contains(string(descriptor.InputSchema), `"background"`) {
 			t.Fatalf("ssh_run_script metadata is missing background: %#v", descriptor)
 		}
+		if descriptor.Name == "ssh_file_read" {
+			schema := string(descriptor.InputSchema)
+			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"metadata_only"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"context_lines"`) || !strings.Contains(schema, `"max_matches"`) {
+				t.Fatalf("ssh_file_read merged modes are incomplete: %#v", descriptor)
+			}
+		}
+		if descriptor.Name == "workspace_file_read" {
+			schema := string(descriptor.InputSchema)
+			if descriptor.Guard != "approval_required" || strings.Contains(schema, `"workspace_id"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"context_lines"`) || !strings.Contains(schema, `"max_matches"`) {
+				t.Fatalf("workspace_file_read merged modes are incomplete: %#v", descriptor)
+			}
+		}
+		if strings.HasPrefix(descriptor.Name, "workspace_") && strings.Contains(string(descriptor.InputSchema), `"workspace_id"`) {
+			t.Fatalf("%s still lets the model select a Workspace: %s", descriptor.Name, descriptor.InputSchema)
+		}
+		if descriptor.Name == "ssh_file_edit" {
+			schema := string(descriptor.InputSchema)
+			if !strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"rollback"`) || strings.Contains(schema, `"content"`) {
+				t.Fatalf("ssh_file_edit still exposes the retired edit contract: %s", schema)
+			}
+		}
+		if descriptor.Name == "workspace_file_edit" {
+			schema := string(descriptor.InputSchema)
+			if !strings.Contains(schema, `"diff"`) || strings.Contains(schema, `"expected_sha256"`) || strings.Contains(schema, `"rollback"`) || strings.Contains(schema, `"content"`) {
+				t.Fatalf("workspace_file_edit still exposes the retired edit contract: %s", schema)
+			}
+		}
+		if descriptor.Name == "ssh_task" && (descriptor.Guard != "audited_control" || !strings.Contains(string(descriptor.InputSchema), `"action"`)) {
+			t.Fatalf("ssh_task metadata does not expose its audited action: %#v", descriptor)
+		}
+		if descriptor.Name == "ssh_task" && descriptor.Category != "tasks" {
+			t.Fatalf("ssh_task category = %q, want tasks", descriptor.Category)
+		}
+		if descriptor.Name == "ssh_history" && descriptor.Category != "history" {
+			t.Fatalf("ssh_history category = %q, want history", descriptor.Category)
+		}
+		if descriptor.Name == "ops_skill" && descriptor.Category != "skills" {
+			t.Fatalf("ops_skill category = %q, want skills", descriptor.Category)
+		}
 		if descriptor.Name == "workspace_shell" && descriptor.Guard != "approval_required" {
 			t.Fatalf("workspace_shell must be approval-gated: %#v", descriptor)
 		}
@@ -117,13 +218,75 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
 		}
 	}
-	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list"} {
+	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_list", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get", "ops_plan_get"} {
 		if seen[retired] {
 			t.Fatalf("removed %s tool remains in the Agent catalog", retired)
 		}
 	}
-	if !seen["ops_plan_get"] || !seen["ssh_config_apply"] || !seen["ssh_file_transfer"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task_get"] || !seen["ssh_task_cancel"] {
+	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
 		t.Fatalf("representative functions missing: %#v", seen)
+	}
+}
+
+func TestWorkspaceToolUsesConversationBinding(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	workspaceRoot := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dataDir, "bound-workspace.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	if err := svc.InitializeWorkspaces(ctx, workspaceRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteAdminWorkspace(ctx, "default", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateAdminWorkspace(ctx, domain.WorkspaceInput{ID: "project", Access: "read_write"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceRoot, "project", "README.md"), []byte("bound Workspace"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.PrepareChatSession(ctx, "session-bound-workspace", "project", "test"); err != nil {
+		t.Fatal(err)
+	}
+	tools, err := BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listTool tool.InvokableTool
+	for _, candidate := range tools {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "workspace_file_list" {
+			listTool = candidate.(tool.InvokableTool)
+		}
+	}
+	if listTool == nil {
+		t.Fatal("workspace_file_list is missing")
+	}
+	resultJSON, err := listTool.InvokableRun(service.WithSessionID(ctx, "session-bound-workspace"), `{"path":"."}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result domain.ExecResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Status != "completed" || !strings.Contains(result.Stdout, "README.md") {
+		t.Fatalf("bound Workspace listing = %#v", result)
 	}
 }
 
@@ -200,7 +363,7 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 	}
 }
 
-func TestRunScriptBackgroundReturnsTaskAndTaskGetReturnsOutput(t *testing.T) {
+func TestRunScriptBackgroundReturnsTaskAndUnifiedTaskToolReturnsOutput(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/background-tools.db")
 	if err != nil {
@@ -229,7 +392,7 @@ func TestRunScriptBackgroundReturnsTaskAndTaskGetReturnsOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var scriptTool, getTool tool.InvokableTool
+	var scriptTool, taskTool tool.InvokableTool
 	for _, candidate := range loaded {
 		info, infoErr := candidate.Info(ctx)
 		if infoErr != nil {
@@ -238,11 +401,11 @@ func TestRunScriptBackgroundReturnsTaskAndTaskGetReturnsOutput(t *testing.T) {
 		switch info.Name {
 		case "ssh_run_script":
 			scriptTool = candidate.(tool.InvokableTool)
-		case "ssh_task_get":
-			getTool = candidate.(tool.InvokableTool)
+		case "ssh_task":
+			taskTool = candidate.(tool.InvokableTool)
 		}
 	}
-	if scriptTool == nil || getTool == nil {
+	if scriptTool == nil || taskTool == nil {
 		t.Fatal("merged background tools are missing")
 	}
 	inputJSON, _ := json.Marshal(map[string]any{
@@ -269,10 +432,10 @@ func TestRunScriptBackgroundReturnsTaskAndTaskGetReturnsOutput(t *testing.T) {
 	}
 	close(transport.release)
 
-	getInput, _ := json.Marshal(map[string]string{"task_id": started.TaskID})
+	getInput, _ := json.Marshal(map[string]string{"task_id": started.TaskID, "action": "status"})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		resultJSON, getErr := getTool.InvokableRun(ctx, string(getInput))
+		resultJSON, getErr := taskTool.InvokableRun(ctx, string(getInput))
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
@@ -289,6 +452,233 @@ func TestRunScriptBackgroundReturnsTaskAndTaskGetReturnsOutput(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("background task did not complete")
+}
+
+func TestUnifiedTaskToolCancelsWithStandardExecResult(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/cancel-task.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &backgroundToolTransport{started: make(chan domain.ExecRequest, 1), release: make(chan struct{})}
+	defer close(transport.release)
+	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	host, err := svc.AddHost(ctx, domain.Host{Name: "cancel-host", Address: "127.0.0.1", Port: 22, User: "ops"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := svc.StartTask(ctx, domain.ExecRequest{HostID: host.ID, Mode: domain.ExecProgram, Program: "uname", Reason: "verify cancellation"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-transport.started:
+	case <-time.After(time.Second):
+		t.Fatal("background task did not start")
+	}
+	result, err := RunTaskTool(svc, TaskInput{TaskID: task.ID, Action: "cancel"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.TaskID != task.ID || result.Status != "cancelled" || result.Code != "cancelled" || result.ToolVersion != "1.1" {
+		t.Fatalf("cancel result is not a standard ExecResult: %#v", result)
+	}
+}
+
+func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/file-read.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &fileReadToolTransport{}
+	svc := service.New(st, engine, transport, encryptor, security.NewRedactor(), config.Default().Limits)
+	host, err := svc.AddHost(ctx, domain.Host{Name: "file-host", Address: "127.0.0.1", Port: 22, User: "ops"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runRead := func(input FileReadInput) domain.ExecResult {
+		t.Helper()
+		base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		notifications := make(chan domain.ExecResult, 1)
+		toolCtx := service.WithApprovalNotifier(service.WithBlockingApprovals(base), func(result domain.ExecResult) {
+			notifications <- result
+		})
+		type outcome struct {
+			result domain.ExecResult
+			err    error
+		}
+		done := make(chan outcome, 1)
+		beforeCalls := transport.callCount
+		go func() {
+			result, readErr := RunFileReadTool(toolCtx, svc, input, "test")
+			done <- outcome{result: result, err: readErr}
+		}()
+		var pending domain.ExecResult
+		select {
+		case pending = <-notifications:
+		case <-base.Done():
+			t.Fatal("timed out waiting for file-read approval")
+		}
+		if pending.Status != "approval_required" || pending.Risk != domain.RiskReadOnly || pending.ApprovalID == "" || transport.callCount != beforeCalls {
+			t.Fatalf("file read skipped approval: %#v", pending)
+		}
+		_, approveErr := svc.Approve(ctx, pending.ApprovalID, "reviewed file access", "operator")
+		if approveErr != nil {
+			t.Fatal(approveErr)
+		}
+		if transport.callCount != beforeCalls+1 {
+			t.Fatalf("approved file read executed %d times", transport.callCount-beforeCalls)
+		}
+		select {
+		case completed := <-done:
+			if completed.err != nil {
+				t.Fatal(completed.err)
+			}
+			return completed.result
+		case <-base.Done():
+			t.Fatal("timed out waiting for approved file read")
+			return domain.ExecResult{}
+		}
+	}
+	result := runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true})
+	if !result.OK || result.Stdout != "" || result.File == nil || result.File.SHA256 != strings.Repeat("a", 64) || result.File.Size != 15 {
+		t.Fatalf("metadata-only result = %#v", result)
+	}
+	if !strings.Contains(transport.request.Script, "head -c 1") || strings.Contains(transport.request.Script, "tail -n") || strings.Contains(transport.request.Script, "tail -c") {
+		t.Fatalf("metadata-only request did not minimize the remote read: %s", transport.request.Script)
+	}
+	metadataRun, err := st.GetRun(ctx, result.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadataRequest domain.ExecRequest
+	if err := json.Unmarshal([]byte(metadataRun.RequestJSON), &metadataRequest); err != nil {
+		t.Fatal(err)
+	}
+	if metadataRequest.Mode != domain.ExecRemoteRead || metadataRequest.RemotePath != "/etc/example.conf" || !metadataRequest.MetadataOnly || metadataRequest.Script != "" {
+		t.Fatalf("metadata read was not persisted structurally: %#v", metadataRequest)
+	}
+	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf"})
+	if result.Stdout == "" || !strings.Contains(transport.request.Script, "cat -- '/etc/example.conf'") || strings.Contains(transport.request.Script, "head -c") {
+		t.Fatalf("default file read did not request complete content: result=%#v script=%s", result, transport.request.Script)
+	}
+	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", OffsetBytes: -4})
+	if !strings.Contains(transport.request.Script, "tail -c 4 -- '/etc/example.conf'") || result.File == nil || result.File.OffsetBytes != 11 {
+		t.Fatalf("negative file offset did not read from the end: result=%#v script=%s", result, transport.request.Script)
+	}
+	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", ContextLines: 2, MaxMatches: 5})
+	if !result.OK || !strings.Contains(transport.request.Script, "grep -n -F -C 2 -- 'secret' '/etc/example.conf' | head -n 5") {
+		t.Fatalf("file read search mode was not dispatched: result=%#v script=%s", result, transport.request.Script)
+	}
+	searchRun, err := st.GetRun(ctx, result.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var searchRequest domain.ExecRequest
+	if err := json.Unmarshal([]byte(searchRun.RequestJSON), &searchRequest); err != nil {
+		t.Fatal(err)
+	}
+	if searchRequest.Mode != domain.ExecRemoteSearch || searchRequest.RemotePath != "/etc/example.conf" || searchRequest.SearchPattern != "secret" || searchRequest.ContextLines != 2 || searchRequest.MaxMatches != 5 || searchRequest.Script != "" {
+		t.Fatalf("remote search was not persisted structurally: %#v", searchRequest)
+	}
+	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", MaxBytes: 10}, "test")
+	if err != nil || result.OK || result.Code != "validation_failed" {
+		t.Fatalf("ambiguous file read mode was not rejected: result=%#v err=%v", result, err)
+	}
+	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true, MaxBytes: 10}, "test")
+	if err != nil || result.OK || result.Code != "validation_failed" {
+		t.Fatalf("ambiguous metadata read was not rejected: result=%#v err=%v", result, err)
+	}
+}
+
+func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/history.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	for _, host := range []domain.Host{
+		{ID: "host-a", Name: "host-a", Address: "127.0.0.1", Port: 22, User: "ops", AuthType: "agent", CreatedAt: now, UpdatedAt: now},
+		{ID: "host-b", Name: "host-b", Address: "127.0.0.2", Port: 22, User: "ops", AuthType: "agent", CreatedAt: now, UpdatedAt: now},
+	} {
+		if _, err := st.UpsertHost(ctx, host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, run := range []domain.Run{
+		{ID: "run-nginx", HostID: "host-a", RequestJSON: `{"program":"nginx"}`, RequestDigest: "digest-a", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now.Add(-time.Minute)},
+		{ID: "run-disk", HostID: "host-b", RequestJSON: `{"program":"df"}`, RequestDigest: "digest-b", Risk: domain.RiskReadOnly, Status: "completed", StartedAt: now},
+	} {
+		if err := st.CreateRun(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	searched, err := ReadHistoryTool(ctx, svc, HistorySearchInput{Query: "nginx", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(searched.Runs) != 1 || searched.Runs[0].ID != "run-nginx" {
+		t.Fatalf("history search result = %#v", searched)
+	}
+	exact, err := ReadHistoryTool(ctx, svc, HistorySearchInput{RunID: "run-disk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exact.Runs) != 1 || exact.Runs[0].ID != "run-disk" {
+		t.Fatalf("exact history result = %#v", exact)
+	}
+
+	loaded, err := BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var historyTool tool.InvokableTool
+	for _, candidate := range loaded {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "ssh_history" {
+			historyTool = candidate.(tool.InvokableTool)
+			break
+		}
+	}
+	if historyTool == nil {
+		t.Fatal("ssh_history was not registered")
+	}
+	failureJSON, err := historyTool.InvokableRun(ctx, `{"run_id":"run-disk","query":"df"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failure domain.ToolFailure
+	if err := json.Unmarshal([]byte(failureJSON), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.OK || failure.Code != "validation_failed" || !strings.Contains(failure.Message, "mutually exclusive") {
+		t.Fatalf("history input conflict was not structured: %#v", failure)
+	}
 }
 
 func TestDisabledToolIsExcludedFromRunnerAndRetainedInCatalog(t *testing.T) {
@@ -358,7 +748,7 @@ func TestDisabledToolIsExcludedFromRunnerAndRetainedInCatalog(t *testing.T) {
 	t.Fatal("re-enabled ssh_exec was not loaded into the runner")
 }
 
-func TestSkillToolsReadTheLiveAdministratorRegistry(t *testing.T) {
+func TestUnifiedSkillToolReadsTheLiveAdministratorRegistry(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/skills.db")
 	if err != nil {
@@ -380,23 +770,20 @@ func TestSkillToolsReadTheLiveAdministratorRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var getTool, listTool tool.InvokableTool
+	var skillTool tool.InvokableTool
 	for _, candidate := range loaded {
 		info, infoErr := candidate.Info(ctx)
 		if infoErr != nil {
 			t.Fatal(infoErr)
 		}
-		if info.Name == "ops_skill_get" {
-			getTool = candidate.(tool.InvokableTool)
-		}
-		if info.Name == "ops_skill_list" {
-			listTool = candidate.(tool.InvokableTool)
+		if info.Name == "ops_skill" {
+			skillTool = candidate.(tool.InvokableTool)
 		}
 	}
-	if getTool == nil {
-		t.Fatal("ops_skill_get was not registered")
+	if skillTool == nil {
+		t.Fatal("ops_skill was not registered")
 	}
-	result, err := getTool.InvokableRun(service.WithSessionID(ctx, "session_skill"), `{"name":"custom-diagnosis"}`)
+	result, err := skillTool.InvokableRun(service.WithSessionID(ctx, "session_skill"), `{"name":"custom-diagnosis"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,10 +793,18 @@ func TestSkillToolsReadTheLiveAdministratorRegistry(t *testing.T) {
 	if _, err := svc.SetAdminSkillEnabled(ctx, "custom-diagnosis", false, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := getTool.InvokableRun(ctx, `{"name":"custom-diagnosis"}`); err == nil || !strings.Contains(err.Error(), "disabled") {
-		t.Fatalf("disabled skill remained loadable: %v", err)
+	disabledJSON, err := skillTool.InvokableRun(ctx, `{"name":"custom-diagnosis"}`)
+	if err != nil {
+		t.Fatalf("disabled skill aborted the ToolNode: %v", err)
 	}
-	listed, err := listTool.InvokableRun(ctx, `{}`)
+	var disabled domain.ToolFailure
+	if err := json.Unmarshal([]byte(disabledJSON), &disabled); err != nil {
+		t.Fatal(err)
+	}
+	if disabled.OK || disabled.Status != "failed" || disabled.Code != "configuration_required" || !strings.Contains(disabled.Message, "disabled") {
+		t.Fatalf("disabled skill did not return a structured failure: %#v", disabled)
+	}
+	listed, err := skillTool.InvokableRun(ctx, `{}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,68 +813,212 @@ func TestSkillToolsReadTheLiveAdministratorRegistry(t *testing.T) {
 	}
 }
 
-func TestPlanGetToolTreatsMissingPlanAsRecoverableState(t *testing.T) {
-	ctx := context.Background()
+func TestPlanStepUpdateReturnsCurrentPlanWithoutAbortingToolNode(t *testing.T) {
+	ctx := service.WithSessionID(context.Background(), "session_plan_transition")
 	st, err := store.Open(ctx, t.TempDir()+"/tools.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	engine, err := policy.Load("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	engine, _ := policy.Load("")
 	encryptor, err := security.NewEncryptor("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), config.Default().Limits)
+	if _, err := svc.CreateAgentPlan(ctx, "Repair the service", []string{"Inspect", "Repair"}, "test"); err != nil {
+		t.Fatal(err)
+	}
 	tools, err := BuildTools(svc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var planTool tool.InvokableTool
+	var updateTool tool.InvokableTool
 	for _, candidate := range tools {
 		info, infoErr := candidate.Info(ctx)
 		if infoErr != nil {
 			t.Fatal(infoErr)
 		}
-		if info.Name == "ops_plan_get" {
-			planTool = candidate.(tool.InvokableTool)
+		if info.Name == "ops_plan_step_update" {
+			updateTool = candidate.(tool.InvokableTool)
 			break
 		}
 	}
-	if planTool == nil {
-		t.Fatal("ops_plan_get tool was not registered")
+	if updateTool == nil {
+		t.Fatal("ops_plan_step_update tool was not registered")
+	}
+	resultJSON, err := updateTool.InvokableRun(ctx, `{"step_number":2,"status":"completed","evidence":"skipped step one"}`)
+	if err != nil {
+		t.Fatalf("invalid plan transition aborted the ToolNode: %v", err)
+	}
+	var result planToolResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || result.Status != "failed" || result.Code != "invalid_state" || result.Plan == nil {
+		t.Fatalf("unexpected plan transition failure: %#v", result)
+	}
+	if result.Plan.Steps[0].Status != "in_progress" || result.Plan.Steps[1].Status != "pending" || !strings.Contains(result.NextAction, "step 1") {
+		t.Fatalf("current plan state was not returned: %#v", result.Plan)
+	}
+}
+
+func TestToolErrorMiddlewareKeepsRecoverableFailuresInsideToolNode(t *testing.T) {
+	type input struct {
+		Value string `json:"value"`
+	}
+	rawFailure, err := toolutils.InferTool("raw_failure", "fails for testing", func(context.Context, input) (string, error) {
+		return "", fmt.Errorf("invalid widget")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := compose.NewToolNode(context.Background(), &compose.ToolsNodeConfig{
+		Tools:               []tool.BaseTool{rawFailure},
+		ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}},
+		UnknownToolsHandler: unknownToolResult,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	sessionCtx := service.WithSessionID(ctx, "session_without_plan")
-	resultJSON, err := planTool.InvokableRun(sessionCtx, `{}`)
-	if err != nil {
-		t.Fatalf("a missing optional plan aborted the ToolNode: %v", err)
-	}
-	var missing PlanGetOutput
-	if err := json.Unmarshal([]byte(resultJSON), &missing); err != nil {
-		t.Fatal(err)
-	}
-	if missing.Found || missing.Plan != nil || missing.Guidance == "" {
-		t.Fatalf("unexpected missing-plan result: %#v", missing)
+	for _, test := range []struct {
+		name      string
+		toolName  string
+		arguments string
+		wantCode  string
+	}{
+		{name: "business failure", toolName: "raw_failure", arguments: `{"value":"x"}`, wantCode: "validation_failed"},
+		{name: "malformed arguments", toolName: "raw_failure", arguments: `{"value":`, wantCode: "validation_failed"},
+		{name: "unknown tool", toolName: "missing_tool", arguments: `{}`, wantCode: "unknown_tool"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			messages, invokeErr := node.Invoke(context.Background(), schema.AssistantMessage("", []schema.ToolCall{{
+				ID: "call-test", Function: schema.FunctionCall{Name: test.toolName, Arguments: test.arguments},
+			}}))
+			if invokeErr != nil {
+				t.Fatalf("recoverable tool failure aborted the ToolNode: %v", invokeErr)
+			}
+			if len(messages) != 1 {
+				t.Fatalf("tool messages = %d", len(messages))
+			}
+			var failure domain.ToolFailure
+			if err := json.Unmarshal([]byte(messages[0].Content), &failure); err != nil {
+				t.Fatal(err)
+			}
+			if failure.OK || failure.Status != "failed" || failure.Code != test.wantCode {
+				t.Fatalf("unexpected ToolNode failure: %#v", failure)
+			}
+		})
 	}
 
-	created, err := svc.CreateAgentPlan(sessionCtx, "Diagnose the service", []string{"Collect evidence", "Verify the cause"}, "test")
+	stream, err := node.Stream(context.Background(), schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "call-stream", Function: schema.FunctionCall{Name: "raw_failure", Arguments: `{"value":"x"}`},
+	}}))
+	if err != nil {
+		t.Fatalf("streaming ToolNode rejected a recoverable failure: %v", err)
+	}
+	var streamedFailure domain.ToolFailure
+	for {
+		messages, recvErr := stream.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			t.Fatalf("streaming ToolNode aborted while returning failure: %v", recvErr)
+		}
+		for _, message := range messages {
+			if err := json.Unmarshal([]byte(message.Content), &streamedFailure); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if streamedFailure.OK || streamedFailure.Status != "failed" || streamedFailure.Code != "validation_failed" {
+		t.Fatalf("streaming ToolNode did not return the structured failure: %#v", streamedFailure)
+	}
+}
+
+func TestToolErrorMiddlewarePreservesCancellation(t *testing.T) {
+	cancelTool, err := toolutils.InferTool("cancel_tool", "cancels for testing", func(context.Context, struct{}) (string, error) {
+		return "", context.Canceled
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	resultJSON, err = planTool.InvokableRun(sessionCtx, `{}`)
+	node, err := compose.NewToolNode(context.Background(), &compose.ToolsNodeConfig{
+		Tools:               []tool.BaseTool{cancelTool},
+		ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var found PlanGetOutput
-	if err := json.Unmarshal([]byte(resultJSON), &found); err != nil {
+	_, err = node.Invoke(context.Background(), schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "call-cancel", Function: schema.FunctionCall{Name: "cancel_tool", Arguments: `{}`},
+	}}))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation was converted into a tool result: %v", err)
+	}
+}
+
+func TestAgentLoopReturnsToolFailureToModelAndContinues(t *testing.T) {
+	type input struct {
+		Value string `json:"value"`
+	}
+	rawFailure, err := toolutils.InferTool("raw_failure", "fails for testing", func(context.Context, input) (string, error) {
+		return "", fmt.Errorf("invalid widget")
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !found.Found || found.Plan == nil || found.Plan.SessionID != created.SessionID || len(found.Plan.Steps) != 2 {
-		t.Fatalf("existing plan was not returned: %#v", found)
+	chatModel := &toolFailureLoopModel{}
+	agentInstance, err := adk.NewChatModelAgent(context.Background(), &adk.ChatModelAgentConfig{
+		Name: "tool-failure-test", Description: "tool failure regression", Model: chatModel, MaxIterations: 3,
+		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{
+			Tools: []tool.BaseTool{rawFailure}, ToolCallMiddlewares: []compose.ToolMiddleware{{Invokable: normalizeToolCallErrors}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{Agent: agentInstance})
+	iterator := runner.Run(context.Background(), []*schema.Message{schema.UserMessage("run the failing tool")})
+	finalAnswer := ""
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			t.Fatalf("recoverable tool failure aborted the Agent loop: %v", event.Err)
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.Message != nil {
+			message := event.Output.MessageOutput.Message
+			if message.Role == schema.Assistant && message.Content != "" {
+				finalAnswer = message.Content
+			}
+		}
+	}
+	if finalAnswer != "handled the tool failure" || chatModel.calls != 2 {
+		t.Fatalf("Agent did not recover after the tool failure: calls=%d answer=%q", chatModel.calls, finalAnswer)
+	}
+	if len(chatModel.inputs) != 2 {
+		t.Fatalf("model inputs=%d", len(chatModel.inputs))
+	}
+	foundFailure := false
+	for _, message := range chatModel.inputs[1] {
+		if message.Role != schema.Tool || message.ToolCallID != "call-invalid" {
+			continue
+		}
+		var failure domain.ToolFailure
+		if err := json.Unmarshal([]byte(message.Content), &failure); err != nil {
+			t.Fatalf("tool result was not structured JSON: %v", err)
+		}
+		if !failure.OK && failure.Status == "failed" && failure.Code == "validation_failed" {
+			foundFailure = true
+		}
+	}
+	if !foundFailure {
+		t.Fatalf("second model request did not contain the structured tool failure: %#v", chatModel.inputs[1])
 	}
 }
 

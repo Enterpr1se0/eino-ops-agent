@@ -52,6 +52,9 @@ VALUES(1,20,1,0,'2026-01-01T00:00:00Z')`); err != nil {
 	if len(settings.ChatImageAllowedTypes) != len(domain.DefaultChatImageAllowedTypes) {
 		t.Fatalf("legacy settings did not receive chat image formats: %#v", settings)
 	}
+	if settings.SystemPrompt != domain.DefaultSystemPrompt || settings.DefaultSystemPrompt != domain.DefaultSystemPrompt {
+		t.Fatalf("legacy settings did not receive the default system prompt: %#v", settings)
+	}
 	settings.ApprovalExplanationsEnabled = true
 	settings.SubagentModelProviderID = "model_fixture"
 	settings.SubagentTimeoutSeconds = 45
@@ -78,45 +81,41 @@ VALUES(1,20,1,0,'2026-01-01T00:00:00Z')`); err != nil {
 	}
 }
 
-func TestLegacyWebSearchSettingsReceiveExtractLimits(t *testing.T) {
+func TestSystemSettingsPersistExplicitEmptySystemPrompt(t *testing.T) {
 	ctx := context.Background()
-	path := t.TempDir() + "/legacy-web-search-settings.db"
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `CREATE TABLE web_search_settings (
-  id INTEGER PRIMARY KEY CHECK(id=1),
-  enabled INTEGER NOT NULL DEFAULT 0,
-  provider TEXT NOT NULL DEFAULT 'tavily',
-  base_url TEXT NOT NULL DEFAULT 'https://api.tavily.com',
-  api_key_cipher TEXT NOT NULL DEFAULT '',
-  proxy_url TEXT NOT NULL DEFAULT '',
-  proxy_username TEXT NOT NULL DEFAULT '',
-  proxy_password_cipher TEXT NOT NULL DEFAULT '',
-  timeout_seconds INTEGER NOT NULL DEFAULT 20,
-  max_results INTEGER NOT NULL DEFAULT 10,
-  updated_at TEXT NOT NULL
-)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO web_search_settings(id,updated_at) VALUES(1,'2026-01-01T00:00:00Z')`); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
+	path := t.TempDir() + "/settings.db"
 	st, err := Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
-	settings, err := st.GetWebSearchSettings(ctx)
+	settings, err := st.GetSystemSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.ExtractMaxContentKiB != domain.DefaultWebExtractMaxContentKiB || settings.ExtractMaxTotalKiB != domain.DefaultWebExtractMaxTotalKiB {
-		t.Fatalf("legacy settings did not receive extract limits: %#v", settings)
+	if settings.SystemPrompt != domain.DefaultSystemPrompt || settings.DefaultSystemPrompt != domain.DefaultSystemPrompt {
+		t.Fatalf("unexpected initial prompt settings: %#v", settings)
+	}
+	settings.SystemPrompt = ""
+	if _, err := st.SaveSystemSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	settings, err = reopened.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.SystemPrompt != "" {
+		t.Fatalf("explicit empty system prompt was replaced: %q", settings.SystemPrompt)
+	}
+	if settings.DefaultSystemPrompt != domain.DefaultSystemPrompt {
+		t.Fatalf("default system prompt was not returned separately: %q", settings.DefaultSystemPrompt)
 	}
 }
