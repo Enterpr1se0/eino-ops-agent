@@ -70,7 +70,7 @@ func TestLocalWebURLUsesLoopbackForWildcardListener(t *testing.T) {
 
 func TestDesktopReadyLineIsMachineReadable(t *testing.T) {
 	line := desktopReadyLine(serveOptions{
-		Desktop: true, ConfigPath: `/tmp/opspilot/config.yaml`, ConfigCreated: true, GeneratedPassword: "secret",
+		Desktop: true, ConfigPath: `/tmp/opspilot/config.yaml`, ConfigCreated: true,
 	}, "http://127.0.0.1:49152")
 	const prefix = "OPSPILOT_DESKTOP_READY="
 	if !strings.HasPrefix(line, prefix) {
@@ -78,14 +78,13 @@ func TestDesktopReadyLineIsMachineReadable(t *testing.T) {
 	}
 	var payload struct {
 		URL               string `json:"url"`
-		InitialPassword   string `json:"initial_password"`
 		ConfigPath        string `json:"config_path"`
 		ConfigurationMade bool   `json:"configuration_created"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, prefix)), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.URL != "http://127.0.0.1:49152" || payload.InitialPassword != "secret" || !payload.ConfigurationMade {
+	if payload.URL != "http://127.0.0.1:49152" || !payload.ConfigurationMade {
 		t.Fatalf("desktop payload = %#v", payload)
 	}
 }

@@ -75,6 +75,8 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/health", s.health)
+	s.mux.HandleFunc("GET /api/v1/auth/status", s.authStatus)
+	s.mux.HandleFunc("POST /api/v1/auth/initialize", s.initializePassword)
 	s.mux.HandleFunc("GET /api/v1/auth/session", s.authSession)
 	s.mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	s.mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
@@ -542,7 +544,7 @@ func (s *Server) workspaceFileEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.auth == nil || !strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1/health" || r.URL.Path == "/api/v1/auth/login" {
+		if s.auth == nil || !strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1/health" || r.URL.Path == "/api/v1/auth/status" || r.URL.Path == "/api/v1/auth/initialize" || r.URL.Path == "/api/v1/auth/login" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -568,6 +570,58 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil {
+		writeErrorStatus(w, fmt.Errorf("web authentication is unavailable"), http.StatusServiceUnavailable)
+		return
+	}
+	initialized, err := s.auth.IsInitialized(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"initialized": initialized})
+}
+
+func (s *Server) initializePassword(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil {
+		writeErrorStatus(w, fmt.Errorf("web authentication is unavailable"), http.StatusServiceUnavailable)
+		return
+	}
+	initialized, err := s.auth.IsInitialized(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if initialized {
+		writeErrorStatus(w, security.ErrAlreadyInitialized, http.StatusConflict)
+		return
+	}
+	remote := remoteIP(r)
+	if !s.allowLoginAttempt(remote) {
+		writeErrorStatus(w, fmt.Errorf("too many initialization attempts; retry later"), http.StatusTooManyRequests)
+		return
+	}
+	var input struct {
+		Password string `json:"password"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	token, session, err := s.auth.InitializePassword(r.Context(), input.Password)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, security.ErrAlreadyInitialized) {
+			status = http.StatusConflict
+		}
+		writeErrorStatus(w, err, status)
+		return
+	}
+	s.resetLoginAttempts(remote)
+	s.setSessionCookie(w, token, session)
+	writeJSON(w, http.StatusCreated, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt})
+}
+
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if s.auth == nil {
 		writeErrorStatus(w, fmt.Errorf("web authentication is unavailable"), http.StatusServiceUnavailable)
@@ -591,8 +645,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.resetLoginAttempts(remote)
-	http.SetCookie(w, &http.Cookie{Name: security.SessionCookieName, Value: token, Path: "/", HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteStrictMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
+	s.setSessionCookie(w, token, session)
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt})
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, token string, session domain.WebSession) {
+	http.SetCookie(w, &http.Cookie{Name: security.SessionCookieName, Value: token, Path: "/", HttpOnly: true, Secure: s.secureCookies, SameSite: http.SameSiteStrictMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
 }
 
 func (s *Server) authSession(w http.ResponseWriter, r *http.Request) {
@@ -1301,8 +1359,7 @@ func streamAgentEvents(w http.ResponseWriter, r *http.Request, heartbeatInterval
 }
 
 func (s *Server) chatMessages(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	result, err := s.service.ListChatMessages(r.Context(), r.PathValue("id"), limit)
+	result, err := s.service.ListChatMessages(r.Context(), r.PathValue("id"), 0)
 	respond(w, result, err)
 }
 
@@ -1325,7 +1382,7 @@ func (s *Server) chatAttachment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
-	messages, err := s.service.ListChatMessages(r.Context(), sessionID, 200)
+	messages, err := s.service.ListChatMessages(r.Context(), sessionID, 0)
 	if err != nil {
 		writeError(w, err)
 		return

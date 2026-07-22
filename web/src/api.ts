@@ -1,4 +1,4 @@
-import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatMessage, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Run, ServerLogResponse, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
+import type { AgentEvent, Approval, ApprovalExecutionResult, AuthSession, ChatSession, ChatState, Health, Host, HostInput, LLMToolCatalog, ManagedSkill, MCPServer, MCPServerInput, MCPTestResult, ModelCatalog, ModelDiscoveryInput, ModelProvider, ModelProviderInput, ModelTestInput, ModelTestResult, Run, ServerLogResponse, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchResponse, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceDeleteResult, WorkspaceFileList, WorkspaceFilePreview, WorkspaceInput, WorkspaceUploadResult } from './types'
 
 let csrfToken = ''
 
@@ -28,7 +28,9 @@ async function requestList<T>(path: string): Promise<T[]> {
 }
 
 export const api = {
+	authStatus: () => request<{initialized:boolean}>('/api/v1/auth/status'),
 	authSession: async()=>{const session=await request<AuthSession>('/api/v1/auth/session');rememberAuth(session);return session},
+	initializePassword: async(password:string)=>{const session=await request<AuthSession>('/api/v1/auth/initialize',{method:'POST',body:JSON.stringify({password})});rememberAuth(session);return session},
 	login: async(password:string)=>{const session=await request<AuthSession>('/api/v1/auth/login',{method:'POST',body:JSON.stringify({password})});rememberAuth(session);return session},
 	logout: async()=>{await request<void>('/api/v1/auth/logout',{method:'POST',body:'{}'});rememberAuth(null)},
 	changePassword: async(currentPassword:string,newPassword:string)=>{const result=await request<{changed:boolean;login_required:boolean}>('/api/v1/auth/password',{method:'PUT',body:JSON.stringify({current_password:currentPassword,new_password:newPassword})});rememberAuth(null);return result},
@@ -89,7 +91,6 @@ export const api = {
     return request<ServerLogResponse>(`/api/v1/logs?${params}`)
   },
   chatSessions: () => requestList<ChatSession>('/api/v1/chat/sessions?limit=50'),
-  chatMessages: (id: string) => requestList<ChatMessage>(`/api/v1/chat/${encodeURIComponent(id)}/messages?limit=200`),
   chatState: (id: string) => request<ChatState>(`/api/v1/chat/${encodeURIComponent(id)}/state`),
 	cancelChatSession: (id: string) => request<{cancelled:boolean;rejected_approvals:number}>(`/api/v1/chat/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
   deleteChatSession: (id: string) => request<void>(`/api/v1/chat/${encodeURIComponent(id)}`, { method: 'DELETE' }),

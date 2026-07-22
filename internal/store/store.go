@@ -19,6 +19,7 @@ import (
 
 var (
 	ErrNotFound              = errors.New("not found")
+	ErrAlreadyExists         = errors.New("already exists")
 	ErrInvalidPlanTransition = errors.New("invalid plan transition")
 )
 
@@ -69,6 +70,21 @@ func (s *Store) AdminPasswordHash(ctx context.Context) (string, error) {
 		return "", ErrNotFound
 	}
 	return hash, err
+}
+
+func (s *Store) CreateAdminPasswordHash(ctx context.Context, hash string) error {
+	result, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO admin_credentials(id,password_hash,updated_at) VALUES(1,?,?)`, hash, formatTime(time.Now().UTC()))
+	if err != nil {
+		return err
+	}
+	created, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if created != 1 {
+		return ErrAlreadyExists
+	}
+	return nil
 }
 
 func (s *Store) SetAdminPasswordHash(ctx context.Context, hash string) error {
@@ -1579,17 +1595,19 @@ ORDER BY created_at`, sessionID)
 }
 
 func (s *Store) listChatMessages(ctx context.Context, sessionID string, limit int, modelOnly bool) ([]domain.ChatMessage, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
 	filter := ""
 	if modelOnly {
 		filter = " AND role IN ('user','assistant') AND status='completed'"
 	}
-	query := `SELECT id,role,content,tool_name,status,created_at FROM (
+	query := `SELECT id,role,content,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at`
+	args := []any{sessionID}
+	if limit > 0 {
+		query = `SELECT id,role,content,tool_name,status,created_at FROM (
 SELECT id,role,content,tool_name,status,created_at FROM chat_messages WHERE session_id=?` + filter + ` ORDER BY created_at DESC LIMIT ?)
 ORDER BY created_at`
-	rows, err := s.db.QueryContext(ctx, query, sessionID, limit)
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

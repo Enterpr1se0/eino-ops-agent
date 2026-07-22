@@ -31,9 +31,8 @@ type Config struct {
 }
 
 type WebAuth struct {
-	BootstrapPassword string        `yaml:"-"`
-	SecureCookies     bool          `yaml:"secure_cookies"`
-	SessionTTL        time.Duration `yaml:"-"`
+	SecureCookies bool          `yaml:"secure_cookies"`
+	SessionTTL    time.Duration `yaml:"-"`
 }
 
 type Workspace struct {
@@ -199,7 +198,6 @@ func applyEnv(cfg *Config) {
 	setInt(&cfg.Logging.MaxBackups, "OPS_AGENT_LOG_MAX_BACKUPS")
 	setInt(&cfg.Logging.RecentLimit, "OPS_AGENT_LOG_RECENT_LIMIT")
 	setString(&cfg.MasterKey, "OPS_AGENT_MASTER_KEY")
-	setString(&cfg.WebAuth.BootstrapPassword, "OPS_AGENT_ADMIN_PASSWORD")
 	setBool(&cfg.WebAuth.SecureCookies, "OPS_AGENT_SECURE_COOKIES")
 	setString(&cfg.WorkspaceDir, "OPS_AGENT_WORKSPACE_DIR")
 	setString(&cfg.WorkspaceSandboxPath, "OPS_AGENT_WORKSPACE_SANDBOX")

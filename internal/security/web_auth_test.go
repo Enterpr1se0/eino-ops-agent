@@ -9,7 +9,7 @@ import (
 	"eino-ops-agent/internal/store"
 )
 
-func TestWebAuthInitializeLoginLogoutAndReset(t *testing.T) {
+func TestWebAuthInitializePasswordLoginLogoutAndReset(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/auth.db")
 	if err != nil {
@@ -17,21 +17,27 @@ func TestWebAuthInitializeLoginLogoutAndReset(t *testing.T) {
 	}
 	defer st.Close()
 	auth := NewWebAuth(st, time.Hour)
-	if err := auth.Initialize(ctx, "short"); err == nil {
+	if initialized, err := auth.IsInitialized(ctx); err != nil || initialized {
+		t.Fatalf("new auth state initialized=%v err=%v", initialized, err)
+	}
+	if _, _, err := auth.InitializePassword(ctx, "short"); err == nil {
 		t.Fatal("short bootstrap password was accepted")
 	}
-	if err := auth.Initialize(ctx, "correct horse battery staple"); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := auth.Login(ctx, "incorrect password value"); err == nil {
-		t.Fatal("incorrect password logged in")
-	}
-	token, session, err := auth.Login(ctx, "correct horse battery staple")
+	token, session, err := auth.InitializePassword(ctx, "correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if token == "" || session.CSRFToken == "" || session.ExpiresAt.Before(time.Now()) {
-		t.Fatalf("invalid session: %#v", session)
+		t.Fatalf("invalid initialization session: %#v", session)
+	}
+	if initialized, err := auth.IsInitialized(ctx); err != nil || !initialized {
+		t.Fatalf("initialized auth state initialized=%v err=%v", initialized, err)
+	}
+	if _, _, err := auth.InitializePassword(ctx, "different secure password"); !errors.Is(err, ErrAlreadyInitialized) {
+		t.Fatalf("second initialization returned %v", err)
+	}
+	if _, _, err := auth.Login(ctx, "incorrect password value"); err == nil {
+		t.Fatal("incorrect password logged in")
 	}
 	if _, err := auth.Authenticate(ctx, token); err != nil {
 		t.Fatal(err)
@@ -50,22 +56,5 @@ func TestWebAuthInitializeLoginLogoutAndReset(t *testing.T) {
 	}
 	if _, _, err := auth.Login(ctx, "replacement password 2026"); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestGenerateAdminPassword(t *testing.T) {
-	first, err := GenerateAdminPassword()
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := GenerateAdminPassword()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateAdminPassword(first); err != nil {
-		t.Fatalf("generated password is invalid: %v", err)
-	}
-	if first == second {
-		t.Fatal("generated passwords unexpectedly match")
 	}
 }

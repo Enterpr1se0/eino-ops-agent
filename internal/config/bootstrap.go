@@ -16,7 +16,7 @@ database_path: .data/ops-agent.db
 policy_path: ""
 
 web_auth:
-  # The initial password is printed once in the startup window, never saved here.
+  # The administrator creates a password in the Web UI on first start.
   secure_cookies: false
 
 workspace_dir: workspace

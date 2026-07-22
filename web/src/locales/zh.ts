@@ -23,8 +23,8 @@ const zh = {
   auth: {
     subtitle: 'OPSPILOT', title: '管理员登录',
     authenticating: '验证中...', enter: '登录',
-	initialPasswordLabel: '首次启动', initialPasswordTitle: '初始化管理员密码', initialPasswordText: '这是此密码唯一一次显示。请立即复制并妥善保存，之后可在系统设置中修改。',
-	copyPassword: '复制密码', passwordCopied: '已复制', passwordCopyFailed: '复制失败，请手动选择密码保存。', passwordSaved: '我已保存密码',
+	setupLabel: '首次启动', setupTitle: '创建管理员密码', setupText: '此密码由你设置，用于之后登录 OpsPilot。密码只保存为安全哈希，无法找回，请妥善保管。',
+	initialize: '创建并进入', initializing: '正在初始化...',
   },
   config: {
     tabs: { models: '模型提供商', hosts: 'SSH 主机', system: '系统设置' },
@@ -82,7 +82,7 @@ const zh = {
     saved: '设置已保存。', followMain: '主模型',
     title: 'Agent 设置',
     maxIterations: '最大迭代次数',
-		systemPrompt: 'System Prompt', systemPromptHelp: '完整覆盖 Agent 的系统 Prompt；保存后所有会话的后续请求统一生效。',
+		systemPrompt: 'System Prompt',
 		restoreDefaultPrompt: '恢复默认', systemPromptCharacters: '{{count}} 个字符', emptySystemPrompt: '空 Prompt 将按原样保存并生效',
     rounds: '轮数', quickPresets: '常用值',
     approvalExplanations: '命令说明',
@@ -99,6 +99,7 @@ const zh = {
     lastUpdated: '最近更新 {{date}}', systemDefault: '使用系统默认值', discard: '放弃修改', apply: '保存并应用', applying: '应用中...',
   },
   password: {
+		title: '管理员密码',
     current: '当前密码', replacement: '新密码', confirmation: '确认新密码',
     mismatch: '两次输入的新密码不一致。', minimum: '至少 12 个字符', change: '修改密码', changing: '修改中...',
   },

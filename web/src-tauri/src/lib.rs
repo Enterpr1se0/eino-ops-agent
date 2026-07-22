@@ -15,8 +15,6 @@ struct SidecarState(Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
 #[derive(Debug, Deserialize, PartialEq)]
 struct DesktopReady {
     url: String,
-    #[serde(default)]
-    initial_password: String,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -135,7 +133,7 @@ fn parse_ready(line: &str) -> Result<Option<DesktopReady>, serde_json::Error> {
 }
 
 fn application_url(ready: &DesktopReady) -> Result<tauri::Url, String> {
-    let mut destination = ready
+    let destination = ready
         .url
         .parse::<tauri::Url>()
         .map_err(|error| error.to_string())?;
@@ -146,12 +144,6 @@ fn application_url(ready: &DesktopReady) -> Result<tauri::Url, String> {
         || destination.password().is_some()
     {
         return Err("backend URL must use an explicit 127.0.0.1 HTTP port".into());
-    }
-    if !ready.initial_password.is_empty() {
-        destination.set_fragment(Some(&format!(
-            "desktop-bootstrap={}",
-            ready.initial_password
-        )));
     }
     Ok(destination)
 }
@@ -173,7 +165,7 @@ mod tests {
     fn parses_desktop_ready_event() {
         assert_eq!(parse_ready("ordinary log line").unwrap(), None);
         let ready = parse_ready(
-            r#"OPSPILOT_DESKTOP_READY={"url":"http://127.0.0.1:49152","initial_password":"secret"}"#,
+            r#"OPSPILOT_DESKTOP_READY={"url":"http://127.0.0.1:49152"}"#,
         )
         .unwrap()
         .unwrap();
@@ -181,29 +173,23 @@ mod tests {
             ready,
             DesktopReady {
                 url: "http://127.0.0.1:49152".into(),
-                initial_password: "secret".into(),
             }
         );
     }
 
     #[test]
-    fn adds_bootstrap_password_as_fragment() {
+    fn uses_backend_url_without_credentials() {
         let ready = DesktopReady {
             url: "http://127.0.0.1:49152".into(),
-            initial_password: "secret_-".into(),
         };
         let url = application_url(&ready).unwrap();
-        assert_eq!(
-            url.as_str(),
-            "http://127.0.0.1:49152/#desktop-bootstrap=secret_-"
-        );
+        assert_eq!(url.as_str(), "http://127.0.0.1:49152/");
     }
 
     #[test]
     fn rejects_non_loopback_backend_url() {
         let ready = DesktopReady {
             url: "https://example.com/".into(),
-            initial_password: "secret".into(),
         };
         assert!(application_url(&ready).is_err());
     }

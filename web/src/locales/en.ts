@@ -23,8 +23,8 @@ const en = {
   auth: {
     subtitle: 'OPSPILOT', title: 'Administrator sign in',
     authenticating: 'Signing in...', enter: 'Sign in',
-	initialPasswordLabel: 'FIRST START', initialPasswordTitle: 'Initial administrator password', initialPasswordText: 'This password is shown only once. Copy and store it now; you can change it later in System settings.',
-	copyPassword: 'Copy password', passwordCopied: 'Copied', passwordCopyFailed: 'Copy failed. Select and save the password manually.', passwordSaved: 'I saved the password',
+	setupLabel: 'FIRST START', setupTitle: 'Create administrator password', setupText: 'Choose the password used to sign in to OpsPilot. Only a secure hash is stored, so keep the password somewhere safe.',
+	initialize: 'Create and continue', initializing: 'Initializing...',
   },
   config: {
     tabs: { models: 'Model providers', hosts: 'SSH hosts', system: 'System settings' },
@@ -81,7 +81,7 @@ const en = {
     saved: 'Settings saved.', followMain: 'Main model',
     title: 'Agent settings',
     maxIterations: 'Maximum iterations',
-		systemPrompt: 'System Prompt', systemPromptHelp: 'Fully replaces the Agent system prompt. Saving applies it to subsequent requests in every conversation.',
+		systemPrompt: 'System Prompt',
 		restoreDefaultPrompt: 'Restore default', systemPromptCharacters: '{{count}} characters', emptySystemPrompt: 'An empty prompt is saved and applied as-is',
     rounds: 'Rounds', quickPresets: 'Common values',
     approvalExplanations: 'Command explanations',
@@ -98,6 +98,7 @@ const en = {
     lastUpdated: 'Last updated {{date}}', systemDefault: 'Using system default', discard: 'Discard', apply: 'Save & apply', applying: 'Applying...',
   },
   password: {
+		title: 'Administrator password',
     current: 'Current password', replacement: 'New password', confirmation: 'Confirm new password',
     mismatch: 'New password confirmation does not match.', minimum: 'At least 12 characters', change: 'Change password', changing: 'Changing...',
   },

@@ -4,10 +4,44 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"eino-ops-agent/internal/domain"
 )
+
+func TestChatHistoryHasNoImplicitLimit(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, t.TempDir()+"/chat-history.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	for i := 0; i < 550; i++ {
+		if err := st.AppendChatMessage(ctx, "long-session", "reasoning", fmt.Sprintf("segment-%03d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	history, err := st.ListChatMessages(ctx, "long-session", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 550 {
+		t.Fatalf("complete history count = %d, want 550", len(history))
+	}
+	if history[0].Content != "segment-000" || history[549].Content != "segment-549" {
+		t.Fatalf("complete history order is wrong: first=%q last=%q", history[0].Content, history[549].Content)
+	}
+
+	recent, err := st.ListChatMessages(ctx, "long-session", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recent) != 7 || recent[0].Content != "segment-543" || recent[6].Content != "segment-549" {
+		t.Fatalf("explicit history limit returned unexpected records: %#v", recent)
+	}
+}
 
 func TestChatAttachmentsPersistForHistoryAndModelContext(t *testing.T) {
 	ctx := context.Background()

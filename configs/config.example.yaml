@@ -4,8 +4,7 @@ database_path: .data/ops-agent.db
 policy_path: configs/policy.yaml
 
 web_auth:
-  # Set OPS_AGENT_ADMIN_PASSWORD for the first authenticated start. The
-  # plaintext password is never persisted. Enable this when served over HTTPS.
+  # Enable secure cookies when the Web UI is served over HTTPS.
   secure_cookies: false
 
 # OpsPilot creates one directory per Workspace below this managed root.

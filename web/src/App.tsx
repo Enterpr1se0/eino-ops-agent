@@ -4,11 +4,11 @@ import remarkGfm from 'remark-gfm'
 import { useTranslation } from 'react-i18next'
 import {
   Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronRight, CircleDot, Clock3, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, LogOut,
-  Copy, Download, ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, X, Zap,
+  Download, ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, X, Zap,
 } from 'lucide-react'
 import { api, chatAttachmentURL, streamChat, workspaceFileEventsURL } from './api'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
-import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
+import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, SystemSettingsInput, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
 type Page = 'chat' | 'config' | 'extensions' | 'audit' | 'logs'
 type ChatEntryImage = {id:string;name:string;mimeType:string;sizeBytes:number;url:string}
@@ -58,8 +58,7 @@ function recalledSession() { try { return localStorage.getItem('opspilot.activeS
 
 function App() {
 	const {t}=useTranslation()
-	const [auth,setAuth]=useState<'checking'|'authenticated'|'guest'>('checking')
-	const [initialPassword,setInitialPassword]=useState('')
+	const [auth,setAuth]=useState<'checking'|'setup'|'authenticated'|'guest'>('checking')
   const [page, setPage] = useState<Page>('chat')
   const [health, setHealth] = useState<Health | null>(null)
   const [hosts, setHosts] = useState<Host[]>([])
@@ -88,11 +87,14 @@ function App() {
 	},[])
 
 	useEffect(()=>{
-		const bootstrapPassword=desktopBootstrapPassword()
-		const request=bootstrapPassword?api.login(bootstrapPassword):api.authSession()
-		request.then(()=>setAuth('authenticated')).catch(()=>setAuth('guest')).finally(()=>{
-			if(bootstrapPassword){window.history.replaceState(null,'',window.location.pathname+window.location.search);setInitialPassword(bootstrapPassword)}
-		})
+		void (async()=>{
+			try{
+				const status=await api.authStatus()
+				if(!status.initialized){setAuth('setup');return}
+				await api.authSession()
+				setAuth('authenticated')
+			}catch{setAuth('guest')}
+		})()
 	},[])
 	useEffect(()=>{
 		if(!('__TAURI_INTERNALS__' in window))return
@@ -112,7 +114,8 @@ function App() {
 	},[auth,agentStreaming,refresh])
 
 	if(auth==='checking')return <div className="auth-screen"><div className="auth-loading"><LoaderCircle className="spin" size={25}/><span>{t('shell.securing')}</span></div></div>
-	if(auth==='guest')return <><LoginPage onAuthenticated={()=>setAuth('authenticated')}/>{initialPassword&&<InitialPasswordDialog password={initialPassword} onClose={()=>setInitialPassword('')}/>}</>
+	if(auth==='setup')return <SetupPage onAuthenticated={()=>setAuth('authenticated')} onRequiresLogin={()=>setAuth('guest')}/>
+	if(auth==='guest')return <LoginPage onAuthenticated={()=>setAuth('authenticated')}/>
 
   const title = t(`shell.pageTitles.${page}`)
 
@@ -146,13 +149,7 @@ function App() {
         {page === 'logs' && <LogsPage/>}
       </section>
     </main>
-	{initialPassword&&<InitialPasswordDialog password={initialPassword} onClose={()=>setInitialPassword('')}/>}
   </div>
-}
-
-function desktopBootstrapPassword(){
-	if(!window.location.hash.startsWith('#desktop-bootstrap='))return ''
-	return new URLSearchParams(window.location.hash.slice(1)).get('desktop-bootstrap')||''
 }
 
 function LanguageSwitch(){
@@ -173,11 +170,24 @@ function PasswordInput(props:PasswordInputProps){
 	return <div className="password-input"><input {...props} type={visible?'text':'password'}/><button type="button" aria-label={label} aria-pressed={visible} title={label} onClick={()=>setVisible(value=>!value)}>{visible?<EyeOff size={16}/>:<Eye size={16}/>}</button></div>
 }
 
-function InitialPasswordDialog({password,onClose}:{password:string;onClose:()=>void}){
+
+function SetupPage({onAuthenticated,onRequiresLogin}:{onAuthenticated:()=>void;onRequiresLogin:()=>void}){
 	const {t}=useTranslation()
-	const [copyState,setCopyState]=useState<'idle'|'copied'|'failed'>('idle')
-	const copyPassword=async()=>{try{await navigator.clipboard.writeText(password);setCopyState('copied')}catch{setCopyState('failed')}}
-	return <div className="credential-dialog-backdrop"><section className="credential-dialog panel" role="dialog" aria-modal="true" aria-labelledby="initial-password-title"><header><div><KeyRound size={21}/><span><small>{t('auth.initialPasswordLabel')}</small><h2 id="initial-password-title">{t('auth.initialPasswordTitle')}</h2></span></div></header><p>{t('auth.initialPasswordText')}</p><div className="credential-password"><code>{password}</code><button type="button" onClick={()=>void copyPassword()}>{copyState==='copied'?<Check size={15}/>:<Copy size={15}/>} {t(copyState==='copied'?'auth.passwordCopied':'auth.copyPassword')}</button></div>{copyState==='failed'&&<div className="credential-copy-error"><ShieldAlert size={14}/>{t('auth.passwordCopyFailed')}</div>}<footer><button type="button" className="primary" autoFocus onClick={onClose}>{t('auth.passwordSaved')}</button></footer></section></div>
+	const [password,setPassword]=useState('')
+	const [confirmation,setConfirmation]=useState('')
+	const [busy,setBusy]=useState(false)
+	const [error,setError]=useState('')
+	const submit=async(event:FormEvent)=>{
+		event.preventDefault()
+		if(password!==confirmation){setError(t('password.mismatch'));return}
+		setBusy(true);setError('')
+		try{await api.initializePassword(password);setPassword('');setConfirmation('');onAuthenticated()}
+		catch(err){
+			try{if((await api.authStatus()).initialized){onRequiresLogin();return}}catch{/* keep the initialization error */}
+			setError(errorText(err))
+		}finally{setBusy(false)}
+	}
+	return <div className="auth-screen"><LanguageSwitch/><section className="login-card"><div className="login-mark"><KeyRound size={29}/></div><span>{t('auth.setupLabel')}</span><h1>{t('auth.setupTitle')}</h1><p>{t('auth.setupText')}</p><form onSubmit={submit}><label><span>{t('password.replacement')}</span><div className="login-input"><LockKeyhole size={17}/><PasswordInput aria-label={t('password.replacement')} autoComplete="new-password" minLength={12} value={password} onChange={event=>setPassword(event.target.value)} autoFocus required/></div></label><label><span>{t('password.confirmation')}</span><div className="login-input"><ShieldCheck size={17}/><PasswordInput aria-label={t('password.confirmation')} autoComplete="new-password" minLength={12} value={confirmation} onChange={event=>setConfirmation(event.target.value)} required/></div></label>{error&&<div className="login-error"><ShieldAlert size={15}/>{error}</div>}<button className="primary" disabled={busy||password.length<12||confirmation.length<12}>{busy?<LoaderCircle className="spin" size={17}/>:<ShieldCheck size={17}/>}<span>{busy?t('auth.initializing'):t('auth.initialize')}</span></button></form></section></div>
 }
 
 function DestructiveConfirmDialog({label,title,description,busy,onCancel,onConfirm}:{label:string;title:string;description:string;busy:boolean;onCancel:()=>void;onConfirm:()=>void}){
@@ -378,8 +388,19 @@ function SkillsPage({skills,refresh}:{skills:ManagedSkill[];refresh:()=>Promise<
 	</div>
 }
 
+function SettingsDisclosure({icon,title,meta,children,className=''}:{icon:React.ReactNode;title:string;meta?:React.ReactNode;children:React.ReactNode;className?:string}){
+	return <details className={`settings-disclosure panel ${className}`.trim()}><summary><span className="settings-disclosure-icon">{icon}</span><b>{title}</b>{meta&&<em>{meta}</em>}<ChevronRight size={16}/></summary><div className="settings-disclosure-body">{children}</div></details>
+}
+
+function SettingsSectionFooter({dirty,busy,saving,onDiscard}:{dirty:boolean;busy:boolean;saving:boolean;onDiscard:()=>void}){
+	const {t}=useTranslation()
+	return <footer className="settings-section-footer"><button type="button" disabled={!dirty||busy} onClick={onDiscard}>{t('settings.discard')}</button><button type="submit" className="primary" disabled={!dirty||busy}>{saving?t('settings.applying'):t('settings.apply')}</button></footer>
+}
+
+type SystemSettingsSection='iterations'|'prompt'|'explanation'|'images'|'shell'
+
 function SystemSettingsPage({settings,providers,capabilities,modelStatus,refresh}:{settings:SystemSettings|null;providers:ModelProvider[];capabilities:ToolCapabilities;modelStatus?:Health['model'];refresh:()=>Promise<void>}) {
-  const {t,i18n:instance}=useTranslation()
+  const {t}=useTranslation()
   const savedValue=settings?.agent_max_iterations??50
   const savedPrompt=settings?.system_prompt??''
 	const defaultPrompt=settings?.default_system_prompt??''
@@ -395,32 +416,81 @@ function SystemSettingsPage({settings,providers,capabilities,modelStatus,refresh
 	  const [subagentTimeout,setSubagentTimeout]=useState(savedSubagentTimeout)
 	  const [imageTypes,setImageTypes]=useState(savedImageTypes)
   const [shellMode,setShellMode]=useState<WorkspaceShellMode>(savedShellMode)
-  const [dirty,setDirty]=useState(false)
-  const [saving,setSaving]=useState(false)
+	const [iterationsDirty,setIterationsDirty]=useState(false)
+	const [promptDirty,setPromptDirty]=useState(false)
+	const [explanationDirty,setExplanationDirty]=useState(false)
+	const [imagesDirty,setImagesDirty]=useState(false)
+	const [shellDirty,setShellDirty]=useState(false)
+	const [savingSection,setSavingSection]=useState<SystemSettingsSection|''>('')
   const [notice,setNotice]=useState('')
-	  useEffect(()=>{if(!dirty){setMaxIterations(savedValue);setSystemPrompt(savedPrompt);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setImageTypes(savedImageTypes);setShellMode(savedShellMode)}},[savedValue,savedPrompt,savedExplanation,savedSubagentProvider,savedSubagentTimeout,savedImageTypes,savedShellMode,dirty])
-  const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(100,value||5)));setDirty(true);setNotice('')}
-	const updateSystemPrompt=(value:string)=>{setSystemPrompt(value);setDirty(true);setNotice('')}
-	const restoreDefaultPrompt=()=>{setSystemPrompt(defaultPrompt);setDirty(true);setNotice('')}
-  const toggleExplanation=(value:boolean)=>{setExplanationEnabled(value);setDirty(true);setNotice('')}
-  const selectSubagentProvider=(value:string)=>{setSubagentProvider(value);setDirty(true);setNotice('')}
-	  const updateSubagentTimeout=(value:number)=>{setSubagentTimeout(Math.max(5,Math.min(120,value||5)));setDirty(true);setNotice('')}
-	  const toggleImageType=(value:string)=>{setImageTypes(current=>current.includes(value)?current.length===1?current:current.filter(item=>item!==value):[...current,value]);setDirty(true);setNotice('')}
-  const selectShellMode=(value:WorkspaceShellMode)=>{setShellMode(value);setDirty(true);setNotice('')}
-		  const save=async(event:FormEvent)=>{event.preventDefault();setSaving(true);try{const result=await api.saveSystemSettings({agent_max_iterations:maxIterations,system_prompt:systemPrompt,approval_explanations_enabled:explanationEnabled,subagent_model_provider_id:subagentProvider,subagent_timeout_seconds:subagentTimeout,chat_image_allowed_types:imageTypes,workspace_shell_mode:shellMode});setMaxIterations(result.agent_max_iterations);setSystemPrompt(result.system_prompt);setExplanationEnabled(result.approval_explanations_enabled);setSubagentProvider(result.subagent_model_provider_id);setSubagentTimeout(result.subagent_timeout_seconds);setImageTypes(result.chat_image_allowed_types);setShellMode(result.workspace_shell_mode);setDirty(false);setNotice(t('settings.saved'));await refresh()}catch(err){setNotice(errorText(err))}finally{setSaving(false)}}
+	useEffect(()=>{if(!iterationsDirty)setMaxIterations(savedValue)},[savedValue,iterationsDirty])
+	useEffect(()=>{if(!promptDirty)setSystemPrompt(savedPrompt)},[savedPrompt,promptDirty])
+	useEffect(()=>{if(!explanationDirty){setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout)}},[savedExplanation,savedSubagentProvider,savedSubagentTimeout,explanationDirty])
+	useEffect(()=>{if(!imagesDirty)setImageTypes(savedImageTypes)},[savedImageTypes,imagesDirty])
+	useEffect(()=>{if(!shellDirty)setShellMode(savedShellMode)},[savedShellMode,shellDirty])
+	const update=(value:number)=>{setMaxIterations(Math.max(5,Math.min(100,value||5)));setIterationsDirty(true);setNotice('')}
+	const updateSystemPrompt=(value:string)=>{setSystemPrompt(value);setPromptDirty(true);setNotice('')}
+	const restoreDefaultPrompt=()=>{setSystemPrompt(defaultPrompt);setPromptDirty(true);setNotice('')}
+	const toggleExplanation=(value:boolean)=>{setExplanationEnabled(value);setExplanationDirty(true);setNotice('')}
+	const selectSubagentProvider=(value:string)=>{setSubagentProvider(value);setExplanationDirty(true);setNotice('')}
+	const updateSubagentTimeout=(value:number)=>{setSubagentTimeout(Math.max(5,Math.min(120,value||5)));setExplanationDirty(true);setNotice('')}
+	const toggleImageType=(value:string)=>{setImageTypes(current=>current.includes(value)?current.length===1?current:current.filter(item=>item!==value):[...current,value]);setImagesDirty(true);setNotice('')}
+	const selectShellMode=(value:WorkspaceShellMode)=>{setShellMode(value);setShellDirty(true);setNotice('')}
+	const discard=(section:SystemSettingsSection)=>{
+		switch(section){
+		case 'iterations':setMaxIterations(savedValue);setIterationsDirty(false);break
+		case 'prompt':setSystemPrompt(savedPrompt);setPromptDirty(false);break
+		case 'explanation':setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setExplanationDirty(false);break
+		case 'images':setImageTypes(savedImageTypes);setImagesDirty(false);break
+		case 'shell':setShellMode(savedShellMode);setShellDirty(false);break
+		}
+		setNotice('')
+	}
+	const save=async(section:SystemSettingsSection)=>{
+		const input:SystemSettingsInput={agent_max_iterations:section==='iterations'?maxIterations:savedValue}
+		switch(section){
+		case 'prompt':input.system_prompt=systemPrompt;break
+		case 'explanation':input.approval_explanations_enabled=explanationEnabled;input.subagent_model_provider_id=subagentProvider;input.subagent_timeout_seconds=subagentTimeout;break
+		case 'images':input.chat_image_allowed_types=imageTypes;break
+		case 'shell':input.workspace_shell_mode=shellMode;break
+		}
+		setSavingSection(section)
+		try{
+			const result=await api.saveSystemSettings(input)
+			switch(section){
+			case 'iterations':setMaxIterations(result.agent_max_iterations);setIterationsDirty(false);break
+			case 'prompt':setSystemPrompt(result.system_prompt);setPromptDirty(false);break
+			case 'explanation':setExplanationEnabled(result.approval_explanations_enabled);setSubagentProvider(result.subagent_model_provider_id);setSubagentTimeout(result.subagent_timeout_seconds);setExplanationDirty(false);break
+			case 'images':setImageTypes(result.chat_image_allowed_types);setImagesDirty(false);break
+			case 'shell':setShellMode(result.workspace_shell_mode);setShellDirty(false);break
+			}
+			setNotice(t('settings.saved'))
+			await refresh()
+		}catch(err){setNotice(errorText(err))}finally{setSavingSection('')}
+	}
+	const submit=(section:SystemSettingsSection)=>(event:FormEvent)=>{event.preventDefault();void save(section)}
+	const busy=!!savingSection
   return <div className="system-settings page-stack">
 
     {notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}><X size={14}/></button></div>}
-		    <form className="settings-panel panel" onSubmit={save}><div className="settings-panel-head"><div className="settings-glyph"><SlidersHorizontal size={20}/></div><div><h3>{t('settings.maxIterations')}</h3></div><strong>{maxIterations}</strong></div>
-	      <div className="iteration-editor"><input aria-label={t('settings.maxIterations')} type="range" min="5" max="100" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>{t('settings.rounds')}</span><input type="number" min="5" max="100" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div>
-		      <div className="iteration-presets"><span>{t('settings.quickPresets')}</span>{[20,50,100].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b></button>)}</div>
-				<div className="system-prompt-settings"><div className="system-prompt-settings-head"><Bot size={18}/><div><b>{t('settings.systemPrompt')}</b><p>{t('settings.systemPromptHelp')}</p></div><button type="button" disabled={systemPrompt===defaultPrompt} onClick={restoreDefaultPrompt}><RefreshCw size={13}/>{t('settings.restoreDefaultPrompt')}</button></div><textarea aria-label={t('settings.systemPrompt')} spellCheck={false} value={systemPrompt} onChange={event=>updateSystemPrompt(event.target.value)}/><small>{systemPrompt.length?t('settings.systemPromptCharacters',{count:systemPrompt.length}):t('settings.emptySystemPrompt')}</small></div>
-			      <div className="subagent-settings"><div className="subagent-settings-head"><BrainCircuit size={18}/><div><b>{t('settings.explanationSection')}</b></div><em className={modelStatus?.explanation_agent_available?'ready':'offline'}><CircleDot size={9}/>{modelStatus?.explanation_agent_available?t('settings.runnerReady'):t('settings.modelUnavailable')}</em></div><label className="subagent-toggle"><span><b>{t('settings.commandAgent')}</b></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label><div className="subagent-config-grid"><label><span><b>{t('settings.modelProvider')}</b></span><select value={subagentProvider} onChange={event=>selectSubagentProvider(event.target.value)}><option value="">{t('settings.followMain')}</option>{providers.map(provider=><option value={provider.id} key={provider.id}>{provider.name} · {provider.model}</option>)}</select></label><label><span><b>{t('settings.requestTimeout')}</b></span><div className="subagent-timeout-input"><input aria-label={t('settings.timeout')} type="number" min="5" max="120" step="1" value={subagentTimeout} onChange={event=>updateSubagentTimeout(Number(event.target.value))}/><em>{t('settings.seconds',{count:subagentTimeout})}</em></div></label></div>{modelStatus?.explanation_error&&<div className="subagent-runtime-error"><ShieldAlert size={14}/><span>{modelStatus.explanation_error}</span></div>}</div>
-				  <div className="chat-image-settings"><div className="chat-image-settings-head"><ImagePlus size={18}/><b>{t('settings.chatImages')}</b></div><div className="chat-image-formats">{[['image/png','PNG'],['image/jpeg','JPEG'],['image/webp','WebP'],['image/gif','GIF']].map(([value,label])=><label className={imageTypes.includes(value)?'active':''} key={value}><input type="checkbox" checked={imageTypes.includes(value)} disabled={imageTypes.length===1&&imageTypes.includes(value)} onChange={()=>toggleImageType(value)}/><span>{label}</span></label>)}</div></div>
-				  <div className="workspace-shell-settings"><div className="workspace-shell-settings-head"><TerminalSquare size={18}/><div><b>{t('settings.shellBackend')}</b></div><em>{settings?.workspace_shell_platform||t('settings.detecting')}</em></div><div className="workspace-shell-modes" role="group" aria-label={t('settings.shellBackend')}><button type="button" className={shellMode==='sandbox'?'active':''} disabled={!settings?.workspace_sandbox_available} onClick={()=>selectShellMode('sandbox')}><ShieldCheck size={16}/><span><b>{t('settings.sandbox')}</b><small>{settings?.workspace_sandbox_available?t('settings.sandboxAvailable'):t('settings.unavailableHost')}</small></span></button><button type="button" className={`${shellMode==='host'?'active ':''}host`} disabled={!settings?.workspace_host_shell_available} onClick={()=>selectShellMode('host')}><TerminalSquare size={16}/><span><b>{t('settings.hostShell')}</b><small>{settings?.workspace_host_shell_available?`${settings.workspace_shell_name||t('settings.systemShell')} · ${t('settings.fullAuthority')}`:t('settings.noShell')}</small></span></button><button type="button" className={shellMode==='disabled'?'active':''} onClick={()=>selectShellMode('disabled')}><Power size={16}/><span><b>{t('settings.shellDisabled')}</b></span></button></div>{shellMode==='host'&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.hostWarning')}</b></div>}{shellMode==='sandbox'&&!settings?.workspace_sandbox_available&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.sandboxWarning')}</b></div>}</div>
-			  <WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refresh} onNotice={setNotice}/>
-			      <div className="settings-footer"><span>{settings?.updated_at?t('settings.lastUpdated',{date:new Date(settings.updated_at).toLocaleString(localeFor(instance.language))}):t('settings.systemDefault')}</span><button type="button" disabled={!dirty||saving} onClick={()=>{setMaxIterations(savedValue);setSystemPrompt(savedPrompt);setExplanationEnabled(savedExplanation);setSubagentProvider(savedSubagentProvider);setSubagentTimeout(savedSubagentTimeout);setImageTypes(savedImageTypes);setShellMode(savedShellMode);setDirty(false);setNotice('')}}>{t('settings.discard')}</button><button className="primary" disabled={!dirty||saving}>{saving?t('settings.applying'):t('settings.apply')}</button></div>
-	    </form>
+		<div className="settings-form">
+			<SettingsDisclosure icon={<SlidersHorizontal size={18}/>} title={t('settings.maxIterations')} meta={<strong>{maxIterations}</strong>}>
+				<form onSubmit={submit('iterations')}><div className="iteration-editor"><input aria-label={t('settings.maxIterations')} type="range" min="5" max="100" step="1" value={maxIterations} onChange={event=>update(Number(event.target.value))}/><label><span>{t('settings.rounds')}</span><input type="number" min="5" max="100" value={maxIterations} onChange={event=>update(Number(event.target.value))}/></label></div><div className="iteration-presets"><span>{t('settings.quickPresets')}</span>{[20,50,100].map(value=><button type="button" className={maxIterations===value?'active':''} onClick={()=>update(value)} key={value}><b>{value}</b></button>)}</div><SettingsSectionFooter dirty={iterationsDirty} busy={busy} saving={savingSection==='iterations'} onDiscard={()=>discard('iterations')}/></form>
+			</SettingsDisclosure>
+			<SettingsDisclosure icon={<Bot size={18}/>} title={t('settings.systemPrompt')} meta={systemPrompt.length?t('settings.systemPromptCharacters',{count:systemPrompt.length}):undefined}>
+				<form onSubmit={submit('prompt')}><div className="system-prompt-actions"><button type="button" disabled={systemPrompt===defaultPrompt} onClick={restoreDefaultPrompt}><RefreshCw size={13}/>{t('settings.restoreDefaultPrompt')}</button></div><textarea className="system-prompt-input" aria-label={t('settings.systemPrompt')} spellCheck={false} value={systemPrompt} onChange={event=>updateSystemPrompt(event.target.value)}/><small className="system-prompt-count">{systemPrompt.length?t('settings.systemPromptCharacters',{count:systemPrompt.length}):t('settings.emptySystemPrompt')}</small><SettingsSectionFooter dirty={promptDirty} busy={busy} saving={savingSection==='prompt'} onDiscard={()=>discard('prompt')}/></form>
+			</SettingsDisclosure>
+			<SettingsDisclosure icon={<BrainCircuit size={18}/>} title={t('settings.explanationSection')} meta={<span className={modelStatus?.explanation_agent_available?'ready':'offline'}><CircleDot size={9}/>{modelStatus?.explanation_agent_available?t('settings.runnerReady'):t('settings.modelUnavailable')}</span>}>
+				<form onSubmit={submit('explanation')}><div className="subagent-settings"><label className="subagent-toggle"><span><b>{t('settings.commandAgent')}</b></span><input type="checkbox" checked={explanationEnabled} onChange={event=>toggleExplanation(event.target.checked)}/><i/></label><div className="subagent-config-grid"><label><span><b>{t('settings.modelProvider')}</b></span><select value={subagentProvider} onChange={event=>selectSubagentProvider(event.target.value)}><option value="">{t('settings.followMain')}</option>{providers.map(provider=><option value={provider.id} key={provider.id}>{provider.name} · {provider.model}</option>)}</select></label><label><span><b>{t('settings.requestTimeout')}</b></span><div className="subagent-timeout-input"><input aria-label={t('settings.timeout')} type="number" min="5" max="120" step="1" value={subagentTimeout} onChange={event=>updateSubagentTimeout(Number(event.target.value))}/><em>{t('settings.seconds',{count:subagentTimeout})}</em></div></label></div>{modelStatus?.explanation_error&&<div className="subagent-runtime-error"><ShieldAlert size={14}/><span>{modelStatus.explanation_error}</span></div>}</div><SettingsSectionFooter dirty={explanationDirty} busy={busy} saving={savingSection==='explanation'} onDiscard={()=>discard('explanation')}/></form>
+			</SettingsDisclosure>
+			<SettingsDisclosure icon={<ImagePlus size={18}/>} title={t('settings.chatImages')} meta={imageTypes.map(value=>value.replace('image/','').toUpperCase()).join(' · ')}>
+				<form onSubmit={submit('images')}><div className="chat-image-formats">{[['image/png','PNG'],['image/jpeg','JPEG'],['image/webp','WebP'],['image/gif','GIF']].map(([value,label])=><label className={imageTypes.includes(value)?'active':''} key={value}><input type="checkbox" checked={imageTypes.includes(value)} disabled={imageTypes.length===1&&imageTypes.includes(value)} onChange={()=>toggleImageType(value)}/><span>{label}</span></label>)}</div><SettingsSectionFooter dirty={imagesDirty} busy={busy} saving={savingSection==='images'} onDiscard={()=>discard('images')}/></form>
+			</SettingsDisclosure>
+			<SettingsDisclosure icon={<TerminalSquare size={18}/>} title={t('settings.shellBackend')} meta={settings?.workspace_shell_platform||t('settings.detecting')}>
+				<form onSubmit={submit('shell')}><div className="workspace-shell-modes" role="group" aria-label={t('settings.shellBackend')}><button type="button" className={shellMode==='sandbox'?'active':''} disabled={!settings?.workspace_sandbox_available} onClick={()=>selectShellMode('sandbox')}><ShieldCheck size={16}/><span><b>{t('settings.sandbox')}</b><small>{settings?.workspace_sandbox_available?t('settings.sandboxAvailable'):t('settings.unavailableHost')}</small></span></button><button type="button" className={`${shellMode==='host'?'active ':''}host`} disabled={!settings?.workspace_host_shell_available} onClick={()=>selectShellMode('host')}><TerminalSquare size={16}/><span><b>{t('settings.hostShell')}</b><small>{settings?.workspace_host_shell_available?`${settings.workspace_shell_name||t('settings.systemShell')} · ${t('settings.fullAuthority')}`:t('settings.noShell')}</small></span></button><button type="button" className={shellMode==='disabled'?'active':''} onClick={()=>selectShellMode('disabled')}><Power size={16}/><span><b>{t('settings.shellDisabled')}</b></span></button></div>{shellMode==='host'&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.hostWarning')}</b></div>}{shellMode==='sandbox'&&!settings?.workspace_sandbox_available&&<div className="workspace-shell-warning"><ShieldAlert size={15}/><b>{t('settings.sandboxWarning')}</b></div>}<SettingsSectionFooter dirty={shellDirty} busy={busy} saving={savingSection==='shell'} onDiscard={()=>discard('shell')}/></form>
+			</SettingsDisclosure>
+		</div>
+	<WorkspaceSettingsPanel workspaces={capabilities.workspaces} refresh={refresh} onNotice={setNotice}/>
 	<WebSearchSettingsPanel refresh={refresh}/>
 	<AdminPasswordPanel/>
   </div>
@@ -435,7 +505,7 @@ function WorkspaceSettingsPanel({workspaces,refresh,onNotice}:{workspaces:Worksp
 	const close=()=>{setOpen(false);setEditing('');setInput(empty)}
 	const save=async()=>{if(!input.id.trim())return;setBusy('save');onNotice('');try{if(editing)await api.updateWorkspace(editing,{...input,id:editing});else await api.createWorkspace({...input,id:input.id.trim()});await refresh();onNotice(editing?t('workspace.settingsUpdated',{id:editing}):t('workspace.settingsCreated',{id:input.id.trim()}));close()}catch(err){onNotice(errorText(err))}finally{setBusy('')}}
 	const remove=async(workspace:WorkspaceCapability)=>{if(!confirm(t('workspace.removeConfirm',{id:workspace.id})))return;setBusy(`delete-${workspace.id}`);onNotice('');try{await api.deleteWorkspace(workspace.id);await refresh();onNotice(t('workspace.settingsRemoved',{id:workspace.id}));if(editing===workspace.id)close()}catch(err){onNotice(errorText(err))}finally{setBusy('')}}
-	return <div className="workspace-settings"><div className="workspace-settings-title"><div><FolderOpen size={17}/><span><b>{t('settings.capabilities')}</b><small>{t('workspace.registeredCount',{count:workspaces.length})}</small></span></div><button type="button" onClick={beginCreate}><Plus size={13}/>{t('workspace.add')}</button></div>{open&&<div className="workspace-settings-editor"><label><span>{t('workspace.id')}</span><input value={input.id} disabled={!!editing} maxLength={64} onChange={event=>setInput(current=>({...current,id:event.target.value}))}/></label><label><span>{t('workspace.permission')}</span><select value={input.access} onChange={event=>setInput(current=>({...current,access:event.target.value as WorkspaceInput['access']}))}><option value="read_only">{t('workspace.readOnly')}</option><option value="read_write">{t('workspace.readWrite')}</option></select></label><div><button type="button" onClick={close}>{t('common.cancel')}</button><button type="button" className="primary" disabled={busy==='save'||!input.id.trim()} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></div></div>}<div className="workspace-settings-list">{workspaces.map(workspace=><div className="workspace-settings-row" key={workspace.id}><code>{workspace.id}</code><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em><button type="button" title={t('common.edit')} onClick={()=>beginEdit(workspace)}><Edit3 size={13}/></button><button type="button" className="danger" disabled={busy===`delete-${workspace.id}`} title={t('workspace.remove')} onClick={()=>void remove(workspace)}>{busy===`delete-${workspace.id}`?<LoaderCircle className="spin" size={13}/>:<Trash2 size={13}/>}</button></div>)}{!workspaces.length&&<div className="workspace-settings-empty">{t('settings.noWorkspace')}</div>}</div></div>
+	return <SettingsDisclosure className="workspace-settings" icon={<FolderOpen size={18}/>} title={t('settings.capabilities')} meta={t('workspace.registeredCount',{count:workspaces.length})}><div className="workspace-settings-actions"><button type="button" onClick={beginCreate}><Plus size={13}/>{t('workspace.add')}</button></div>{open&&<div className="workspace-settings-editor"><label><span>{t('workspace.id')}</span><input value={input.id} disabled={!!editing} maxLength={64} onChange={event=>setInput(current=>({...current,id:event.target.value}))}/></label><label><span>{t('workspace.permission')}</span><select value={input.access} onChange={event=>setInput(current=>({...current,access:event.target.value as WorkspaceInput['access']}))}><option value="read_only">{t('workspace.readOnly')}</option><option value="read_write">{t('workspace.readWrite')}</option></select></label><div><button type="button" onClick={close}>{t('common.cancel')}</button><button type="button" className="primary" disabled={busy==='save'||!input.id.trim()} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></div></div>}<div className="workspace-settings-list">{workspaces.map(workspace=><div className="workspace-settings-row" key={workspace.id}><code>{workspace.id}</code><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em><button type="button" title={t('common.edit')} onClick={()=>beginEdit(workspace)}><Edit3 size={13}/></button><button type="button" className="danger" disabled={busy===`delete-${workspace.id}`} title={t('workspace.remove')} onClick={()=>void remove(workspace)}>{busy===`delete-${workspace.id}`?<LoaderCircle className="spin" size={13}/>:<Trash2 size={13}/>}</button></div>)}{!workspaces.length&&<div className="workspace-settings-empty">{t('settings.noWorkspace')}</div>}</div></SettingsDisclosure>
 }
 
 const defaultWebSearchInput:WebSearchSettingsInput={enabled:false,base_url:'https://api.tavily.com',api_key:'',proxy_url:'',proxy_username:'',proxy_password:'',timeout_seconds:20,max_results:10}
@@ -452,15 +522,15 @@ function WebSearchSettingsPanel({refresh}:{refresh:()=>Promise<void>}){
 	const test=async()=>{setBusy('test');setNotice('');try{const result=await api.testWebSearch();setNotice(t('webSearch.testPassed',{count:result.results.length}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
 	const clearKey=()=>{setInput(current=>({...current,enabled:false,api_key:'',clear_api_key:true}));setDirty(true);setNotice('')}
 	const clearProxyPassword=()=>{setInput(current=>({...current,proxy_password:'',clear_proxy_password:true}));setDirty(true);setNotice('')}
-	if(loading)return <section className="web-search-settings panel loading"><LoaderCircle className="spin" size={16}/>{t('common.loading')}</section>
-	return <section className="web-search-settings panel"><header><div><Search size={18}/><b>{t('webSearch.title')}</b></div><label><input type="checkbox" checked={input.enabled} onChange={event=>update('enabled',event.target.checked)}/><i/><span>{input.enabled?t('common.enabled'):t('common.disabled')}</span></label></header><div className="web-search-grid"><label><span>{t('webSearch.baseURL')}</span><input value={input.base_url} onChange={event=>update('base_url',event.target.value)} placeholder="https://api.tavily.com"/></label><label><span>{t('webSearch.apiKey')}</span><PasswordInput value={input.api_key||''} onChange={event=>update('api_key',event.target.value)} placeholder={stored?.has_api_key?t('webSearch.savedSecret'):''}/></label><label><span>{t('webSearch.proxyURL')}</span><input value={input.proxy_url||''} onChange={event=>update('proxy_url',event.target.value)}/></label><label><span>{t('webSearch.proxyUsername')}</span><input value={input.proxy_username||''} onChange={event=>update('proxy_username',event.target.value)}/></label><label><span>{t('webSearch.proxyPassword')}</span><PasswordInput value={input.proxy_password||''} onChange={event=>update('proxy_password',event.target.value)} placeholder={stored?.has_proxy_password?t('webSearch.savedSecret'):''}/></label><label><span>{t('webSearch.timeout')}</span><input type="number" min="5" max="120" value={input.timeout_seconds} onChange={event=>update('timeout_seconds',Number(event.target.value))}/></label><label><span>{t('webSearch.maxResults')}</span><input type="number" min="1" max="20" value={input.max_results} onChange={event=>update('max_results',Number(event.target.value))}/></label></div>{notice&&<p>{notice}</p>}<footer><div>{stored?.has_api_key&&<button type="button" className="danger" onClick={clearKey}>{t('webSearch.clearKey')}</button>}{stored?.has_proxy_password&&<button type="button" className="danger" onClick={clearProxyPassword}>{t('webSearch.clearProxyPassword')}</button>}</div><button type="button" disabled={busy!==''||dirty||!stored?.enabled||!stored.has_api_key} onClick={()=>void test()}>{busy==='test'?<LoaderCircle className="spin" size={13}/>:<Search size={13}/>} {t('common.test')}</button><button type="button" className="primary" disabled={busy!==''||!dirty||input.enabled&&!hasEffectiveAPIKey} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></section>
+	if(loading)return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={t('common.loading')}><div className="settings-loading"><LoaderCircle className="spin" size={16}/>{t('common.loading')}</div></SettingsDisclosure>
+	return <SettingsDisclosure className="web-search-settings" icon={<Search size={18}/>} title={t('webSearch.title')} meta={input.enabled?t('common.enabled'):t('common.disabled')}><label className="web-search-toggle"><span>{t('webSearch.title')}</span><input type="checkbox" checked={input.enabled} onChange={event=>update('enabled',event.target.checked)}/><i/><b>{input.enabled?t('common.enabled'):t('common.disabled')}</b></label><div className="web-search-grid"><label><span>{t('webSearch.baseURL')}</span><input value={input.base_url} onChange={event=>update('base_url',event.target.value)} placeholder="https://api.tavily.com"/></label><label><span>{t('webSearch.apiKey')}</span><PasswordInput value={input.api_key||''} onChange={event=>update('api_key',event.target.value)} placeholder={stored?.has_api_key?t('webSearch.savedSecret'):''}/></label><label><span>{t('webSearch.proxyURL')}</span><input value={input.proxy_url||''} onChange={event=>update('proxy_url',event.target.value)}/></label><label><span>{t('webSearch.proxyUsername')}</span><input value={input.proxy_username||''} onChange={event=>update('proxy_username',event.target.value)}/></label><label><span>{t('webSearch.proxyPassword')}</span><PasswordInput value={input.proxy_password||''} onChange={event=>update('proxy_password',event.target.value)} placeholder={stored?.has_proxy_password?t('webSearch.savedSecret'):''}/></label><label><span>{t('webSearch.timeout')}</span><input type="number" min="5" max="120" value={input.timeout_seconds} onChange={event=>update('timeout_seconds',Number(event.target.value))}/></label><label><span>{t('webSearch.maxResults')}</span><input type="number" min="1" max="20" value={input.max_results} onChange={event=>update('max_results',Number(event.target.value))}/></label></div>{notice&&<p>{notice}</p>}<footer><div>{stored?.has_api_key&&<button type="button" className="danger" onClick={clearKey}>{t('webSearch.clearKey')}</button>}{stored?.has_proxy_password&&<button type="button" className="danger" onClick={clearProxyPassword}>{t('webSearch.clearProxyPassword')}</button>}</div><button type="button" disabled={busy!==''||dirty||!stored?.enabled||!stored.has_api_key} onClick={()=>void test()}>{busy==='test'?<LoaderCircle className="spin" size={13}/>:<Search size={13}/>} {t('common.test')}</button><button type="button" className="primary" disabled={busy!==''||!dirty||input.enabled&&!hasEffectiveAPIKey} onClick={()=>void save()}>{busy==='save'?<LoaderCircle className="spin" size={13}/>:<Save size={13}/>} {t('common.save')}</button></footer></SettingsDisclosure>
 }
 
 function AdminPasswordPanel(){
 		const {t}=useTranslation()
 	const [current,setCurrent]=useState(''),[replacement,setReplacement]=useState(''),[confirmation,setConfirmation]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false)
 		const submit=async(event:FormEvent)=>{event.preventDefault();if(replacement!==confirmation){setNotice(t('password.mismatch'));return}setBusy(true);setNotice('');try{await api.changePassword(current,replacement);window.location.reload()}catch(err){setNotice(errorText(err))}finally{setBusy(false)}}
-		return <form className="admin-password-panel panel" onSubmit={submit}><section><label><span>{t('password.current')}</span><PasswordInput autoComplete="current-password" value={current} onChange={event=>setCurrent(event.target.value)} required/></label><label><span>{t('password.replacement')}</span><PasswordInput autoComplete="new-password" minLength={12} placeholder={t('password.minimum')} value={replacement} onChange={event=>setReplacement(event.target.value)} required/></label><label><span>{t('password.confirmation')}</span><PasswordInput autoComplete="new-password" minLength={12} value={confirmation} onChange={event=>setConfirmation(event.target.value)} required/></label><button className="primary" disabled={busy||replacement.length<12}>{busy?t('password.changing'):t('password.change')}</button></section>{notice&&<p>{notice}</p>}</form>
+		return <form className="admin-password-form" onSubmit={submit}><SettingsDisclosure className="admin-password-panel" icon={<KeyRound size={18}/>} title={t('password.title')}><section><label><span>{t('password.current')}</span><PasswordInput autoComplete="current-password" value={current} onChange={event=>setCurrent(event.target.value)} required/></label><label><span>{t('password.replacement')}</span><PasswordInput autoComplete="new-password" minLength={12} placeholder={t('password.minimum')} value={replacement} onChange={event=>setReplacement(event.target.value)} required/></label><label><span>{t('password.confirmation')}</span><PasswordInput autoComplete="new-password" minLength={12} value={confirmation} onChange={event=>setConfirmation(event.target.value)} required/></label><button className="primary" disabled={busy||replacement.length<12}>{busy?t('password.changing'):t('password.change')}</button></section>{notice&&<p>{notice}</p>}</SettingsDisclosure></form>
 }
 
 function Nav({ active, icon, label, count, warn, onClick }: {active:boolean;icon:React.ReactNode;label:string;count?:number;warn?:boolean;onClick:()=>void}) {
