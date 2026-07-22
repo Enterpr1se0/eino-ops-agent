@@ -92,6 +92,7 @@ export const api = {
   },
   chatSessions: () => requestList<ChatSession>('/api/v1/chat/sessions?limit=50'),
   chatState: (id: string) => request<ChatState>(`/api/v1/chat/${encodeURIComponent(id)}/state`),
+	setChatSessionWorkspace: (id:string,workspaceId:string) => request<ChatSession>(`/api/v1/chat/${encodeURIComponent(id)}/workspace`, { method:'PUT', body:JSON.stringify({workspace_id:workspaceId}) }),
 	cancelChatSession: (id: string) => request<{cancelled:boolean;rejected_approvals:number}>(`/api/v1/chat/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }),
   deleteChatSession: (id: string) => request<void>(`/api/v1/chat/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
@@ -104,9 +105,10 @@ export function workspaceFileEventsURL(workspaceId:string,path:string){
 	return `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/events?path=${encodeURIComponent(path)}`
 }
 
-export async function streamChat(sessionId: string, message: string, images:File[], onEvent: (event: AgentEvent) => void, signal?: AbortSignal) {
+export async function streamChat(sessionId: string, workspaceId:string, message: string, images:File[], onEvent: (event: AgentEvent) => void, signal?: AbortSignal) {
 	const body=new FormData()
 	body.set('session_id',sessionId)
+	body.set('workspace_id',workspaceId)
 	body.set('message',message)
 	for(const image of images)body.append('images',image,image.name)
   const response = await fetch('/api/v1/chat', {

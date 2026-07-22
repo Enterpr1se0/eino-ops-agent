@@ -43,7 +43,7 @@ func New(svc *service.Service, version string) *Server {
 			output, err := agent.RunTaskTool(svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read one remote file or search it by optional literal pattern. Credential paths are denied."},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read one remote file or search it by optional literal pattern after one-time human approval. Credential paths are denied."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileReadInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := agent.RunFileReadTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
@@ -63,39 +63,6 @@ func New(svc *service.Service, version string) *Server {
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_transfer", Description: "Transfer one SHA256-bound regular file between two registered SSH hosts through the control plane after human approval."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.SSHFileTransferInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := svc.TransferFileBetweenHosts(ctx, input.SourceHostID, input.SourcePath, input.ExpectedSHA256, input.DestinationHostID, input.DestinationPath, input.Overwrite, input.ExpectedDestinationSHA256, input.TimeoutSeconds, input.Reason, input.Rollback, "mcp-client")
-			output, err = agent.NormalizeExecToolResult(output, err)
-			return nil, output, err
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "workspace_list", Description: "List allowlisted local workspaces without disclosing their host paths."},
-		func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, agent.WorkspaceListOutput, error) {
-			return nil, agent.WorkspaceListOutput{Workspaces: svc.ListWorkspaceCapabilities()}, nil
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_list", Description: "List a directory inside an allowlisted workspace."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspacePathInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.ListWorkspaceFiles(ctx, input.WorkspaceID, input.Path, "mcp-client")
-			output, err = agent.NormalizeExecToolResult(output, err)
-			return nil, output, err
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_read", Description: "Read one Workspace file or search it by optional literal pattern."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspaceReadInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := agent.RunWorkspaceFileReadTool(ctx, svc, input, "mcp-client")
-			return nil, output, err
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_edit", Description: "Apply one reviewed unified diff to an existing file inside a read_write workspace."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspaceFileEditInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.EditWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.Diff, input.Validator, input.Reason, "mcp-client")
-			output, err = agent.NormalizeExecToolResult(output, err)
-			return nil, output, err
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_upload", Description: "Upload one SHA256-bound Workspace file directly to a registered SSH host through approved SFTP."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspaceUploadInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.UploadWorkspaceFileToHost(ctx, input.HostID, input.WorkspaceID, input.Path, input.ExpectedSHA256, input.RemotePath, input.Reason, input.Rollback, "mcp-client")
-			output, err = agent.NormalizeExecToolResult(output, err)
-			return nil, output, err
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "workspace_shell", Description: "Run an approval-gated script through the operator-selected Workspace sandbox or host shell backend."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspaceShellInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.RunWorkspaceShell(ctx, input.WorkspaceID, input.Script, input.Cwd, input.Env, input.TimeoutSeconds, input.Reason, input.ExpectedChanges, input.Rollback, "mcp-client")
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})

@@ -121,6 +121,88 @@ func (s *Service) ListChatSessions(ctx context.Context, limit int) ([]domain.Cha
 	return s.store.ListChatSessions(ctx, limit)
 }
 
+func (s *Service) PrepareChatSession(ctx context.Context, sessionID, workspaceID, actor string) (domain.ChatSession, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	workspaceID = strings.TrimSpace(workspaceID)
+	if sessionID == "" {
+		return domain.ChatSession{}, fmt.Errorf("session id is required")
+	}
+	if workspaceID != "" {
+		if _, ok := s.workspaceByID(workspaceID); !ok {
+			return domain.ChatSession{}, fmt.Errorf("workspace %q not found", workspaceID)
+		}
+	}
+	session, err := s.store.GetChatSession(ctx, sessionID)
+	if errors.Is(err, store.ErrNotFound) {
+		session, err = s.store.CreateChatSession(ctx, sessionID, workspaceID)
+		if err == nil {
+			s.audit(ctx, "", "chat_session_created", actor, map[string]any{"session_id": sessionID, "workspace_id": workspaceID})
+		}
+		return session, err
+	}
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	if workspaceID == "" || session.WorkspaceID == workspaceID {
+		return session, nil
+	}
+	if session.WorkspaceID != "" {
+		return domain.ChatSession{}, fmt.Errorf("conversation is bound to workspace %q; switch it before sending a message", session.WorkspaceID)
+	}
+	return s.SetChatSessionWorkspace(ctx, sessionID, workspaceID, actor)
+}
+
+func (s *Service) GetChatSession(ctx context.Context, sessionID string) (domain.ChatSession, error) {
+	return s.store.GetChatSession(ctx, strings.TrimSpace(sessionID))
+}
+
+func (s *Service) SetChatSessionWorkspace(ctx context.Context, sessionID, workspaceID, actor string) (domain.ChatSession, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	workspaceID = strings.TrimSpace(workspaceID)
+	if sessionID == "" {
+		return domain.ChatSession{}, fmt.Errorf("session id is required")
+	}
+	if workspaceID != "" {
+		if _, ok := s.workspaceByID(workspaceID); !ok {
+			return domain.ChatSession{}, fmt.Errorf("workspace %q not found", workspaceID)
+		}
+	}
+	current, err := s.store.GetChatSession(ctx, sessionID)
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	if current.WorkspaceID == workspaceID {
+		return current, nil
+	}
+	session, err := s.store.SetChatSessionWorkspace(ctx, sessionID, workspaceID)
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	s.audit(ctx, "", "chat_session_workspace_changed", actor, map[string]any{
+		"session_id": sessionID, "previous_workspace_id": current.WorkspaceID, "workspace_id": workspaceID,
+	})
+	return session, nil
+}
+
+func (s *Service) SessionWorkspace(ctx context.Context) (WorkspaceCapability, error) {
+	sessionID := SessionIDFromContext(ctx)
+	if sessionID == "" {
+		return WorkspaceCapability{}, fmt.Errorf("Workspace tools require an Agent conversation")
+	}
+	session, err := s.store.GetChatSession(ctx, sessionID)
+	if err != nil {
+		return WorkspaceCapability{}, fmt.Errorf("load conversation Workspace: %w", err)
+	}
+	if session.WorkspaceID == "" {
+		return WorkspaceCapability{}, fmt.Errorf("no Workspace is bound to this conversation; select one in the chat interface")
+	}
+	workspace, ok := s.workspaceByID(session.WorkspaceID)
+	if !ok {
+		return WorkspaceCapability{}, fmt.Errorf("the conversation Workspace %q is no longer available; select another Workspace", session.WorkspaceID)
+	}
+	return s.adminWorkspaceCapability(workspace).WorkspaceCapability, nil
+}
+
 func (s *Service) ListChatMessages(ctx context.Context, sessionID string, limit int) ([]domain.ChatMessage, error) {
 	return s.store.ListChatMessages(ctx, sessionID, limit)
 }
@@ -1173,8 +1255,8 @@ func (s *Service) ApproveWithScope(ctx context.Context, approvalID, reason, scop
 	if err != nil || digest != approval.RequestDigest {
 		return domain.ExecResult{}, fmt.Errorf("approved request digest no longer matches")
 	}
-	if scope == "session" && isHostWorkspaceShell(req) {
-		return domain.ExecResult{}, fmt.Errorf("host workspace shell requires a fresh one-time approval for every invocation")
+	if scope == "session" && requiresOneTimeApproval(req) {
+		return domain.ExecResult{}, fmt.Errorf("this operation requires a fresh one-time approval for every invocation")
 	}
 	run, err := s.store.GetRun(ctx, approval.RunID)
 	if err != nil {
@@ -1621,6 +1703,22 @@ func validateRequestLimits(req domain.ExecRequest, limits config.Limits, redacto
 
 func isHostWorkspaceShell(req domain.ExecRequest) bool {
 	return req.Mode == domain.ExecWorkspaceShell && req.WorkspaceShellBackend == domain.WorkspaceShellModeHost
+}
+
+func requiresOneTimeApproval(req domain.ExecRequest) bool {
+	if isHostWorkspaceShell(req) {
+		return true
+	}
+	switch req.Mode {
+	case domain.ExecRemoteRead, domain.ExecRemoteSearch, domain.ExecWorkspaceRead, domain.ExecWorkspaceSearch:
+		return true
+	}
+	for _, program := range []string{"cat", "cut", "grep", "head", "less", "more", "tail"} {
+		if found, err := policy.ContainsProgram(req, program); err == nil && found {
+			return true
+		}
+	}
+	return false
 }
 
 func packageMutation(args []string) bool {

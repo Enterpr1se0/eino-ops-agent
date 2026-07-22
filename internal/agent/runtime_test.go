@@ -748,6 +748,17 @@ func TestBuildModelContextPreservesCompleteToolEvidence(t *testing.T) {
 	}
 }
 
+func TestBuildModelContextExcludesUIToolDisplayMetadata(t *testing.T) {
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "inspect host", Status: "completed"},
+		{Role: "tool", ToolName: "ssh_host_inspect", Content: `{"status":"completed","hostname":"demo","_display":{"arguments":{"host_id":"host-demo"},"request":{"host_id":"host-demo","program":"uname"}}}`, Status: "completed"},
+	}
+	messages, _ := buildModelContext(history, "continue")
+	if len(messages) != 3 || strings.Contains(messages[1].Content, "_display") || strings.Contains(messages[1].Content, "arguments") || !strings.Contains(messages[1].Content, `"hostname":"demo"`) {
+		t.Fatalf("UI-only Tool display metadata leaked into model context: %#v", messages)
+	}
+}
+
 func TestBuildModelContextExcludesFailedTurnWithoutActivity(t *testing.T) {
 	history := []domain.ChatMessage{
 		{Role: "user", Content: "request that never reached the model", Status: "failed"},
@@ -833,5 +844,20 @@ func TestToolHistoryIsEnrichedWithCompleteAuditedCommand(t *testing.T) {
 	nested := runtime.enrichToolContent(ctx, `{"task":{"id":"task_display","run_id":"run_display","status":"failed"},"result":{"run_id":"run_display","status":"failed","stderr":"command failed"}}`)
 	if !strings.Contains(nested, `"_display"`) || !strings.Contains(nested, `"stderr":"command failed"`) {
 		t.Fatalf("nested task result was not enriched without losing stderr: %s", nested)
+	}
+	failedBeforeRun := runtime.enrichToolContent(ctx, `{"ok":false,"status":"failed","message":"host is unavailable"}`, &capturedToolCall{
+		Name:      "ssh_host_inspect",
+		Arguments: `{"host_id":"host_display"}`,
+	})
+	if !strings.Contains(failedBeforeRun, `"arguments":{"host_id":"host_display"}`) || !strings.Contains(failedBeforeRun, `"tool_name":"ssh_host_inspect"`) {
+		t.Fatalf("tool call arguments were not preserved before an audit run existed: %s", failedBeforeRun)
+	}
+	workspaceCall := runtime.enrichToolContent(ctx, `{"ok":false,"status":"failed"}`, &capturedToolCall{
+		Name:      "workspace_file_read",
+		Arguments: `{"path":"README.md"}`,
+		Workspace: "workspace-demo",
+	})
+	if !strings.Contains(workspaceCall, `"workspace_id":"workspace-demo"`) {
+		t.Fatalf("conversation workspace target was not preserved: %s", workspaceCall)
 	}
 }

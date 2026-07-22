@@ -259,7 +259,12 @@ func (s *Store) UpdateWorkspace(ctx context.Context, workspace domain.Workspace)
 }
 
 func (s *Store) DeleteWorkspace(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM workspaces WHERE id=?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=?`, id)
 	if err != nil {
 		return err
 	}
@@ -267,7 +272,10 @@ func (s *Store) DeleteWorkspace(ctx context.Context, id string) error {
 	if count == 0 {
 		return ErrNotFound
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `UPDATE chat_sessions SET workspace_id='' WHERE workspace_id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func scanWorkspace(row scanner) (domain.Workspace, error) {
@@ -354,6 +362,12 @@ CREATE TABLE IF NOT EXISTS audit_events (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  session_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS chat_messages (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -504,13 +518,17 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO chat_sessions(session_id,workspace_id,created_at,updated_at)
+SELECT session_id,'',min(created_at),max(created_at) FROM chat_messages GROUP BY session_id`); err != nil {
+		return err
+	}
 	if err := s.migrateManagedWorkspaces(ctx); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS file_operations`); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name IN ('ssh_approval_status','ssh_task_start','ssh_task_status','ssh_task_tail','ssh_task_list','ssh_file_restore','ssh_file_create','workspace_file_create','ssh_file_search','workspace_file_search')`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name IN ('ssh_approval_status','ssh_task_start','ssh_task_status','ssh_task_tail','ssh_task_list','ssh_file_restore','ssh_file_create','workspace_file_create','ssh_file_search','workspace_file_search','workspace_list')`); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(id,agent_max_iterations,updated_at) VALUES(1,?,?)`,
@@ -1408,8 +1426,14 @@ func (s *Store) appendChatMessageWithAttachments(ctx context.Context, sessionID,
 		return "", err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO chat_sessions(session_id,workspace_id,created_at,updated_at) VALUES(?,?,?,?)`, sessionID, "", now, now); err != nil {
+		return "", err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO chat_messages(id,session_id,role,content,tool_name,status,created_at)
 VALUES(?,?,?,?,?,?,?)`, id, sessionID, role, content, toolName, status, now); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE chat_sessions SET updated_at=? WHERE session_id=?`, now, sessionID); err != nil {
 		return "", err
 	}
 	for _, attachment := range attachments {
@@ -1682,19 +1706,61 @@ WHERE attachments.id=? AND messages.session_id=?`, attachmentID, sessionID).Scan
 	return attachment, err
 }
 
+func (s *Store) CreateChatSession(ctx context.Context, sessionID, workspaceID string) (domain.ChatSession, error) {
+	now := formatTime(time.Now().UTC())
+	result, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO chat_sessions(session_id,workspace_id,created_at,updated_at) VALUES(?,?,?,?)`, sessionID, workspaceID, now, now)
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	created, err := result.RowsAffected()
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	if created != 1 {
+		return domain.ChatSession{}, ErrAlreadyExists
+	}
+	return s.GetChatSession(ctx, sessionID)
+}
+
+func (s *Store) GetChatSession(ctx context.Context, sessionID string) (domain.ChatSession, error) {
+	var session domain.ChatSession
+	var updated string
+	err := s.db.QueryRowContext(ctx, `SELECT session_id,workspace_id,updated_at FROM chat_sessions WHERE session_id=?`, sessionID).Scan(&session.ID, &session.WorkspaceID, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ChatSession{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	session.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return session, nil
+}
+
+func (s *Store) SetChatSessionWorkspace(ctx context.Context, sessionID, workspaceID string) (domain.ChatSession, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE chat_sessions SET workspace_id=?,updated_at=? WHERE session_id=?`, workspaceID, formatTime(time.Now().UTC()), sessionID)
+	if err != nil {
+		return domain.ChatSession{}, err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return domain.ChatSession{}, ErrNotFound
+	}
+	return s.GetChatSession(ctx, sessionID)
+}
+
 func (s *Store) ListChatSessions(ctx context.Context, limit int) ([]domain.ChatSession, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT messages.session_id,
+SELECT sessions.session_id,
   COALESCE(NULLIF((SELECT trim(substr(first.content,1,80)) FROM chat_messages AS first
-    WHERE first.session_id=messages.session_id AND first.role='user'
-    ORDER BY first.created_at ASC LIMIT 1),''),'Image') AS title,
-  count(*),max(messages.created_at)
-FROM chat_messages AS messages
-GROUP BY messages.session_id
-ORDER BY max(messages.created_at) DESC
+    WHERE first.session_id=sessions.session_id AND first.role='user'
+    ORDER BY first.created_at ASC LIMIT 1),''),'New conversation') AS title,
+  sessions.workspace_id,
+  (SELECT count(*) FROM chat_messages AS messages WHERE messages.session_id=sessions.session_id),
+  sessions.updated_at
+FROM chat_sessions AS sessions
+ORDER BY sessions.updated_at DESC
 LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -1704,7 +1770,7 @@ LIMIT ?`, limit)
 	for rows.Next() {
 		var session domain.ChatSession
 		var updated string
-		if err := rows.Scan(&session.ID, &session.Title, &session.MessageCount, &updated); err != nil {
+		if err := rows.Scan(&session.ID, &session.Title, &session.WorkspaceID, &session.MessageCount, &updated); err != nil {
 			return nil, err
 		}
 		session.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
@@ -1719,13 +1785,16 @@ func (s *Store) DeleteChatSession(ctx context.Context, sessionID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `DELETE FROM chat_messages WHERE session_id=?`, sessionID)
+	result, err := tx.ExecContext(ctx, `DELETE FROM chat_sessions WHERE session_id=?`, sessionID)
 	if err != nil {
 		return err
 	}
 	count, _ := result.RowsAffected()
 	if count == 0 {
 		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chat_messages WHERE session_id=?`, sessionID); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM checkpoints WHERE id=?`, sessionID); err != nil {
 		return err

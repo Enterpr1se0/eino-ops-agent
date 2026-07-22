@@ -337,6 +337,7 @@ type WebSession struct {
 type ChatSession struct {
 	ID           string    `json:"id"`
 	Title        string    `json:"title"`
+	WorkspaceID  string    `json:"workspace_id"`
 	MessageCount int       `json:"message_count"`
 	UpdatedAt    time.Time `json:"updated_at"`
 	Active       bool      `json:"active"`
@@ -381,18 +382,18 @@ type AgentPlanStep struct {
 type ExecMode string
 
 const (
-	ExecProgram         ExecMode = "program"
-	ExecScript          ExecMode = "script"
-	ExecWorkspaceRead   ExecMode = "workspace_read"
-	ExecWorkspaceList   ExecMode = "workspace_list"
-	ExecWorkspaceSearch ExecMode = "workspace_search"
-	ExecWorkspaceEdit   ExecMode = "workspace_edit"
-	ExecRemoteRead      ExecMode = "remote_read"
-	ExecRemoteSearch    ExecMode = "remote_search"
-	ExecRemoteEdit      ExecMode = "remote_edit"
-	ExecWorkspaceUpload ExecMode = "workspace_upload"
-	ExecWorkspaceShell  ExecMode = "workspace_shell"
-	ExecSSHFileTransfer ExecMode = "ssh_file_transfer"
+	ExecProgram                ExecMode = "program"
+	ExecScript                 ExecMode = "script"
+	ExecWorkspaceRead          ExecMode = "workspace_read"
+	ExecWorkspaceDirectoryList ExecMode = "workspace_directory_list"
+	ExecWorkspaceSearch        ExecMode = "workspace_search"
+	ExecWorkspaceEdit          ExecMode = "workspace_edit"
+	ExecRemoteRead             ExecMode = "remote_read"
+	ExecRemoteSearch           ExecMode = "remote_search"
+	ExecRemoteEdit             ExecMode = "remote_edit"
+	ExecWorkspaceUpload        ExecMode = "workspace_upload"
+	ExecWorkspaceShell         ExecMode = "workspace_shell"
+	ExecSSHFileTransfer        ExecMode = "ssh_file_transfer"
 )
 
 type ExecRequest struct {

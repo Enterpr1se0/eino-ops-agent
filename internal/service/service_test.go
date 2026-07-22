@@ -968,6 +968,22 @@ func TestChangeRequiresApprovalThenExecutes(t *testing.T) {
 	}
 }
 
+func TestFileContentCommandsRequireOneTimeApproval(t *testing.T) {
+	for _, req := range []domain.ExecRequest{
+		{Mode: domain.ExecProgram, Program: "cat", Args: []string{"/etc/app.conf"}},
+		{Mode: domain.ExecScript, Script: "set -e\ngrep token /etc/app.conf"},
+		{Mode: domain.ExecRemoteRead, RemotePath: "/etc/app.conf"},
+		{Mode: domain.ExecWorkspaceSearch, WorkspaceID: "project", RelativePath: "app.conf", SearchPattern: "token"},
+	} {
+		if !requiresOneTimeApproval(req) {
+			t.Fatalf("file content access permits session approval: %#v", req)
+		}
+	}
+	if requiresOneTimeApproval(domain.ExecRequest{Mode: domain.ExecProgram, Program: "ps", Args: []string{"aux"}}) {
+		t.Fatal("ordinary read-only status command was restricted to one-time approval")
+	}
+}
+
 func TestBlockingApprovalSuspendsToolAndResumesWithExecutionResult(t *testing.T) {
 	svc, transport, host := newTestService(t)
 	base, cancel := context.WithTimeout(context.Background(), 3*time.Second)

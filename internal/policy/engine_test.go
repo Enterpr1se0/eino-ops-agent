@@ -21,7 +21,8 @@ func TestDefaultPolicy(t *testing.T) {
 		action domain.DecisionAction
 	}{
 		{"read only", domain.ExecRequest{Mode: domain.ExecProgram, Program: "ps", Args: []string{"aux"}}, domain.RiskReadOnly, domain.ActionAllow},
-		{"read script with shell options", domain.ExecRequest{Mode: domain.ExecScript, Script: "set -e\nstat /etc/hosts\nsha256sum /etc/hosts\nhead -c 1 /etc/hosts"}, domain.RiskReadOnly, domain.ActionAllow},
+		{"read script with shell options", domain.ExecRequest{Mode: domain.ExecScript, Script: "set -e\nstat /etc/hosts\nsha256sum /etc/hosts\nhead -c 1 /etc/hosts"}, domain.RiskReadOnly, domain.ActionApprove},
+		{"direct file read cannot bypass file tool approval", domain.ExecRequest{Mode: domain.ExecProgram, Program: "cat", Args: []string{"/etc/app.conf"}}, domain.RiskReadOnly, domain.ActionApprove},
 		{"mutation", domain.ExecRequest{Mode: domain.ExecProgram, Program: "systemctl", Args: []string{"restart", "api"}}, domain.RiskChange, domain.ActionApprove},
 		{"managed sudo", domain.ExecRequest{Mode: domain.ExecProgram, Program: "id", Elevated: true}, domain.RiskCritical, domain.ActionBreakGlass},
 		{"destructive", domain.ExecRequest{Mode: domain.ExecProgram, Program: "rm", Args: []string{"-rf", "/tmp/demo"}}, domain.RiskCritical, domain.ActionBreakGlass},
@@ -29,8 +30,10 @@ func TestDefaultPolicy(t *testing.T) {
 		{"dynamic expansion", domain.ExecRequest{Mode: domain.ExecScript, Script: "echo $(whoami)"}, domain.RiskCritical, domain.ActionBreakGlass},
 		{"credential read", domain.ExecRequest{Mode: domain.ExecScript, Script: "cat ~/.ssh/id_ed25519"}, domain.RiskForbidden, domain.ActionDeny},
 		{"unparseable", domain.ExecRequest{Mode: domain.ExecScript, Script: "if then"}, domain.RiskCritical, domain.ActionBreakGlass},
-		{"remote file read", domain.ExecRequest{HostID: "host_1", Mode: domain.ExecRemoteRead, RemotePath: "/var/log/app.log", MaxBytes: 4096}, domain.RiskReadOnly, domain.ActionAllow},
-		{"remote file search", domain.ExecRequest{HostID: "host_1", Mode: domain.ExecRemoteSearch, RemotePath: "/var/log/app.log", SearchPattern: "ERROR", ContextLines: 2, MaxMatches: 20}, domain.RiskReadOnly, domain.ActionAllow},
+		{"remote file read", domain.ExecRequest{HostID: "host_1", Mode: domain.ExecRemoteRead, RemotePath: "/var/log/app.log", MaxBytes: 4096}, domain.RiskReadOnly, domain.ActionApprove},
+		{"remote file search", domain.ExecRequest{HostID: "host_1", Mode: domain.ExecRemoteSearch, RemotePath: "/var/log/app.log", SearchPattern: "ERROR", ContextLines: 2, MaxMatches: 20}, domain.RiskReadOnly, domain.ActionApprove},
+		{"workspace file read", domain.ExecRequest{Mode: domain.ExecWorkspaceRead, WorkspaceID: "default", RelativePath: "app.log"}, domain.RiskReadOnly, domain.ActionApprove},
+		{"workspace file search", domain.ExecRequest{Mode: domain.ExecWorkspaceSearch, WorkspaceID: "default", RelativePath: "app.log", SearchPattern: "ERROR"}, domain.RiskReadOnly, domain.ActionApprove},
 		{"remote credential read", domain.ExecRequest{HostID: "host_1", Mode: domain.ExecRemoteRead, RemotePath: "/etc/shadow"}, domain.RiskForbidden, domain.ActionDeny},
 		{"remote file edit", domain.ExecRequest{HostID: "host_1", Mode: domain.ExecRemoteEdit, RemotePath: "/etc/app.conf", Change: &domain.FileChange{Diff: "@@ -1 +1 @@\n-a\n+b\n"}}, domain.RiskChange, domain.ActionApprove},
 		{"workspace file edit", domain.ExecRequest{Mode: domain.ExecWorkspaceEdit, WorkspaceID: "default", RelativePath: "app.conf", Change: &domain.FileChange{Diff: "@@ -1 +1 @@\n-a\n+b\n"}}, domain.RiskChange, domain.ActionApprove},

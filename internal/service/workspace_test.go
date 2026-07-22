@@ -49,6 +49,103 @@ func newWorkspaceService(t *testing.T, access string) (*Service, string) {
 	return svc, filepath.Join(workspaceRoot, "project")
 }
 
+func TestConversationWorkspaceBindingIsAuthoritative(t *testing.T) {
+	svc, _ := newWorkspaceService(t, "read_write")
+	ctx := context.Background()
+	if _, err := svc.CreateAdminWorkspace(ctx, domain.WorkspaceInput{ID: "other", Access: "read_only"}, "web-user"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := svc.PrepareChatSession(ctx, "session-workspace", "project", "web-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.WorkspaceID != "project" {
+		t.Fatalf("bound Workspace = %q", session.WorkspaceID)
+	}
+	capability, err := svc.SessionWorkspace(WithSessionID(ctx, session.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capability.ID != "project" || capability.Access != "read_write" {
+		t.Fatalf("session capability = %#v", capability)
+	}
+	if _, err := svc.PrepareChatSession(ctx, session.ID, "other", "web-user"); err == nil || !strings.Contains(err.Error(), "switch it before sending") {
+		t.Fatalf("mismatched request Workspace was accepted: %v", err)
+	}
+	unbound, err := svc.SetChatSessionWorkspace(ctx, session.ID, "", "web-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unbound.WorkspaceID != "" {
+		t.Fatalf("unbound Workspace = %q", unbound.WorkspaceID)
+	}
+	if _, err := svc.SessionWorkspace(WithSessionID(ctx, session.ID)); err == nil || !strings.Contains(err.Error(), "no Workspace is bound") {
+		t.Fatalf("unbound conversation resolved a Workspace: %v", err)
+	}
+	if _, err := svc.SetChatSessionWorkspace(ctx, session.ID, "missing", "web-user"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing Workspace was accepted: %v", err)
+	}
+	if _, err := svc.SetChatSessionWorkspace(ctx, session.ID, "project", "web-user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteAdminWorkspace(ctx, "project", "web-user"); err != nil {
+		t.Fatal(err)
+	}
+	afterDelete, err := svc.GetChatSession(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterDelete.WorkspaceID != "" {
+		t.Fatalf("deleted Workspace remains bound: %q", afterDelete.WorkspaceID)
+	}
+}
+
+func runApprovedWorkspaceAccess(t *testing.T, svc *Service, invoke func(context.Context) (domain.ExecResult, error)) domain.ExecResult {
+	t.Helper()
+	base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	notifications := make(chan domain.ExecResult, 1)
+	ctx := WithApprovalNotifier(WithBlockingApprovals(base), func(result domain.ExecResult) {
+		notifications <- result
+	})
+	type outcome struct {
+		result domain.ExecResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := invoke(ctx)
+		done <- outcome{result: result, err: err}
+	}()
+	var pending domain.ExecResult
+	select {
+	case pending = <-notifications:
+	case <-base.Done():
+		t.Fatal("timed out waiting for Workspace file approval")
+	}
+	if pending.Status != "approval_required" || pending.Risk != domain.RiskReadOnly || pending.ApprovalID == "" {
+		t.Fatalf("Workspace file access skipped approval: %#v", pending)
+	}
+	select {
+	case early := <-done:
+		t.Fatalf("Workspace file access returned before approval: %#v", early)
+	default:
+	}
+	if _, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed file access", "operator"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case completed := <-done:
+		if completed.err != nil {
+			t.Fatal(completed.err)
+		}
+		return completed.result
+	case <-base.Done():
+		t.Fatal("timed out waiting for approved Workspace file access")
+		return domain.ExecResult{}
+	}
+}
+
 func TestWorkspaceAdminCreateUpdateAndRemove(t *testing.T) {
 	svc, projectRoot := newWorkspaceService(t, "read_write")
 	created, err := svc.CreateAdminWorkspace(context.Background(), domain.WorkspaceInput{ID: "docs", Access: "read_only"}, "admin-web")
@@ -122,10 +219,9 @@ func TestWorkspaceReadPatchAndTraversalProtection(t *testing.T) {
 	if err := os.WriteFile(path, []byte("port=8080\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	read, err := svc.ReadWorkspaceFile(context.Background(), "project", "app.conf", 0, 0, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	read := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.ReadWorkspaceFile(ctx, "project", "app.conf", 0, 0, "test")
+	})
 	if read.Status != "completed" || read.Stdout != "port=8080\n" || read.File == nil || read.File.SHA256 == "" {
 		t.Fatalf("unexpected workspace read: %#v", read)
 	}
@@ -156,10 +252,9 @@ func TestWorkspaceReadPreservesCompleteLargeFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "large.log"), []byte(want), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.ReadWorkspaceFile(context.Background(), "project", "large.log", 0, 0, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.ReadWorkspaceFile(ctx, "project", "large.log", 0, 0, "test")
+	})
 	if result.Stdout != want || result.File == nil || result.File.ReturnedBytes != len(want) {
 		t.Fatalf("complete workspace file was not returned: got=%d want=%d metadata=%#v", len(result.Stdout), len(want), result.File)
 	}
@@ -170,18 +265,16 @@ func TestWorkspaceReadNegativeOffsetReadsFromFileEnd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "tail.log"), []byte("0123456789"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.ReadWorkspaceFile(context.Background(), "project", "tail.log", 0, -4, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.ReadWorkspaceFile(ctx, "project", "tail.log", 0, -4, "test")
+	})
 	if result.Stdout != "6789" || result.File == nil || result.File.OffsetBytes != 6 || result.File.ReturnedBytes != 4 {
 		t.Fatalf("negative Workspace offset returned %#v", result)
 	}
 
-	result, err = svc.ReadWorkspaceFile(context.Background(), "project", "tail.log", 0, -100, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	result = runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.ReadWorkspaceFile(ctx, "project", "tail.log", 0, -100, "test")
+	})
 	if result.Stdout != "0123456789" || result.File == nil || result.File.OffsetBytes != 0 {
 		t.Fatalf("oversized negative Workspace offset returned %#v", result)
 	}
@@ -193,16 +286,37 @@ func TestWorkspaceSearchReturnsLiteralMatchesWithContext(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "search.log"), []byte(content), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.SearchWorkspace(context.Background(), "project", "search.log", "needle", 1, 4, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.SearchWorkspace(ctx, "project", "search.log", "needle", 1, 4, "test")
+	})
 	want := "1-before\n2:needle one\n3-middle\n4:needle two\n"
 	if result.Stdout != want {
 		t.Fatalf("Workspace search output = %q, want %q", result.Stdout, want)
 	}
 	if _, err := svc.SearchWorkspace(context.Background(), "project", "search.log", "needle", -1, 0, "test"); err == nil {
 		t.Fatal("Workspace search accepted negative context_lines")
+	}
+}
+
+func TestWorkspaceFileAccessRequiresFreshApproval(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_only")
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte("token: fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithSessionID(context.Background(), "file-read-session")
+	pending, err := svc.ReadWorkspaceFile(ctx, "project", "config.yaml", 0, 0, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != "approval_required" || pending.Risk != domain.RiskReadOnly || pending.Stdout != "" {
+		t.Fatalf("file content was available before approval: %#v", pending)
+	}
+	if _, err := svc.ApproveWithScope(context.Background(), pending.ApprovalID, "reviewed", "session", "operator"); err == nil || !strings.Contains(err.Error(), "one-time") {
+		t.Fatalf("file read accepted session approval: %v", err)
+	}
+	approved, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
+	if err != nil || approved.Status != "completed" || !strings.Contains(approved.Stdout, "token: fixture") {
+		t.Fatalf("approved file access failed: %#v err=%v", approved, err)
 	}
 }
 

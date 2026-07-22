@@ -84,9 +84,20 @@
 .tool-event-rich>summary{display:grid;grid-template-columns:30px minmax(0,1fr) auto 15px;gap:9px;align-items:center;padding:11px 13px}
 .tool-summary-icon{width:28px;height:28px;display:grid;place-items:center;border-radius:6px;background:#10291f;color:var(--green)}
 .tool-event-rich.failed .tool-summary-icon,.tool-event-rich.rejected .tool-summary-icon,.tool-event-rich.denied .tool-summary-icon{background:#301818;color:#ff8585}
-.tool-summary-copy{min-width:0;display:flex;align-items:baseline;gap:5px;overflow:hidden}
+.tool-summary-copy{min-width:0}
+.tool-summary-operation{display:flex;align-items:baseline;gap:5px;min-width:0;overflow:hidden}
 .tool-event summary .tool-summary-copy b{flex:0 0 auto;font:700 var(--text-control) Manrope,system-ui,sans-serif;color:#b9d1c6;white-space:nowrap}
 .tool-summary-copy code{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;color:#81a295;font:var(--text-caption)/1.45 DM Mono,'Noto Sans SC',monospace;white-space:nowrap}
+.tool-summary-targets{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin-top:6px}
+.tool-event summary .tool-target-chip{display:inline-flex;align-items:center;gap:5px;margin-left:0;padding:3px 6px;border:1px solid #2c5946;border-radius:5px;background:#0d241b;color:#7fd9a6;font:var(--text-micro) DM Mono,'Noto Sans SC',monospace;white-space:nowrap}
+.tool-event summary .tool-target-chip.workspace{border-color:#36526b;background:#0d1b27;color:#88b9e2}
+.tool-event summary .tool-target-chip.scope{border-color:#4b4930;background:#201d0e;color:#d1bd71}
+.tool-event summary .tool-target-chip>svg{flex:0 0 auto}
+.tool-event summary .tool-target-chip>em{color:#5f8977;font-style:normal}
+.tool-event summary .tool-target-chip.workspace>em{color:#67859f}.tool-event summary .tool-target-chip.scope>em{color:#928554}
+.tool-event summary .tool-target-chip>b{min-width:0;overflow:hidden;text-overflow:ellipsis;color:#c1e6d3;font:600 var(--text-caption) Manrope,'Noto Sans SC',sans-serif;white-space:nowrap}
+.tool-event summary .tool-target-chip.workspace>b{color:#bcd9f0}.tool-event summary .tool-target-chip.scope>b{color:#e2d79d}
+.tool-event summary .tool-target-chip>code{flex:0 0 auto;padding-left:5px;border-left:1px solid #2b4d3f;color:#70a88f;font:var(--text-micro) DM Mono,'Noto Sans SC',monospace;white-space:nowrap}
 .tool-summary-preview{grid-column:2/-1;min-width:0;margin-top:1px;padding:7px 9px;border:1px solid #192f26;border-left:2px solid #315847;border-radius:5px;background:#06100d;pointer-events:none}
 .tool-event summary .tool-summary-preview>span{display:block;margin:0 0 4px;color:#4f6b60;font:600 var(--text-micro) DM Mono,'Noto Sans SC',monospace;letter-spacing:.7px}
 .tool-event .tool-summary-preview pre{max-height:52px;margin:0;padding:0;border:0;overflow:hidden;color:#8ba298;font:var(--text-caption)/1.55 DM Mono,'Noto Sans SC',monospace;white-space:pre;word-break:normal;text-overflow:clip}

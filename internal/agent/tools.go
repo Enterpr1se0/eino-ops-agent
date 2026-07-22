@@ -99,9 +99,9 @@ func toolGuard(name string) string {
 	switch name {
 	case "ops_plan_create", "ops_plan_step_update":
 		return "agent_state"
-	case "ssh_exec", "ssh_run_script", "ssh_file_read":
+	case "ssh_exec", "ssh_run_script":
 		return "policy_checked"
-	case "ssh_file_edit", "ssh_file_transfer", "workspace_file_edit", "workspace_file_upload", "workspace_shell":
+	case "ssh_file_read", "workspace_file_read", "ssh_file_edit", "ssh_file_transfer", "workspace_file_edit", "workspace_file_upload", "workspace_shell":
 		return "approval_required"
 	case "ssh_task":
 		return "audited_control"
@@ -188,17 +188,11 @@ type SSHFileTransferInput struct {
 	Rollback                  string `json:"rollback" jsonschema:"how to remove or restore the destination file"`
 }
 
-type WorkspaceListOutput struct {
-	Workspaces []service.WorkspaceCapability `json:"workspaces"`
-}
-
 type WorkspacePathInput struct {
-	WorkspaceID string `json:"workspace_id" jsonschema:"allowlisted workspace identifier"`
-	Path        string `json:"path,omitempty" jsonschema:"clean path relative to the workspace root"`
+	Path string `json:"path,omitempty" jsonschema:"clean path relative to the conversation-bound Workspace root"`
 }
 
 type WorkspaceReadInput struct {
-	WorkspaceID  string `json:"workspace_id" jsonschema:"allowlisted workspace identifier"`
 	Path         string `json:"path" jsonschema:"clean path relative to the workspace root"`
 	MaxBytes     int    `json:"max_bytes,omitempty" jsonschema:"optional maximum bytes returned; omitted returns all remaining content"`
 	OffsetBytes  int64  `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset from the start; a negative value reads that many final bytes from the end"`
@@ -208,17 +202,15 @@ type WorkspaceReadInput struct {
 }
 
 type WorkspaceFileEditInput struct {
-	WorkspaceID string `json:"workspace_id" jsonschema:"allowlisted read_write workspace identifier"`
-	Path        string `json:"path" jsonschema:"existing clean file path relative to the workspace root"`
-	Diff        string `json:"diff" jsonschema:"complete unified diff containing one or more hunks for this file"`
-	Validator   string `json:"validator,omitempty" jsonschema:"allowlisted workspace validator id"`
-	Reason      string `json:"reason" jsonschema:"evidence-based reason for the change"`
+	Path      string `json:"path" jsonschema:"existing clean file path relative to the conversation-bound Workspace root"`
+	Diff      string `json:"diff" jsonschema:"complete unified diff containing one or more hunks for this file"`
+	Validator string `json:"validator,omitempty" jsonschema:"allowlisted workspace validator id"`
+	Reason    string `json:"reason" jsonschema:"evidence-based reason for the change"`
 }
 
 type WorkspaceUploadInput struct {
 	HostID         string `json:"host_id" jsonschema:"registered destination host identifier"`
-	WorkspaceID    string `json:"workspace_id" jsonschema:"allowlisted source workspace identifier"`
-	Path           string `json:"path" jsonschema:"clean source path relative to the workspace root"`
+	Path           string `json:"path" jsonschema:"clean source path relative to the conversation-bound Workspace root"`
 	ExpectedSHA256 string `json:"expected_sha256" jsonschema:"sha256 returned by workspace_file_read; upload is rejected if the source changed"`
 	RemotePath     string `json:"remote_path" jsonschema:"absolute destination path on the remote host"`
 	Reason         string `json:"reason" jsonschema:"why this transfer is needed"`
@@ -226,7 +218,6 @@ type WorkspaceUploadInput struct {
 }
 
 type WorkspaceShellInput struct {
-	WorkspaceID     string            `json:"workspace_id" jsonschema:"allowlisted workspace identifier"`
 	Script          string            `json:"script" jsonschema:"complete non-interactive script for the operator-selected Workspace Shell backend; Bash on Unix and PowerShell on Windows Host Shell"`
 	Cwd             string            `json:"cwd,omitempty" jsonschema:"clean directory relative to the workspace root; defaults to the root"`
 	Env             map[string]string `json:"env,omitempty" jsonschema:"non-secret environment variables passed to the selected Workspace Shell backend"`
@@ -380,6 +371,10 @@ func RunFileReadTool(ctx context.Context, svc *service.Service, input FileReadIn
 }
 
 func RunWorkspaceFileReadTool(ctx context.Context, svc *service.Service, input WorkspaceReadInput, actor string) (domain.ExecResult, error) {
+	workspace, err := svc.SessionWorkspace(ctx)
+	if err != nil {
+		return NormalizeExecToolResult(domain.ExecResult{}, err)
+	}
 	searching := input.Pattern != ""
 	if searching && (input.MaxBytes != 0 || input.OffsetBytes != 0) {
 		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: pattern cannot be combined with max_bytes or offset_bytes"))
@@ -388,10 +383,10 @@ func RunWorkspaceFileReadTool(ctx context.Context, svc *service.Service, input W
 		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: context_lines and max_matches require pattern"))
 	}
 	if searching {
-		result, err := svc.SearchWorkspace(ctx, input.WorkspaceID, input.Path, input.Pattern, input.ContextLines, input.MaxMatches, actor)
+		result, err := svc.SearchWorkspace(ctx, workspace.ID, input.Path, input.Pattern, input.ContextLines, input.MaxMatches, actor)
 		return NormalizeExecToolResult(result, err)
 	}
-	result, err := svc.ReadWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.MaxBytes, input.OffsetBytes, actor)
+	result, err := svc.ReadWorkspaceFile(ctx, workspace.ID, input.Path, input.MaxBytes, input.OffsetBytes, actor)
 	return NormalizeExecToolResult(result, err)
 }
 
@@ -600,7 +595,7 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_read", "Read one remote file. By default returns complete content; byte ranges, tail lines, and metadata-only reads are optional. Set pattern to search literal text instead, with optional context_lines and max_matches. Read-range parameters and search parameters are mutually exclusive. Sensitive credential paths are denied.", func(ctx context.Context, input FileReadInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_file_read", "Read one remote file after one-time human approval. By default returns complete content; byte ranges, tail lines, and metadata-only reads are optional. Set pattern to search literal text instead, with optional context_lines and max_matches; searches also require one-time approval. Read-range parameters and search parameters are mutually exclusive. Sensitive credential paths are denied.", func(ctx context.Context, input FileReadInput) (domain.ExecResult, error) {
 		return RunFileReadTool(ctx, svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err
@@ -623,36 +618,47 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_list", "List administrator-allowlisted local project workspaces and their read_only or read_write capability. Root paths are never disclosed.", func(_ context.Context, _ struct{}) (WorkspaceListOutput, error) {
-		return WorkspaceListOutput{Workspaces: svc.ListWorkspaceCapabilities()}, nil
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("workspace_file_list", "List one directory inside an allowlisted workspace. Symbolic links and sensitive control-plane paths are excluded.", func(ctx context.Context, input WorkspacePathInput) (domain.ExecResult, error) {
-		result, err := svc.ListWorkspaceFiles(ctx, input.WorkspaceID, input.Path, "eino-agent")
+	if err := appendTool(toolutils.InferTool("workspace_file_list", "List one directory inside the Workspace bound to this conversation. Symbolic links and sensitive control-plane paths are excluded.", func(ctx context.Context, input WorkspacePathInput) (domain.ExecResult, error) {
+		workspace, err := svc.SessionWorkspace(ctx)
+		if err != nil {
+			return NormalizeExecToolResult(domain.ExecResult{}, err)
+		}
+		result, err := svc.ListWorkspaceFiles(ctx, workspace.ID, input.Path, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_file_read", "Read one allowlisted Workspace file. By default returns complete content; byte ranges are optional and negative offset_bytes reads from the file end. Set pattern to search literal text instead, with optional context_lines and max_matches. Read-range and search parameters are mutually exclusive. SHA256 metadata is returned for content reads and sensitive paths are denied.", func(ctx context.Context, input WorkspaceReadInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("workspace_file_read", "Read one file from the Workspace bound to this conversation after one-time human approval. By default returns complete content; byte ranges are optional and negative offset_bytes reads from the file end. Set pattern to search literal text instead, with optional context_lines and max_matches; searches also require one-time approval. Read-range and search parameters are mutually exclusive. SHA256 metadata is returned for content reads and sensitive paths are denied.", func(ctx context.Context, input WorkspaceReadInput) (domain.ExecResult, error) {
 		return RunWorkspaceFileReadTool(ctx, svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_file_edit", "Apply a unified diff to one existing file inside a read_write workspace after human approval. The approval shows the exact added and deleted lines.", func(ctx context.Context, input WorkspaceFileEditInput) (domain.ExecResult, error) {
-		result, err := svc.EditWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.Diff, input.Validator, input.Reason, "eino-agent")
+	if err := appendTool(toolutils.InferTool("workspace_file_edit", "Apply a unified diff to one existing file inside the conversation-bound read_write Workspace after human approval. The approval shows the exact added and deleted lines.", func(ctx context.Context, input WorkspaceFileEditInput) (domain.ExecResult, error) {
+		workspace, err := svc.SessionWorkspace(ctx)
+		if err != nil {
+			return NormalizeExecToolResult(domain.ExecResult{}, err)
+		}
+		result, err := svc.EditWorkspaceFile(ctx, workspace.ID, input.Path, input.Diff, input.Validator, input.Reason, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_file_upload", "Upload one Workspace file to a registered SSH host through one approved SFTP operation. Always bind expected_sha256 from workspace_file_read. This is the only supported local-to-remote file transfer path.", func(ctx context.Context, input WorkspaceUploadInput) (domain.ExecResult, error) {
-		result, err := svc.UploadWorkspaceFileToHost(ctx, input.HostID, input.WorkspaceID, input.Path, input.ExpectedSHA256, input.RemotePath, input.Reason, input.Rollback, "eino-agent")
+	if err := appendTool(toolutils.InferTool("workspace_file_upload", "Upload one file from the conversation-bound Workspace to a registered SSH host through one approved SFTP operation. Always bind expected_sha256 from workspace_file_read. This is the only supported local-to-remote file transfer path.", func(ctx context.Context, input WorkspaceUploadInput) (domain.ExecResult, error) {
+		workspace, err := svc.SessionWorkspace(ctx)
+		if err != nil {
+			return NormalizeExecToolResult(domain.ExecResult{}, err)
+		}
+		result, err := svc.UploadWorkspaceFileToHost(ctx, input.HostID, workspace.ID, input.Path, input.ExpectedSHA256, input.RemotePath, input.Reason, input.Rollback, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_shell", "Run one non-interactive script using the operator-selected Workspace Shell backend for archive extraction, builds, tests, and packaging. Sandbox mode uses network-disabled Bubblewrap on Linux. Host mode has full host filesystem and network authority, is limited to read_write Workspaces, and requires a fresh one-time human approval for every invocation. Disabled mode rejects the call.", func(ctx context.Context, input WorkspaceShellInput) (domain.ExecResult, error) {
-		result, err := svc.RunWorkspaceShell(ctx, input.WorkspaceID, input.Script, input.Cwd, input.Env, input.TimeoutSeconds, input.Reason, input.ExpectedChanges, input.Rollback, "eino-agent")
+	if err := appendTool(toolutils.InferTool("workspace_shell", "Run one non-interactive script in the Workspace bound to this conversation using the operator-selected Workspace Shell backend for archive extraction, builds, tests, and packaging. Sandbox mode uses network-disabled Bubblewrap on Linux. Host mode has full host filesystem and network authority, is limited to read_write Workspaces, and requires a fresh one-time human approval for every invocation. Disabled mode rejects the call.", func(ctx context.Context, input WorkspaceShellInput) (domain.ExecResult, error) {
+		workspace, err := svc.SessionWorkspace(ctx)
+		if err != nil {
+			return NormalizeExecToolResult(domain.ExecResult{}, err)
+		}
+		result, err := svc.RunWorkspaceShell(ctx, workspace.ID, input.Script, input.Cwd, input.Env, input.TimeoutSeconds, input.Reason, input.ExpectedChanges, input.Rollback, "eino-agent")
 		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err

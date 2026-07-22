@@ -55,6 +55,8 @@ const newSessionMarker = '__new__'
 const defaultChatImageTypes=['image/png','image/jpeg','image/webp','image/gif']
 function rememberSession(id: string) { try { localStorage.setItem('opspilot.activeSession', id) } catch { /* storage may be disabled */ } }
 function recalledSession() { try { return localStorage.getItem('opspilot.activeSession') || '' } catch { return '' } }
+function rememberWorkspace(id:string){try{if(id)localStorage.setItem('opspilot.activeWorkspace',id)}catch{/* storage may be disabled */}}
+function recalledWorkspace(){try{return localStorage.getItem('opspilot.activeWorkspace')||''}catch{return''}}
 
 function App() {
 	const {t}=useTranslation()
@@ -131,7 +133,7 @@ function App() {
       </nav>
       <div className="sidebar-foot">
 			<button className="logout-button" onClick={async()=>{try{await api.logout()}finally{setAuth('guest')}}}><LogOut size={15}/>{t('shell.signOut')}</button>
-        <div className="build">v0.1.0</div>
+        <div className="build">v0.1.1</div>
       </div>
     </aside>
     <main>
@@ -554,8 +556,10 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
 	const [stopping,setStopping]=useState(false)
   const [reasoningSeen, setReasoningSeen] = useState(false)
   const [plan,setPlan]=useState<AgentPlan|null>(null)
-  const [approvalNotice,setApprovalNotice]=useState('')
-	const [workspaceID,setWorkspaceID]=useState('')
+	const [approvalNotice,setApprovalNotice]=useState('')
+	const [workspaceID,setWorkspaceID]=useState(recalledWorkspace)
+	const [boundWorkspaceID,setBoundWorkspaceID]=useState('')
+	const [workspaceSwitching,setWorkspaceSwitching]=useState(false)
   const messagesRef=useRef<HTMLDivElement>(null)
   const stickToLatest=useRef(true)
 	  const activeStreamRef=useRef<ActiveChatStream|null>(null)
@@ -564,9 +568,9 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
   const hostNames = useMemo(() => hosts.map((host) => host.name).join(', '), [hosts])
   const currentApprovals=useMemo(()=>sessionId?approvals.filter(item=>item.session_id===sessionId):[],[approvals,sessionId])
 	const pendingExplanationID=currentApprovals.find(item=>item.ai_review?.status==='pending')?.id||''
-  const sessionBusy=running||detachedRunning
+	const sessionBusy=running||detachedRunning
 	const selectedWorkspace=capabilities.workspaces.find(workspace=>workspace.id===workspaceID)||capabilities.workspaces[0]
-	useEffect(()=>{if(selectedWorkspace&&workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
+	useEffect(()=>{if(!selectedWorkspace)return;if(workspaceID!==selectedWorkspace.id)setWorkspaceID(selectedWorkspace.id);rememberWorkspace(selectedWorkspace.id)},[selectedWorkspace,workspaceID])
 	useEffect(()=>{onStreamingChange(running)},[running,onStreamingChange])
 	useEffect(()=>()=>onStreamingChange(false),[onStreamingChange])
 	useEffect(()=>()=>{sessionLoadRef.current='';const stream=activeStreamRef.current;activeStreamRef.current=null;stream?.controller.abort()},[])
@@ -603,7 +607,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
     try {
       const state = await api.chatState(id)
       if(sessionLoadRef.current!==requestID)return
-	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setPlan(state.plan||null)
+	      setEntries(historyEntries(state.messages||[],id));setDetachedRunning(!!state.active);setStopping(false);setPlan(state.plan||null);setWorkspaceID(state.workspace_id||'');setBoundWorkspaceID(state.workspace_id||'')
       setSessionId(id); rememberSession(id); setHistoryError('')
       void refresh()
     } catch (err) { if(sessionLoadRef.current===requestID)setHistoryError(errorText(err)) }
@@ -649,15 +653,17 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
   }, [loadSession])
 
   const newChat = () => {
+		if(workspaceSwitching)return
     detachActiveStream()
     sessionLoadRef.current=''
     setLoadingSession('')
     setHistoryOpen(false)
-	    stickToLatest.current=true;setSessionId(''); setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setPlan(null); rememberSession(newSessionMarker)
+	    stickToLatest.current=true;setSessionId('');setBoundWorkspaceID('');setEntries([]); setMessage('');clearPendingImages(); setHistoryError(''); setReasoningSeen(false);setDetachedRunning(false);setStopping(false);setPlan(null); rememberSession(newSessionMarker)
     void refreshSessions()
   }
 
-  const switchSession = (id:string) => {
+	const switchSession = (id:string) => {
+		if(workspaceSwitching)return
     setHistoryOpen(false)
     if(id===sessionId){
       if(loadingSession){sessionLoadRef.current='';setLoadingSession('')}
@@ -668,6 +674,19 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
     void loadSession(id)
     void refreshSessions()
   }
+
+	const switchWorkspace=async(id:string)=>{
+		if(id===selectedWorkspace?.id||sessionBusy||loadingSession||workspaceSwitching)return
+		if(!sessionId){setWorkspaceID(id);return}
+		setWorkspaceSwitching(true);setHistoryError('')
+		try{
+			const session=await api.setChatSessionWorkspace(sessionId,id)
+			setWorkspaceID(session.workspace_id);setBoundWorkspaceID(session.workspace_id)
+			setSessions(current=>current.map(item=>item.id===session.id?{...item,workspace_id:session.workspace_id,updated_at:session.updated_at}:item))
+			void refreshSessions()
+		}catch(err){setHistoryError(errorText(err))}
+		finally{setWorkspaceSwitching(false)}
+	}
 
   const removeSession = async (session: ChatSession) => {
     const active=session.active||(session.id===sessionId&&sessionBusy)
@@ -680,7 +699,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
   }
 
 	  const sendQuery = async (query:string,queryImages:PendingChatImage[]) => {
-	    query=query.trim(); if((!query&&!queryImages.length)||sessionBusy||loadingSession)return
+	    query=query.trim(); if((!query&&!queryImages.length)||sessionBusy||loadingSession||workspaceSwitching)return
     let querySessionID=sessionId
     const userEntryID=clientId()
     const streamID=clientId()
@@ -692,9 +711,9 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
 	    const entryImages=queryImages.map(image=>({id:image.id,name:image.file.name,mimeType:image.file.type,sizeBytes:image.file.size,url:image.url}))
 	    setEntries((old) => [...old, { id: userEntryID, kind: 'user', content: query, images:entryImages, status:'pending' }, { id: 'streaming', kind: 'assistant', content: '', streaming:true }])
 	    try {
-	      await streamChat(sessionId, query, queryImages.map(image=>image.file), (frame: AgentEvent) => {
+	      await streamChat(sessionId, selectedWorkspace?.id||'', query, queryImages.map(image=>image.file), (frame: AgentEvent) => {
         if(!isAttached())return
-        if (frame.session_id) { querySessionID=frame.session_id;activeStreamRef.current!.sessionId=frame.session_id;setSessionId(frame.session_id); rememberSession(frame.session_id) }
+	        if (frame.session_id) { querySessionID=frame.session_id;activeStreamRef.current!.sessionId=frame.session_id;setSessionId(frame.session_id);setBoundWorkspaceID(selectedWorkspace?.id||'');rememberSession(frame.session_id) }
         if (frame.type === 'approval') { setEntries(old=>old.map(item=>item.id===userEntryID?{...item,status:'completed'}:item));setApprovalNotice('');void refreshApprovals() }
         if (frame.type === 'reasoning' && frame.content) {
           setReasoningSeen(true)
@@ -719,14 +738,14 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
       setEntries((old) => old.filter((item) => item.id !== 'streaming' || item.content !== '').map((item)=>item.id==='streaming'?{...item,streaming:false}:deactivateReasoning(item)))
       setRunning(false)
 		setStopping(false)
-	      if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setPlan(state.plan||null);setEntries(old=>[...historyEntries(state.messages||[],querySessionID),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))]);for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
+	      if(querySessionID){try{const state=await api.chatState(querySessionID);if(!isAttached())return;setDetachedRunning(!!state.active);setPlan(state.plan||null);setBoundWorkspaceID(state.workspace_id||'');setEntries(old=>[...historyEntries(state.messages||[],querySessionID),...old.filter(item=>item.kind==='error'&&!item.id.startsWith('history_'))]);for(const image of queryImages){URL.revokeObjectURL(image.url);imageURLsRef.current.delete(image.url)}}catch{/* polling or the next reload will recover state */}}
       if(!isAttached())return
       activeStreamRef.current=null
       void refreshSessions();void refresh()
     }
   }
 
-	  const submit = (event: FormEvent) => {event.preventDefault();const query=message.trim();if((!query&&!pendingImages.length)||sessionBusy||loadingSession)return;const images=pendingImages;setMessage('');setPendingImages([]);setImageInputKey(value=>value+1);setImageNotice('');void sendQuery(query,images)}
+	  const submit = (event: FormEvent) => {event.preventDefault();const query=message.trim();if((!query&&!pendingImages.length)||sessionBusy||loadingSession||workspaceSwitching)return;const images=pendingImages;setMessage('');setPendingImages([]);setImageInputKey(value=>value+1);setImageNotice('');void sendQuery(query,images)}
 	const stopAgent = async () => {
 		const targetSessionID=activeStreamRef.current?.sessionId||sessionId
 		if(!targetSessionID||!sessionBusy||stopping)return
@@ -742,7 +761,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
   const streamingResponseStarted=entries.some((item)=>item.id==='streaming'&&item.content!=='')
 
   return <div className="chat-layout">
-    <ChatWorkspacePanel key={selectedWorkspace?.id||''} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} onSelect={setWorkspaceID}/>
+    <ChatWorkspacePanel key={selectedWorkspace?.id||''} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} switching={workspaceSwitching} disabled={sessionBusy||!!loadingSession} bound={!!selectedWorkspace&&boundWorkspaceID===selectedWorkspace.id} onSelect={id=>void switchWorkspace(id)}/>
     <div className="chat-main panel">
 	  <div className="panel-header"><div><Bot size={18}/><span>{t('chat.session')}</span></div><div className="chat-header-actions"><span className="session-id">{sessionId ? sessionId.slice(0, 20) : t('chat.newSession')}</span><button className="mobile-history-button" onClick={()=>setHistoryOpen(true)} title={t('chat.conversations')} aria-label={t('chat.openConversations')}><History size={15}/>{activeSessionCount>0&&<em>{activeSessionCount}</em>}</button></div></div>
       <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refresh={refresh} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
@@ -758,14 +777,14 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
 			  <div className="context-line"><span><Server size={13}/>{hosts.length?t('chat.hostsCount',{count:hosts.length,names:hostNames}):t('chat.noHosts')}</span><span className="composer-workspace"><FolderOpen size={13}/>{selectedWorkspace?t('chat.workspaceSelected',{id:selectedWorkspace.id}):t('chat.noWorkspace')}</span>{selectedWorkspace?.access==='read_write'&&<QuickWorkspaceUpload workspace={selectedWorkspace}/>}<span><Cpu size={13}/>{modelName || t('chat.noModel')}</span></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
-			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>
+			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||workspaceSwitching||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || workspaceSwitching || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>
 		  </form>
     </div>
 	{historyOpen&&<button className="conversation-backdrop" onClick={()=>setHistoryOpen(false)} aria-label={t('chat.closeConversations')}/>}
-	<aside className={`context-panel conversation-panel panel ${historyOpen?'mobile-open':''}`}><div className="panel-header"><div><History size={17}/><span>{t('chat.conversations')}</span></div><section className="conversation-header-actions"><button className="new-chat-button" onClick={newChat} title={t('chat.newConversation')}><Plus size={14}/>{t('common.new')}</button><button className="conversation-close-button" onClick={()=>setHistoryOpen(false)} title={t('chat.closeConversations')} aria-label={t('chat.closeConversations')}><X size={14}/></button></section></div><div className="session-list">
+	<aside className={`context-panel conversation-panel panel ${historyOpen?'mobile-open':''}`}><div className="panel-header"><div><History size={17}/><span>{t('chat.conversations')}</span></div><section className="conversation-header-actions"><button className="new-chat-button" onClick={newChat} disabled={workspaceSwitching} title={t('chat.newConversation')}><Plus size={14}/>{t('common.new')}</button><button className="conversation-close-button" onClick={()=>setHistoryOpen(false)} title={t('chat.closeConversations')} aria-label={t('chat.closeConversations')}><X size={14}/></button></section></div><div className="session-list">
       {historyError&&<div className="history-error">{historyError}</div>}
 	  {!sessions.length&&!historyError&&<div className="history-empty">{t('chat.noSaved')}</div>}
-	  {sessions.map(session=>{const pending=approvals.filter(item=>item.session_id===session.id).length;const active=session.active||(session.id===sessionId&&sessionBusy);return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>switchSession(session.id)} disabled={loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{t('chat.approvalCount',{count:pending})}</em>}{active&&<em className="session-running-count">{t('chat.runningBadge')}</em>}</b><span>{new Date(session.updated_at).toLocaleString(localeFor(instance.language))} · {t('chat.messageCount',{count:session.message_count})}</span></button><button className="session-delete" onClick={()=>removeSession(session)} disabled={active} title={active?t('chat.cannotDelete'):t('chat.deleteConversation')}><Trash2 size={13}/></button></div>})}
+	  {sessions.map(session=>{const pending=approvals.filter(item=>item.session_id===session.id).length;const active=session.active||(session.id===sessionId&&sessionBusy);return <div className={`session-item ${session.id===sessionId?'active':''}`} key={session.id}><button className="session-open" onClick={()=>switchSession(session.id)} disabled={workspaceSwitching||loadingSession===session.id}><b>{session.title}{pending>0&&<em className="session-approval-count">{t('chat.approvalCount',{count:pending})}</em>}{active&&<em className="session-running-count">{t('chat.runningBadge')}</em>}</b><span>{new Date(session.updated_at).toLocaleString(localeFor(instance.language))} · {t('chat.messageCount',{count:session.message_count})} · {session.workspace_id||t('chat.noWorkspace')}</span></button><button className="session-delete" onClick={()=>removeSession(session)} disabled={active||workspaceSwitching} title={active?t('chat.cannotDelete'):t('chat.deleteConversation')}><Trash2 size={13}/></button></div>})}
 	</div><div className="session-summary"><Metric label={t('chat.saved')} value={sessions.length.toString()} tone="green"/><Metric label={t('chat.hosts')} value={hosts.length.toString()}/></div></aside>
   </div>
 }
@@ -776,7 +795,7 @@ type WorkspaceNotice={kind:'success'|'error';text:string}
 
 function workspaceChildPath(path:string,name:string){return path==='.'?name:`${path}/${name}`}
 
-function ChatWorkspacePanel({workspaces,workspaceID,onSelect}:{workspaces:WorkspaceCapability[];workspaceID:string;onSelect:(id:string)=>void}){
+function ChatWorkspacePanel({workspaces,workspaceID,switching,disabled,bound,onSelect}:{workspaces:WorkspaceCapability[];workspaceID:string;switching:boolean;disabled:boolean;bound:boolean;onSelect:(id:string)=>void}){
 	const {t}=useTranslation()
 	const workspace=workspaces.find(item=>item.id===workspaceID)||workspaces[0]
 	const activeWorkspaceID=workspace?.id||''
@@ -876,8 +895,8 @@ function ChatWorkspacePanel({workspaces,workspaceID,onSelect}:{workspaces:Worksp
 	if(!workspace)return <aside className="workspace-browser-panel panel empty"><div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div></div><div className="workspace-empty"><FolderOpen size={23}/><span>{t('workspace.noConfigured')}</span></div></aside>
 	return <>
 		<aside className={`workspace-browser-panel panel ${dragging?'dragging':''}`} onDragEnter={dragEnter} onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
-			<div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div><select value={workspace.id} disabled={workspaces.length<2} onChange={event=>onSelect(event.target.value)} aria-label={t('workspace.switchWorkspace')}>{workspaces.map(item=><option value={item.id} key={item.id}>{item.id}</option>)}</select></div>
-			<div className="chat-workspace-head"><span><b>{workspace.id}</b></span><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em></div>
+			<div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div><select value={workspace.id} disabled={workspaces.length<2||disabled||switching} onChange={event=>onSelect(event.target.value)} aria-label={t('workspace.switchWorkspace')}>{workspaces.map(item=><option value={item.id} key={item.id}>{item.id}</option>)}</select></div>
+			<div className="chat-workspace-head"><span><b>{workspace.id}</b>{(switching||bound)&&<small>{switching?t('workspace.switching'):t('workspace.boundToConversation')}</small>}</span><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em></div>
 			<div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" onChange={choose}/></label>}<button onClick={()=>synchronize(true)} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>
 			{file&&<div className="chat-upload-row"><input value={target} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}
 			<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=workspaceChildPath(path,entry.name);return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>void removeEntry(entry.name,entry.type)} disabled={deleting===fullPath} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>
@@ -944,6 +963,13 @@ function formatDuration(value:unknown,run?:Run){if(typeof value==='number'&&Numb
 function numberValue(value:unknown){return typeof value==='number'&&Number.isFinite(value)?value:0}
 function cleanFileChangeOutput(value:string){const lines=value.split(/\r?\n/),result:string[]=[];for(let index=0;index<lines.length;index++){if(lines[index]==='__OPS_FILE_VALIDATION_OK__')continue;if(lines[index]==='__OPS_FILE_AFTER__'){index++;continue}result.push(lines[index])}return result.join('\n').trim()}
 
+type ToolTarget={kind:'host'|'workspace'|'scope';label:string;name:string;id?:string}
+function hostIdentity(hosts:Host[],hostID:string){
+	const host=hosts.find(item=>item.id===hostID||item.name===hostID)
+	return {name:host?.name||'',id:host?.id||hostID}
+}
+function recordArray(value:unknown){return Array.isArray(value)?value.map(jsonRecord).filter((item):item is JsonRecord=>!!item):[]}
+
 type DiffRow={kind:'header'|'hunk'|'add'|'delete'|'context'|'meta';oldLine?:number;newLine?:number;text:string}
 function parseDiffRows(diff:string):DiffRow[]{
 	let oldLine=0,newLine=0
@@ -971,16 +997,19 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
   const runID=textValue(payload.run_id)||textValue(taskPayload?.run_id)||textValue(resultPayload?.run_id)
   const run=runs.find(item=>item.id===runID)
   const display=jsonRecord(payload._display)
+	const toolArguments=jsonRecord(display?.arguments)
 	const request=jsonRecord(display?.request)||requestFromRun(run)
-  const hostID=textValue(display?.host_id)||run?.host_id||textValue(request?.host_id)
-  const hostName=hosts.find(host=>host.id===hostID||host.name===hostID)?.name||hostID||'—'
+	const destinationHostID=textValue(display?.host_id)||run?.host_id||textValue(request?.host_id)||textValue(toolArguments?.host_id)||textValue(toolArguments?.destination_host_id)
+	const destinationHost=hostIdentity(hosts,destinationHostID)
+  const hostID=destinationHost.id
+  const hostName=destinationHost.name||hostID||'—'
   const status=textValue(payload.status)||textValue(taskPayload?.status)||textValue(resultPayload?.status)||run?.status||'completed'
   const risk=textValue(display?.risk)||textValue(resultPayload?.risk)||run?.risk||''
 	const program=request?fullProgram(request):''
 	const script=request?textValue(request.script):''
 	const change=jsonRecord(request?.change)||jsonRecord(payload.change)||jsonRecord(resultPayload?.change)
   const remotePath=request?textValue(request.remote_path):''
-	const workspaceID=request?textValue(request.workspace_id):''
+	const workspaceID=textValue(display?.workspace_id)||(request?textValue(request.workspace_id):'')
 	const relativePath=request?textValue(request.relative_path):''
 	const requestMode=request?textValue(request.mode):''
 	const unifiedFileRead=entry.tool==='ssh_file_read'||entry.tool==='workspace_file_read'
@@ -989,11 +1018,13 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const structuredFileOperation=fileReadMode||fileSearchMode
 	const searchPattern=request?textValue(request.search_pattern):''
 	const workspaceShellBackend=request?textValue(request.workspace_shell_backend):''
-	const workspaceTransfer=requestMode==='workspace_upload'
-	const sshTransfer=requestMode==='ssh_file_transfer'
-	const sourceHostID=request?textValue(request.source_host_id):''
-	const sourcePath=request?textValue(request.source_path):''
-	const sourceHostName=hosts.find(host=>host.id===sourceHostID||host.name===sourceHostID)?.name||sourceHostID
+	const workspaceTransfer=requestMode==='workspace_upload'||entry.tool==='workspace_file_upload'
+	const sshTransfer=requestMode==='ssh_file_transfer'||entry.tool==='ssh_file_transfer'
+	const workspaceTool=!!entry.tool?.startsWith('workspace_')
+	const sourceHostID=(request?textValue(request.source_host_id):'')||textValue(toolArguments?.source_host_id)
+	const sourcePath=(request?textValue(request.source_path):'')||textValue(toolArguments?.source_path)
+	const sourceHost=hostIdentity(hosts,sourceHostID)
+	const sourceHostName=sourceHost.name||sourceHost.id
 	const file=jsonRecord(payload.file)||jsonRecord(resultPayload?.file)
 	const filePath=textValue(file?.path)||remotePath||relativePath
 	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
@@ -1020,13 +1051,35 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
   const stderr=textValue(payload.stderr)||textValue(resultPayload?.stderr)||run?.stderr_redacted||run?.error||''
   const stdoutPreview=latestOutput(stdout)
 	const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||operation
+	const historyRuns=[...recordArray(payload.runs),...recordArray(resultPayload?.runs)]
+	const historyHostIDs=[...new Set(historyRuns.map(item=>textValue(item.host_id)).filter(Boolean))]
+	const listedHosts=[...recordArray(payload.hosts),...recordArray(resultPayload?.hosts)]
+	const targets:ToolTarget[]=[]
+	if(sshTransfer){
+		if(sourceHost.id)targets.push({kind:'host',label:t('tool.sourceHost'),name:sourceHost.name,id:sourceHost.id})
+		if(hostID)targets.push({kind:'host',label:t('tool.targetHost'),name:destinationHost.name,id:hostID})
+	}else if(workspaceTransfer){
+		if(workspaceID)targets.push({kind:'workspace',label:t('common.workspace'),name:workspaceID})
+		if(hostID)targets.push({kind:'host',label:t('tool.targetHost'),name:destinationHost.name,id:hostID})
+	}else if(workspaceTool&&workspaceID){
+		targets.push({kind:'workspace',label:t('common.workspace'),name:workspaceID})
+	}else if(hostID){
+		targets.push({kind:'host',label:t('tool.targetHost'),name:destinationHost.name,id:hostID})
+	}else if(workspaceID){
+		targets.push({kind:'workspace',label:t('common.workspace'),name:workspaceID})
+	}else if(entry.tool==='ssh_history'&&historyHostIDs.length>0){
+		for(const historyHostID of historyHostIDs.slice(0,3)){const historyHost=hostIdentity(hosts,historyHostID);targets.push({kind:'host',label:t('tool.historyHost'),name:historyHost.name,id:historyHost.id})}
+		if(historyHostIDs.length>3)targets.push({kind:'scope',label:t('tool.historyHost'),name:t('tool.moreHosts',{count:historyHostIDs.length-3})})
+	}else if(entry.tool==='ssh_host_list'){
+		targets.push({kind:'scope',label:t('tool.scope'),name:t('tool.allHosts',{count:listedHosts.length||hosts.length})})
+	}
   const instruction=textValue(payload.operator_instruction)||textValue(taskPayload?.operator_instruction)||textValue(resultPayload?.operator_instruction)
   const rawPayload={...payload};delete rawPayload._display
   const [expanded,setExpanded]=useState(false)
   const resultExitCode=resultPayload?.exit_code
   const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
   return <details className={`tool-event tool-event-rich ${status}`} open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}>
-	<summary><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div><span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>{t('tool.latestStdout',{count:Math.min(3,stdoutPreview.split('\n').length)})}</span><pre>{stdoutPreview}</pre></div>}</summary>
+	<summary><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><div className="tool-summary-operation"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div>{targets.length>0&&<div className="tool-summary-targets">{targets.map((target,index)=><span className={`tool-target-chip ${target.kind}`} title={`${target.label}: ${[target.name,target.id].filter(Boolean).join(' · ')}`} key={`${target.kind}_${target.id||target.name}_${index}`}>{target.kind==='host'?<Server size={11}/>:target.kind==='workspace'?<FolderOpen size={11}/>:<ListChecks size={11}/>}<em>{target.label}</em>{target.name&&<b>{target.name}</b>}{target.id&&<code>{target.id}</code>}</span>)}</div>}</div><span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>{t('tool.latestStdout',{count:Math.min(3,stdoutPreview.split('\n').length)})}</span><pre>{stdoutPreview}</pre></div>}</summary>
     <div className="tool-event-body">
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
@@ -1038,7 +1091,7 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 		  {env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
         </section>
         <aside className="tool-context-pane">
-			  <dl className="tool-context-grid"><div><dt>{workspaceTransfer||sshTransfer?t('tool.targetHost'):workspaceID?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceTransfer||sshTransfer?hostName:workspaceID||hostName}</dd></div><div><dt>{workspaceTransfer||sshTransfer?t('tool.sourceFile'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{workspaceTransfer?`${workspaceID}:${relativePath}`:sshTransfer?`${sourceHostName}:${sourcePath}`:filePath||textValue(request.cwd)||t('tool.defaultDirectory')}</dd></div><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div><div><dt>{t('common.risk')}</dt><dd>{risk?t(`riskLabels.${risk}`,{defaultValue:risk}):'—'}</dd></div><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${status}`,{defaultValue:status})}</dd></div><div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div><div><dt>{t('tool.duration')}</dt><dd>{formatDuration(payload.duration??resultPayload?.duration,run)}</dd></div><div><dt>{t('tool.runId')}</dt><dd>{runID||'—'}</dd></div></dl>
+			  <dl className="tool-context-grid"><div><dt>{workspaceTransfer||sshTransfer?t('tool.targetHost'):workspaceID?t('common.workspace'):t('tool.targetHost')}</dt><dd>{workspaceTransfer||sshTransfer?[destinationHost.name,hostID].filter(Boolean).join(' · '):workspaceID||[destinationHost.name,hostID].filter(Boolean).join(' · ')||'—'}</dd></div><div><dt>{workspaceTransfer||sshTransfer?t('tool.sourceFile'):filePath?t('tool.filePath'):t('tool.workingDirectory')}</dt><dd>{workspaceTransfer?`${workspaceID}:${relativePath}`:sshTransfer?`${[sourceHost.name,sourceHost.id].filter(Boolean).join(' · ')}:${sourcePath}`:filePath||textValue(request.cwd)||t('tool.defaultDirectory')}</dd></div><div><dt>{t('tool.permission')}</dt><dd>{workspaceShellBackend==='host'?t('tool.hostAuthority'):workspaceShellBackend==='sandbox'?t('tool.sandbox'):request.elevated===true?t('tool.managedSudo'):t('tool.normalUser')}</dd></div><div><dt>{t('common.risk')}</dt><dd>{risk?t(`riskLabels.${risk}`,{defaultValue:risk}):'—'}</dd></div><div><dt>{t('common.status')}</dt><dd>{t(`statusLabels.${status}`,{defaultValue:status})}</dd></div><div><dt>{t('tool.exitCode')}</dt><dd>{exitCode}</dd></div><div><dt>{t('tool.duration')}</dt><dd>{formatDuration(payload.duration??resultPayload?.duration,run)}</dd></div><div><dt>{t('tool.runId')}</dt><dd>{runID||'—'}</dd></div></dl>
 		  {textValue(request.reason)&&<div className="tool-reason"><span>{t('tool.reason')}</span><p>{textValue(request.reason)}</p></div>}
 		  {textValue(request.expected_changes)&&<div className="tool-reason change"><span>{t('tool.expectedChanges')}</span><p>{textValue(request.expected_changes)}</p></div>}
 		  {textValue(request.rollback)&&<div className="tool-reason rollback"><span>{t('tool.rollback')}</span><p>{textValue(request.rollback)}</p></div>}
@@ -1152,6 +1205,25 @@ function ApprovalDialog({
   const workspaceShellBackend = textValue(request.workspace_shell_backend);
   const hostWorkspaceShell =
     requestMode === "workspace_shell" && workspaceShellBackend === "host";
+  const fileReadApproval = [
+    "remote_read",
+    "remote_search",
+    "workspace_read",
+    "workspace_search",
+  ].includes(requestMode);
+  const fileSearchApproval = ["remote_search", "workspace_search"].includes(
+    requestMode,
+  );
+  const directProgram = textValue(request.program).split("/").pop() || "";
+  const directFileReadApproval =
+    ["cat", "cut", "grep", "head", "less", "more", "tail"].includes(
+      directProgram,
+    ) ||
+    (requestMode === "script" &&
+      /(?:^|[\n;&|])\s*(?:\/[\w./-]+\/)?(?:cat|cut|grep|head|less|more|tail)(?:\s|$)/m.test(
+        script,
+      ));
+  const oneTimeFileAccess = fileReadApproval || directFileReadApproval;
   const workspaceTransfer = requestMode === "workspace_upload";
   const sshTransfer = requestMode === "ssh_file_transfer";
   const sourceHostID = textValue(request.source_host_id);
@@ -1160,7 +1232,11 @@ function ApprovalDialog({
   const actionKind = script
     ? t("approval.actionScript")
     : t("approval.actionCommand");
-  const approvalTitle = elevated
+  const approvalTitle = fileReadApproval
+    ? elevated
+      ? t(fileSearchApproval ? "approval.sudoSearchTitle" : "approval.sudoReadTitle")
+      : t(fileSearchApproval ? "approval.searchTitle" : "approval.readTitle")
+    : elevated
     ? filePath
       ? t("approval.sudoFileTitle")
       : t("approval.sudoTitle", { kind: actionKind })
@@ -1173,7 +1249,11 @@ function ApprovalDialog({
         : filePath
           ? t("approval.fileTitle")
           : t("approval.executeTitle", { kind: actionKind });
-  const commandLabel = sshTransfer
+  const commandLabel = fileReadApproval
+    ? elevated
+      ? t(fileSearchApproval ? "approval.rootSearchLabel" : "approval.rootReadLabel")
+      : t(fileSearchApproval ? "approval.searchLabel" : "approval.readLabel")
+    : sshTransfer
     ? t("approval.transferLabel")
     : workspaceTransfer
       ? t("approval.uploadLabel")
@@ -1194,19 +1274,46 @@ function ApprovalDialog({
       ? `${workspaceID}:${relativePath} → ${remotePath}`
     : fullProgram(request) ||
       script ||
-      `${requestMode} ${filePath}`.trim() ||
+      `${requestMode} ${filePath}${fileSearchApproval ? ` · pattern=${JSON.stringify(textValue(request.search_pattern))}` : ""}`.trim() ||
       t("approval.pendingOperation");
+  const targetHostIdentity = [targetHost, target?.id && target.id !== targetHost ? target.id : approval.host_id !== targetHost ? approval.host_id : ''].filter(Boolean).join(' · ')
+  const sourceHostIdentity = [sourceHost, source?.id && source.id !== sourceHost ? source.id : sourceHostID !== sourceHost ? sourceHostID : ''].filter(Boolean).join(' · ')
   const hostName = workspaceTransfer || sshTransfer
-    ? targetHost
+    ? targetHostIdentity
     : workspaceID
       ? `Workspace / ${workspaceID}`
-      : targetHost;
+      : targetHostIdentity;
   const executionIdentity = elevated
     ? t("approval.rootViaSudo")
     : target?.user || t("approval.serviceUser");
   const expectedSHA = textValue(request.expected_sha256),
     expectedDestinationSHA = textValue(request.expected_destination_sha256),
     validator = textValue(request.validator);
+  const fileApprovalParameters: Array<Array<unknown>> = fileReadApproval
+    ? [
+        ...(workspaceID
+          ? [["workspace_id", workspaceID]]
+          : [["host_id", approval.host_id]]),
+        ["path", filePath],
+        ...(fileSearchApproval
+          ? [
+              ["pattern", textValue(request.search_pattern)],
+              ["context_lines", numberValue(request.context_lines)],
+              ["max_matches", numberValue(request.max_matches)],
+            ]
+          : [
+              ...(workspaceID
+                ? []
+                : [["metadata_only", request.metadata_only === true]]),
+              ["max_bytes", numberValue(request.max_bytes)],
+              ["offset_bytes", numberValue(request.offset_bytes)],
+              ...(workspaceID
+                ? []
+                : [["tail_lines", numberValue(request.tail_lines)]]),
+            ]),
+        ...(workspaceID ? [] : [["elevated", elevated]]),
+      ]
+    : [];
   const explanationPending = approval.ai_review?.status === "pending";
   const decide = async (scope: "once" | "session") => {
     setDecisionBusy(scope);
@@ -1340,6 +1447,13 @@ function ApprovalDialog({
               </div>
             </div>
           )}
+          {fileApprovalParameters.length > 0 && (
+            <CompactTable
+              title={t("tool.actualParameters")}
+              columns={[t("tool.parameter"), t("tool.value")]}
+              rows={fileApprovalParameters}
+            />
+          )}
           {change&&textValue(change.diff)?<DiffViewer change={change}/>:<pre className="approval-command-preview">{script || `$ ${operation}`}</pre>}
           <dl>
             <div>
@@ -1355,7 +1469,7 @@ function ApprovalDialog({
             {sshTransfer && (
               <div>
                 <dt>{t("approval.sourceHost")}</dt>
-                <dd>{sourceHost}</dd>
+                <dd>{sourceHostIdentity}</dd>
               </div>
             )}
             <div>
@@ -1453,11 +1567,14 @@ function ApprovalDialog({
               decisionDisabled ||
               stopping ||
               approval.risk === "critical" ||
-              hostWorkspaceShell
+              hostWorkspaceShell ||
+              oneTimeFileAccess
             }
             onClick={() => decide("session")}
             title={
-              hostWorkspaceShell
+              oneTimeFileAccess
+                ? t("approval.fileReadUnavailable")
+                : hostWorkspaceShell
                 ? t("approval.hostUnavailable")
                 : approval.risk === "critical"
                   ? t("approval.criticalUnavailable")

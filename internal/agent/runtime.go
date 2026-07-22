@@ -37,6 +37,64 @@ type agentRunner interface {
 	Run(context.Context, []*schema.Message, ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent]
 }
 
+type capturedToolCall struct {
+	Name      string
+	Arguments string
+	Workspace string
+}
+
+type toolCallTracker struct {
+	workspace string
+	byID      map[string]capturedToolCall
+	byName    map[string][]capturedToolCall
+}
+
+func newToolCallTracker(workspace string) *toolCallTracker {
+	return &toolCallTracker{workspace: workspace, byID: make(map[string]capturedToolCall), byName: make(map[string][]capturedToolCall)}
+}
+
+func (t *toolCallTracker) add(calls []schema.ToolCall) {
+	for _, call := range calls {
+		captured := capturedToolCall{Name: call.Function.Name, Arguments: call.Function.Arguments}
+		if strings.HasPrefix(captured.Name, "workspace_") {
+			captured.Workspace = t.workspace
+		}
+		if call.ID != "" {
+			t.byID[call.ID] = captured
+		}
+		if captured.Name != "" {
+			t.byName[captured.Name] = append(t.byName[captured.Name], captured)
+		}
+	}
+}
+
+func (t *toolCallTracker) take(id, name string) *capturedToolCall {
+	if id != "" {
+		if captured, ok := t.byID[id]; ok {
+			delete(t.byID, id)
+			t.removeNamed(captured)
+			return &captured
+		}
+	}
+	queued := t.byName[name]
+	if len(queued) == 0 {
+		return nil
+	}
+	captured := queued[0]
+	t.byName[name] = queued[1:]
+	return &captured
+}
+
+func (t *toolCallTracker) removeNamed(target capturedToolCall) {
+	queued := t.byName[target.Name]
+	for index, captured := range queued {
+		if captured == target {
+			t.byName[target.Name] = append(queued[:index], queued[index+1:]...)
+			return
+		}
+	}
+}
+
 type Event struct {
 	Type       string `json:"type"`
 	Role       string `json:"role,omitempty"`
@@ -413,7 +471,29 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 	if err != nil {
 		return "", err
 	}
+	chatSession, err := r.store.GetChatSession(ctx, sessionID)
+	if errors.Is(err, store.ErrNotFound) {
+		chatSession, err = r.store.CreateChatSession(ctx, sessionID, "")
+	}
+	if err != nil {
+		return "", fmt.Errorf("load Agent conversation: %w", err)
+	}
 	messages, contextStats := buildMultimodalModelContext(history, domain.ChatMessage{Role: "user", Content: query, Attachments: attachments})
+	workspaceState := modelWorkspaceState{ID: chatSession.WorkspaceID, Bound: chatSession.WorkspaceID != ""}
+	if workspaceState.Bound {
+		for _, workspace := range r.service.ListWorkspaceCapabilities() {
+			if workspace.ID == workspaceState.ID {
+				workspaceState.Access = workspace.Access
+				break
+			}
+		}
+		withWorkspace, workspaceBytes, injectErr := injectWorkspaceContext(messages, workspaceState)
+		if injectErr != nil {
+			return "", fmt.Errorf("prepare Workspace context: %w", injectErr)
+		}
+		messages = withWorkspace
+		contextStats.Bytes += workspaceBytes
+	}
 	planInjected := false
 	planStatus := ""
 	if plan, planErr := r.store.GetAgentPlan(ctx, sessionID); planErr == nil {
@@ -434,6 +514,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		"tool_results", contextStats.ToolResults, "context_bytes", contextStats.Bytes,
 		"images", contextStats.Images, "image_bytes", contextStats.ImageBytes,
 		"plan_injected", planInjected, "plan_status", planStatus,
+		"workspace_id", workspaceState.ID, "workspace_access", workspaceState.Access,
 	)
 	userMessageID, err := r.store.AppendPendingChatMessageWithAttachments(ctx, sessionID, "user", query, attachments)
 	if err != nil {
@@ -475,6 +556,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		})
 
 		iter := runner.Run(runCtx, messages, adk.WithCheckPointID(sessionID))
+		toolCalls := newToolCallTracker(workspaceState.ID)
 		answerCandidate := ""
 		interrupted := false
 		events := 0
@@ -521,8 +603,10 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				assistantHasToolCalls := false
 				var toolResult strings.Builder
 				var reasoning strings.Builder
+				var assistantChunks []*schema.Message
 				reasoningSegment := ""
 				toolName := variant.ToolName
+				toolCallID := ""
 				for {
 					message, recvErr := stream.Recv()
 					if errors.Is(recvErr, io.EOF) {
@@ -537,6 +621,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					}
 					streamChunks++
 					if variant.Role == schema.Assistant {
+						assistantChunks = append(assistantChunks, message)
 						if message.ResponseMeta != nil && message.ResponseMeta.FinishReason != "" {
 							lastFinishReason = message.ResponseMeta.FinishReason
 						}
@@ -562,6 +647,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 						if toolName == "" {
 							toolName = message.ToolName
 						}
+						if toolCallID == "" {
+							toolCallID = message.ToolCallID
+						}
 						toolResult.WriteString(message.Content)
 						continue
 					}
@@ -572,6 +660,12 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				}
 				stream.Close()
 				if variant.Role == schema.Assistant {
+					if len(assistantChunks) > 0 {
+						merged, mergeErr := schema.ConcatMessages(assistantChunks)
+						if mergeErr == nil {
+							toolCalls.add(merged.ToolCalls)
+						}
+					}
 					if assistantHasToolCalls {
 						assistantToolCallOutputs++
 					} else if assistantContent.Len() > 0 {
@@ -588,7 +682,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				if toolResult.Len() > 0 {
 					toolResults++
 					logger.DebugContext(ctx, "agent tool result received", "tool_name", toolName, "result_bytes", toolResult.Len())
-					content := r.enrichToolContent(ctx, toolResult.String())
+					content := r.enrichToolContent(ctx, toolResult.String(), toolCalls.take(toolCallID, toolName))
 					if err := r.store.AppendChatMessage(ctx, sessionID, "tool", content, toolName); err != nil {
 						return "", err
 					}
@@ -599,6 +693,9 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			if variant.Message != nil {
 				assistantHasToolCalls := variant.Role == schema.Assistant && len(variant.Message.ToolCalls) > 0
 				if variant.Role == schema.Assistant {
+					if assistantHasToolCalls {
+						toolCalls.add(variant.Message.ToolCalls)
+					}
 					if variant.Message.ResponseMeta != nil && variant.Message.ResponseMeta.FinishReason != "" {
 						lastFinishReason = variant.Message.ResponseMeta.FinishReason
 					}
@@ -632,7 +729,7 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				if variant.Role == schema.Tool {
 					toolResults++
 					logger.DebugContext(ctx, "agent tool result received", "tool_name", toolName, "result_bytes", len(variant.Message.Content))
-					displayContent = r.enrichToolContent(ctx, variant.Message.Content)
+					displayContent = r.enrichToolContent(ctx, variant.Message.Content, toolCalls.take(variant.Message.ToolCallID, toolName))
 					if err := r.store.AppendChatMessage(ctx, sessionID, "tool", displayContent, toolName); err != nil {
 						return "", err
 					}
@@ -680,30 +777,50 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 // UI-only Tool history payload. The model has already consumed the original
 // Tool result; this metadata exists so the Web console can always show the
 // complete command rather than trying to reconstruct it from prose.
-func (r *Runtime) enrichToolContent(ctx context.Context, content string) string {
+func (r *Runtime) enrichToolContent(ctx context.Context, content string, captured ...*capturedToolCall) string {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(content), &payload); err != nil {
 		return content
 	}
+	display := make(map[string]any)
+	if raw := payload["_display"]; len(raw) > 0 {
+		_ = json.Unmarshal(raw, &display)
+	}
+	if display == nil {
+		display = make(map[string]any)
+	}
+	if len(captured) > 0 && captured[0] != nil {
+		display["tool_name"] = captured[0].Name
+		if captured[0].Workspace != "" {
+			display["workspace_id"] = captured[0].Workspace
+		}
+		var arguments any
+		if err := json.Unmarshal([]byte(captured[0].Arguments), &arguments); err != nil {
+			arguments = captured[0].Arguments
+		}
+		display["arguments"] = arguments
+	}
 	runID := toolPayloadRunID(payload)
-	if runID == "" {
+	if runID != "" && r.store != nil {
+		if run, err := r.store.GetRun(ctx, runID); err == nil {
+			var request any
+			if err := json.Unmarshal([]byte(run.RequestJSON), &request); err != nil {
+				request = run.RequestJSON
+			}
+			display["host_id"] = run.HostID
+			display["risk"] = run.Risk
+			display["request_digest"] = run.RequestDigest
+			display["request"] = request
+		}
+	}
+	if len(display) == 0 {
 		return content
 	}
-	run, err := r.store.GetRun(ctx, runID)
+	displayJSON, err := json.Marshal(display)
 	if err != nil {
 		return content
 	}
-	var request any
-	if err := json.Unmarshal([]byte(run.RequestJSON), &request); err != nil {
-		request = run.RequestJSON
-	}
-	display, err := json.Marshal(map[string]any{
-		"host_id": run.HostID, "risk": run.Risk, "request_digest": run.RequestDigest, "request": request,
-	})
-	if err != nil {
-		return content
-	}
-	payload["_display"] = display
+	payload["_display"] = displayJSON
 	enriched, err := json.Marshal(payload)
 	if err != nil {
 		return content

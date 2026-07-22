@@ -145,6 +145,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/chat", s.chat)
 	s.mux.HandleFunc("GET /api/v1/chat/sessions", s.chatSessions)
 	s.mux.HandleFunc("POST /api/v1/chat/{id}/cancel", s.cancelChatSession)
+	s.mux.HandleFunc("PUT /api/v1/chat/{id}/workspace", s.setChatSessionWorkspace)
 	s.mux.HandleFunc("DELETE /api/v1/chat/{id}", s.deleteChatSession)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/messages", s.chatMessages)
 	s.mux.HandleFunc("GET /api/v1/chat/{id}/state", s.chatState)
@@ -1186,12 +1187,19 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, agent.ErrUnavailable, http.StatusServiceUnavailable)
 		return
 	}
-	sessionID, message, attachments, ok := s.decodeChatInput(w, r)
+	sessionID, workspaceID, message, attachments, ok := s.decodeChatInput(w, r)
 	if !ok {
 		return
 	}
 	if strings.TrimSpace(message) == "" && len(attachments) == 0 {
 		writeErrorStatus(w, fmt.Errorf("message or image is required"), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		sessionID = ids.New("session")
+	}
+	if _, err := s.service.PrepareChatSession(r.Context(), sessionID, workspaceID, actor(r)); err != nil {
+		writeErrorStatus(w, err, http.StatusBadRequest)
 		return
 	}
 	streamAgentEvents(w, r, 10*time.Second, func(emit func(agent.Event)) {
@@ -1204,29 +1212,30 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) decodeChatInput(w http.ResponseWriter, r *http.Request) (string, string, []domain.ChatAttachment, bool) {
+func (s *Server) decodeChatInput(w http.ResponseWriter, r *http.Request) (string, string, string, []domain.ChatAttachment, bool) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil {
 		writeErrorStatus(w, fmt.Errorf("invalid chat content type: %w", err), http.StatusBadRequest)
-		return "", "", nil, false
+		return "", "", "", nil, false
 	}
 	if mediaType == "application/json" {
 		var input struct {
-			SessionID string `json:"session_id"`
-			Message   string `json:"message"`
+			SessionID   string `json:"session_id"`
+			WorkspaceID string `json:"workspace_id"`
+			Message     string `json:"message"`
 		}
 		if !decode(w, r, &input) {
-			return "", "", nil, false
+			return "", "", "", nil, false
 		}
-		return input.SessionID, input.Message, nil, true
+		return input.SessionID, input.WorkspaceID, input.Message, nil, true
 	}
 	if mediaType != "multipart/form-data" {
 		writeErrorStatus(w, fmt.Errorf("chat content type must be application/json or multipart/form-data"), http.StatusUnsupportedMediaType)
-		return "", "", nil, false
+		return "", "", "", nil, false
 	}
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeErrorStatus(w, fmt.Errorf("invalid chat upload: %w", err), http.StatusBadRequest)
-		return "", "", nil, false
+		return "", "", "", nil, false
 	}
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
@@ -1234,7 +1243,7 @@ func (s *Server) decodeChatInput(w http.ResponseWriter, r *http.Request) (string
 	settings, err := s.service.SystemSettings(r.Context())
 	if err != nil {
 		writeError(w, err)
-		return "", "", nil, false
+		return "", "", "", nil, false
 	}
 	allowed := make(map[string]struct{}, len(settings.ChatImageAllowedTypes))
 	for _, value := range settings.ChatImageAllowedTypes {
@@ -1246,26 +1255,26 @@ func (s *Server) decodeChatInput(w http.ResponseWriter, r *http.Request) (string
 		file, err := header.Open()
 		if err != nil {
 			writeErrorStatus(w, fmt.Errorf("open image %q: %w", header.Filename, err), http.StatusBadRequest)
-			return "", "", nil, false
+			return "", "", "", nil, false
 		}
 		data, readErr := io.ReadAll(file)
 		closeErr := file.Close()
 		if readErr != nil {
 			writeErrorStatus(w, fmt.Errorf("read image %q: %w", header.Filename, readErr), http.StatusBadRequest)
-			return "", "", nil, false
+			return "", "", "", nil, false
 		}
 		if closeErr != nil {
 			writeErrorStatus(w, fmt.Errorf("close image %q: %w", header.Filename, closeErr), http.StatusBadRequest)
-			return "", "", nil, false
+			return "", "", "", nil, false
 		}
 		if len(data) == 0 {
 			writeErrorStatus(w, fmt.Errorf("image %q is empty", header.Filename), http.StatusBadRequest)
-			return "", "", nil, false
+			return "", "", "", nil, false
 		}
 		mimeType := http.DetectContentType(data)
 		if _, ok := allowed[mimeType]; !ok {
 			writeErrorStatus(w, fmt.Errorf("image type %s is not enabled", mimeType), http.StatusBadRequest)
-			return "", "", nil, false
+			return "", "", "", nil, false
 		}
 		name := path.Base(strings.ReplaceAll(header.Filename, "\\", "/"))
 		if name == "." || name == "/" || name == "" {
@@ -1273,7 +1282,7 @@ func (s *Server) decodeChatInput(w http.ResponseWriter, r *http.Request) (string
 		}
 		attachments = append(attachments, domain.ChatAttachment{Name: name, MIMEType: mimeType, SizeBytes: int64(len(data)), Data: data})
 	}
-	return r.FormValue("session_id"), r.FormValue("message"), attachments, true
+	return r.FormValue("session_id"), r.FormValue("workspace_id"), r.FormValue("message"), attachments, true
 }
 
 // streamAgentEvents keeps the ResponseWriter owned by the HTTP goroutine while
@@ -1382,6 +1391,11 @@ func (s *Server) chatAttachment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
+	session, err := s.service.GetChatSession(r.Context(), sessionID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	messages, err := s.service.ListChatMessages(r.Context(), sessionID, 0)
 	if err != nil {
 		writeError(w, err)
@@ -1396,7 +1410,7 @@ func (s *Server) chatState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	active := s.agent != nil && s.agent.IsSessionActive(sessionID)
-	writeJSON(w, http.StatusOK, map[string]any{"active": active, "messages": messages, "plan": plan})
+	writeJSON(w, http.StatusOK, map[string]any{"active": active, "workspace_id": session.WorkspaceID, "messages": messages, "plan": plan})
 }
 
 func (s *Server) chatSessions(w http.ResponseWriter, r *http.Request) {
@@ -1435,6 +1449,26 @@ func (s *Server) cancelChatSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cancelled": cancelled, "rejected_approvals": rejectedApprovals})
+}
+
+func (s *Server) setChatSessionWorkspace(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	if sessionID == "" {
+		writeErrorStatus(w, fmt.Errorf("session id is required"), http.StatusBadRequest)
+		return
+	}
+	if s.agent != nil && s.agent.IsSessionActive(sessionID) {
+		writeErrorStatus(w, fmt.Errorf("cannot switch Workspace while this conversation's Agent run is active"), http.StatusConflict)
+		return
+	}
+	var input struct {
+		WorkspaceID string `json:"workspace_id"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	session, err := s.service.SetChatSessionWorkspace(r.Context(), sessionID, input.WorkspaceID, actor(r))
+	respond(w, session, err)
 }
 
 func (s *Server) deleteChatSession(w http.ResponseWriter, r *http.Request) {

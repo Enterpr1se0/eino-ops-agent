@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -32,7 +34,8 @@ type backgroundToolTransport struct {
 }
 
 type fileReadToolTransport struct {
-	request domain.ExecRequest
+	request   domain.ExecRequest
+	callCount int
 }
 
 type toolFailureLoopModel struct {
@@ -75,6 +78,7 @@ func (t *backgroundToolTransport) Exec(ctx context.Context, _ sshx.ConnectionSpe
 
 func (t *fileReadToolTransport) Exec(_ context.Context, _ sshx.ConnectionSpec, request domain.ExecRequest) (sshx.RawResult, error) {
 	t.request = request
+	t.callCount++
 	stdout := "__OPS_FILE_META__\n15\t640\tops\tops\t1700000000\n" + strings.Repeat("a", 64) + "  /etc/example.conf\n__OPS_FILE_CONTENT__\nsecret contents"
 	return sshx.RawResult{Stdout: []byte(stdout)}, nil
 }
@@ -130,8 +134,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 21 {
-		t.Fatalf("built-in catalog size=%d, want 21", len(descriptors))
+	if len(descriptors) != 20 {
+		t.Fatalf("built-in catalog size=%d, want 20", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -167,15 +171,18 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		}
 		if descriptor.Name == "ssh_file_read" {
 			schema := string(descriptor.InputSchema)
-			if !strings.Contains(schema, `"metadata_only"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"context_lines"`) || !strings.Contains(schema, `"max_matches"`) {
+			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"metadata_only"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"context_lines"`) || !strings.Contains(schema, `"max_matches"`) {
 				t.Fatalf("ssh_file_read merged modes are incomplete: %#v", descriptor)
 			}
 		}
 		if descriptor.Name == "workspace_file_read" {
 			schema := string(descriptor.InputSchema)
-			if !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"context_lines"`) || !strings.Contains(schema, `"max_matches"`) {
+			if descriptor.Guard != "approval_required" || strings.Contains(schema, `"workspace_id"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"context_lines"`) || !strings.Contains(schema, `"max_matches"`) {
 				t.Fatalf("workspace_file_read merged modes are incomplete: %#v", descriptor)
 			}
+		}
+		if strings.HasPrefix(descriptor.Name, "workspace_") && strings.Contains(string(descriptor.InputSchema), `"workspace_id"`) {
+			t.Fatalf("%s still lets the model select a Workspace: %s", descriptor.Name, descriptor.InputSchema)
 		}
 		if descriptor.Name == "ssh_file_edit" {
 			schema := string(descriptor.InputSchema)
@@ -211,13 +218,75 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
 		}
 	}
-	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get", "ops_plan_get"} {
+	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_list", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get", "ops_plan_get"} {
 		if seen[retired] {
 			t.Fatalf("removed %s tool remains in the Agent catalog", retired)
 		}
 	}
 	if !seen["ops_plan_create"] || !seen["ops_plan_step_update"] || !seen["ssh_file_edit"] || !seen["ssh_file_transfer"] || !seen["workspace_file_edit"] || !seen["workspace_file_upload"] || !seen["workspace_shell"] || !seen["web_search"] || !seen["web_extract"] || !seen["ssh_task"] || !seen["ssh_history"] || !seen["ops_skill"] {
 		t.Fatalf("representative functions missing: %#v", seen)
+	}
+}
+
+func TestWorkspaceToolUsesConversationBinding(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	workspaceRoot := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dataDir, "bound-workspace.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine, _ := policy.Load("")
+	encryptor, err := security.NewEncryptor("", dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.DataDir = dataDir
+	svc := service.New(st, engine, nil, encryptor, security.NewRedactor(), cfg.Limits, cfg)
+	if err := svc.InitializeWorkspaces(ctx, workspaceRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteAdminWorkspace(ctx, "default", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateAdminWorkspace(ctx, domain.WorkspaceInput{ID: "project", Access: "read_write"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceRoot, "project", "README.md"), []byte("bound Workspace"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.PrepareChatSession(ctx, "session-bound-workspace", "project", "test"); err != nil {
+		t.Fatal(err)
+	}
+	tools, err := BuildTools(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listTool tool.InvokableTool
+	for _, candidate := range tools {
+		info, infoErr := candidate.Info(ctx)
+		if infoErr != nil {
+			t.Fatal(infoErr)
+		}
+		if info.Name == "workspace_file_list" {
+			listTool = candidate.(tool.InvokableTool)
+		}
+	}
+	if listTool == nil {
+		t.Fatal("workspace_file_list is missing")
+	}
+	resultJSON, err := listTool.InvokableRun(service.WithSessionID(ctx, "session-bound-workspace"), `{"path":"."}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result domain.ExecResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Status != "completed" || !strings.Contains(result.Stdout, "README.md") {
+		t.Fatalf("bound Workspace listing = %#v", result)
 	}
 }
 
@@ -440,10 +509,52 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true}, "test")
-	if err != nil {
-		t.Fatal(err)
+	runRead := func(input FileReadInput) domain.ExecResult {
+		t.Helper()
+		base, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		notifications := make(chan domain.ExecResult, 1)
+		toolCtx := service.WithApprovalNotifier(service.WithBlockingApprovals(base), func(result domain.ExecResult) {
+			notifications <- result
+		})
+		type outcome struct {
+			result domain.ExecResult
+			err    error
+		}
+		done := make(chan outcome, 1)
+		beforeCalls := transport.callCount
+		go func() {
+			result, readErr := RunFileReadTool(toolCtx, svc, input, "test")
+			done <- outcome{result: result, err: readErr}
+		}()
+		var pending domain.ExecResult
+		select {
+		case pending = <-notifications:
+		case <-base.Done():
+			t.Fatal("timed out waiting for file-read approval")
+		}
+		if pending.Status != "approval_required" || pending.Risk != domain.RiskReadOnly || pending.ApprovalID == "" || transport.callCount != beforeCalls {
+			t.Fatalf("file read skipped approval: %#v", pending)
+		}
+		_, approveErr := svc.Approve(ctx, pending.ApprovalID, "reviewed file access", "operator")
+		if approveErr != nil {
+			t.Fatal(approveErr)
+		}
+		if transport.callCount != beforeCalls+1 {
+			t.Fatalf("approved file read executed %d times", transport.callCount-beforeCalls)
+		}
+		select {
+		case completed := <-done:
+			if completed.err != nil {
+				t.Fatal(completed.err)
+			}
+			return completed.result
+		case <-base.Done():
+			t.Fatal("timed out waiting for approved file read")
+			return domain.ExecResult{}
+		}
 	}
+	result := runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true})
 	if !result.OK || result.Stdout != "" || result.File == nil || result.File.SHA256 != strings.Repeat("a", 64) || result.File.Size != 15 {
 		t.Fatalf("metadata-only result = %#v", result)
 	}
@@ -461,24 +572,15 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	if metadataRequest.Mode != domain.ExecRemoteRead || metadataRequest.RemotePath != "/etc/example.conf" || !metadataRequest.MetadataOnly || metadataRequest.Script != "" {
 		t.Fatalf("metadata read was not persisted structurally: %#v", metadataRequest)
 	}
-	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf"}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf"})
 	if result.Stdout == "" || !strings.Contains(transport.request.Script, "cat -- '/etc/example.conf'") || strings.Contains(transport.request.Script, "head -c") {
 		t.Fatalf("default file read did not request complete content: result=%#v script=%s", result, transport.request.Script)
 	}
-	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", OffsetBytes: -4}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", OffsetBytes: -4})
 	if !strings.Contains(transport.request.Script, "tail -c 4 -- '/etc/example.conf'") || result.File == nil || result.File.OffsetBytes != 11 {
 		t.Fatalf("negative file offset did not read from the end: result=%#v script=%s", result, transport.request.Script)
 	}
-	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", ContextLines: 2, MaxMatches: 5}, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", ContextLines: 2, MaxMatches: 5})
 	if !result.OK || !strings.Contains(transport.request.Script, "grep -n -F -C 2 -- 'secret' '/etc/example.conf' | head -n 5") {
 		t.Fatalf("file read search mode was not dispatched: result=%#v script=%s", result, transport.request.Script)
 	}

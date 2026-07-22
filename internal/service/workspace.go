@@ -681,6 +681,13 @@ func (s *Service) UploadWorkspaceFile(ctx context.Context, workspaceID, targetPa
 }
 
 func (s *Service) ReadWorkspaceFile(ctx context.Context, workspaceID, relativePath string, maxBytes int, offset int64, actor string) (domain.ExecResult, error) {
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	if _, err := s.resolveWorkspacePath(workspace, relativePath, false); err != nil {
+		return domain.ExecResult{}, err
+	}
 	host, err := s.workspaceHost(ctx, workspaceID)
 	if err != nil {
 		return domain.ExecResult{}, err
@@ -689,11 +696,13 @@ func (s *Service) ReadWorkspaceFile(ctx context.Context, workspaceID, relativePa
 		HostID: host.ID, Mode: domain.ExecWorkspaceRead, WorkspaceID: workspaceID, RelativePath: relativePath,
 		MaxBytes: maxBytes, OffsetBytes: offset, Reason: "read a bounded file from an allowlisted workspace",
 	}, actor)
-	metadata, content := parseFileReadOutput(relativePath, result.Stdout)
-	metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offset)
-	metadata.ReturnedBytes = len(content)
-	metadata.Sensitive = strings.Contains(content, "[REDACTED]")
-	result.File, result.Stdout = &metadata, content
+	if result.Stdout != "" {
+		metadata, content := parseFileReadOutput(relativePath, result.Stdout)
+		metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offset)
+		metadata.ReturnedBytes = len(content)
+		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
+		result.File, result.Stdout = &metadata, content
+	}
 	return result, err
 }
 
@@ -702,10 +711,17 @@ func (s *Service) ListWorkspaceFiles(ctx context.Context, workspaceID, relativeP
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
-	return s.Submit(ctx, domain.ExecRequest{HostID: host.ID, Mode: domain.ExecWorkspaceList, WorkspaceID: workspaceID, RelativePath: relativePath, Reason: "list an allowlisted workspace directory"}, actor)
+	return s.Submit(ctx, domain.ExecRequest{HostID: host.ID, Mode: domain.ExecWorkspaceDirectoryList, WorkspaceID: workspaceID, RelativePath: relativePath, Reason: "list an allowlisted workspace directory"}, actor)
 }
 
 func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath, pattern string, contextLines, maxMatches int, actor string) (domain.ExecResult, error) {
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	if _, err := s.resolveWorkspacePath(workspace, relativePath, false); err != nil {
+		return domain.ExecResult{}, err
+	}
 	host, err := s.workspaceHost(ctx, workspaceID)
 	if err != nil {
 		return domain.ExecResult{}, err
@@ -857,7 +873,7 @@ func (s *Service) prepareWorkspaceUpload(req domain.ExecRequest) (domain.ExecReq
 
 func isWorkspaceMode(mode domain.ExecMode) bool {
 	switch mode {
-	case domain.ExecWorkspaceRead, domain.ExecWorkspaceList, domain.ExecWorkspaceSearch, domain.ExecWorkspaceEdit, domain.ExecWorkspaceShell:
+	case domain.ExecWorkspaceRead, domain.ExecWorkspaceDirectoryList, domain.ExecWorkspaceSearch, domain.ExecWorkspaceEdit, domain.ExecWorkspaceShell:
 		return true
 	default:
 		return false
@@ -883,7 +899,7 @@ func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest) 
 	switch req.Mode {
 	case domain.ExecWorkspaceRead:
 		result.Stdout, err = readWorkspaceFile(path, req.RelativePath, req.MaxBytes, req.OffsetBytes)
-	case domain.ExecWorkspaceList:
+	case domain.ExecWorkspaceDirectoryList:
 		result.Stdout, err = listWorkspaceDirectory(path)
 	case domain.ExecWorkspaceSearch:
 		result.Stdout, err = searchWorkspaceFile(path, req.SearchPattern, req.ContextLines, req.MaxMatches)

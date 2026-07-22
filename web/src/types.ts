@@ -131,6 +131,7 @@ export interface AgentEvent {
 export interface ChatSession {
   id: string
   title: string
+	workspace_id: string
   message_count: number
   updated_at: string
   active: boolean
@@ -172,6 +173,7 @@ export interface AgentPlan {
 
 export interface ChatState {
   active: boolean
+	workspace_id: string
   messages: ChatMessage[]
   plan?: AgentPlan | null
 }

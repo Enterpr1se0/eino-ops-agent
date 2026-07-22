@@ -41,6 +41,11 @@ var safePrograms = stringSet(
 	"cmp", "printf", "set", "sha256sum", "sync", "test", "timeout",
 )
 
+// These otherwise read-only programs can disclose arbitrary file content.
+// They share the same approval boundary as the structured file-read tools so
+// an Agent cannot bypass a reviewed read by switching to ssh_exec.
+var fileContentPrograms = stringSet("cat", "cut", "grep", "head", "less", "more", "tail")
+
 var changePrograms = stringSet(
 	"apt", "apt-get", "apk", "brew", "cargo", "chgrp", "chmod", "chown", "cp", "dnf", "docker",
 	"dpkg", "git", "go", "helm", "install", "kill", "kubectl", "make", "mkdir", "mv", "npm", "pip",
@@ -151,10 +156,17 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 		risk = maxRisk(risk, domain.RiskChange)
 		hits = append(hits, "ssh_host_file_transfer")
 	}
+	fileContentAccess := isFileContentAccess(req.Mode) || hasFileContentProgram(hits)
+	if fileContentAccess {
+		hits = append(hits, "file_content_access")
+	}
 
 	sort.Strings(hits)
 	switch risk {
 	case domain.RiskReadOnly:
+		if fileContentAccess {
+			return domain.Decision{Risk: risk, Action: domain.ActionApprove, Reason: "reading file content requires human approval", RuleHits: unique(hits)}
+		}
 		return domain.Decision{Risk: risk, Action: domain.ActionAllow, Reason: "read-only command", RuleHits: unique(hits)}
 	case domain.RiskChange:
 		return domain.Decision{Risk: risk, Action: domain.ActionApprove, Reason: "operation may change remote state", RuleHits: unique(hits)}
@@ -163,6 +175,25 @@ func (e *Engine) Evaluate(_ context.Context, host domain.Host, req domain.ExecRe
 	default:
 		return domain.Decision{Risk: domain.RiskForbidden, Action: domain.ActionDeny, Reason: "operation is forbidden", RuleHits: unique(hits)}
 	}
+}
+
+func isFileContentAccess(mode domain.ExecMode) bool {
+	switch mode {
+	case domain.ExecRemoteRead, domain.ExecRemoteSearch, domain.ExecWorkspaceRead, domain.ExecWorkspaceSearch:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasFileContentProgram(hits []string) bool {
+	for _, hit := range hits {
+		program, ok := strings.CutPrefix(hit, "read_program:")
+		if ok && fileContentPrograms[program] {
+			return true
+		}
+	}
+	return false
 }
 
 func analyzeShell(source string) (domain.RiskLevel, []string, error) {
@@ -277,7 +308,7 @@ func shellSource(req domain.ExecRequest) (string, error) {
 		return req.Script, nil
 	case domain.ExecWorkspaceRead:
 		return "cat " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
-	case domain.ExecWorkspaceList:
+	case domain.ExecWorkspaceDirectoryList:
 		return "ls " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
 	case domain.ExecWorkspaceSearch:
 		return "grep " + shellQuote(req.SearchPattern) + " " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
