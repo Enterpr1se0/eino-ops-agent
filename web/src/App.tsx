@@ -133,7 +133,7 @@ function App() {
       </nav>
       <div className="sidebar-foot">
 			<button className="logout-button" onClick={async()=>{try{await api.logout()}finally{setAuth('guest')}}}><LogOut size={15}/>{t('shell.signOut')}</button>
-        <div className="build">v0.1.1</div>
+        <div className="build">v0.1.2</div>
       </div>
     </aside>
     <main>
@@ -792,6 +792,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
 function formatFileSize(size:number){if(size<1024)return `${size} B`;if(size<1024*1024)return `${(size/1024).toFixed(1)} KiB`;return `${(size/1024/1024).toFixed(1)} MiB`}
 
 type WorkspaceNotice={kind:'success'|'error';text:string}
+type WorkspaceDeleteCandidate={workspaceID:string;path:string;type:'file'|'directory'}
 
 function workspaceChildPath(path:string,name:string){return path==='.'?name:`${path}/${name}`}
 
@@ -805,6 +806,7 @@ function ChatWorkspacePanel({workspaces,workspaceID,switching,disabled,bound,onS
 	const [file,setFile]=useState<File|null>(null),[target,setTarget]=useState(''),[uploading,setUploading]=useState(false),[inputKey,setInputKey]=useState(0)
 	const [notice,setNotice]=useState<WorkspaceNotice|null>(null),[dragging,setDragging]=useState(false)
 	const [preview,setPreview]=useState<WorkspaceFilePreview|null>(null),[previewLoading,setPreviewLoading]=useState(''),[deleting,setDeleting]=useState('')
+	const [deleteCandidate,setDeleteCandidate]=useState<WorkspaceDeleteCandidate|null>(null)
 	const loadRequestRef=useRef(0),previewPathRef=useRef('')
 
 	const load=useCallback(async(showLoading=true)=>{
@@ -878,17 +880,18 @@ function ChatWorkspacePanel({workspaces,workspaceID,switching,disabled,bound,onS
 		setPreviewLoading(next);setNotice(null)
 		try{setPreview(await api.previewWorkspaceFile(workspace.id,next))}catch(err){setNotice({kind:'error',text:errorText(err)})}finally{setPreviewLoading('')}
 	}
-	const removeEntry=async(name:string,type:'file'|'directory')=>{
-		if(!workspace)return
-		const next=workspaceChildPath(path,name)
-		const targetName=type==='directory'?t('workspace.deleteFolderTarget'):t('workspace.deleteFileTarget')
-		if(!confirm(t('workspace.deleteConfirm',{target:targetName,path:next})))return
-		setDeleting(next);setNotice(null)
+	const requestEntryRemoval=(name:string,type:'file'|'directory')=>{
+		if(workspace)setDeleteCandidate({workspaceID:workspace.id,path:workspaceChildPath(path,name),type})
+	}
+	const removeEntry=async()=>{
+		if(!deleteCandidate)return
+		const candidate=deleteCandidate
+		setDeleting(candidate.path);setNotice(null)
 		try{
-			const result=await api.deleteWorkspaceEntry(workspace.id,next)
-			if(preview?.path===next)setPreview(null)
+			const result=await api.deleteWorkspaceEntry(candidate.workspaceID,candidate.path)
+			if(candidate.workspaceID===workspace?.id&&preview?.path===candidate.path)setPreview(null)
 			setNotice({kind:'success',text:t('workspace.deleted',{type:t(`workspace.${result.type}`,{defaultValue:result.type})})})
-		}catch(err){setNotice({kind:'error',text:errorText(err)})}finally{setDeleting('')}
+		}catch(err){setNotice({kind:'error',text:errorText(err)})}finally{setDeleting('');setDeleteCandidate(null)}
 	}
 	const up=()=>{if(path==='.')return;const parts=path.split('/');parts.pop();setPath(parts.join('/')||'.')}
 
@@ -899,11 +902,12 @@ function ChatWorkspacePanel({workspaces,workspaceID,switching,disabled,bound,onS
 			<div className="chat-workspace-head"><span><b>{workspace.id}</b>{(switching||bound)&&<small>{switching?t('workspace.switching'):t('workspace.boundToConversation')}</small>}</span><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em></div>
 			<div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" onChange={choose}/></label>}<button onClick={()=>synchronize(true)} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>
 			{file&&<div className="chat-upload-row"><input value={target} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}
-			<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=workspaceChildPath(path,entry.name);return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>void removeEntry(entry.name,entry.type)} disabled={deleting===fullPath} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>
+			<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=workspaceChildPath(path,entry.name);return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>requestEntryRemoval(entry.name,entry.type)} disabled={deleting===fullPath} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>
 			{notice&&<div className={`chat-workspace-notice ${notice.kind}`}>{notice.text}</div>}
 			{dragging&&<div className="workspace-drop-overlay"><UploadCloud size={27}/><b>{t('workspace.dropFilesHere')}</b><span>{path}</span></div>}
 		</aside>
 		{preview&&<div className="workspace-preview-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)setPreview(null)}}><section className="workspace-preview-dialog" role="dialog" aria-modal="true" aria-label={`${t('workspace.previewFile')} ${preview.path}`}><header><div><FileText size={18}/><span><b>{preview.path}</b><small>{formatFileSize(preview.size)} · SHA-256 {preview.sha256}</small></span></div><button onClick={()=>setPreview(null)} title={t('workspace.closePreview')}><X size={16}/></button></header>{preview.binary?<div className="workspace-binary-preview"><FileText size={30}/><b>{t('workspace.binary')}</b></div>:<pre>{preview.content||''}</pre>}</section></div>}
+		{deleteCandidate&&<DestructiveConfirmDialog label={t('workspace.permanentDelete')} title={t('workspace.deleteTitle',{path:`${deleteCandidate.workspaceID}:${deleteCandidate.path}`})} description={t('workspace.deleteDescription',{target:deleteCandidate.type==='directory'?t('workspace.deleteFolderTarget'):t('workspace.deleteFileTarget')})} busy={deleting===deleteCandidate.path} onCancel={()=>setDeleteCandidate(null)} onConfirm={()=>void removeEntry()}/>}
 	</>
 }
 

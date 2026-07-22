@@ -1,6 +1,6 @@
 [package]
 name = "opspilot-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "OpsPilot desktop application"
 authors = ["OpsPilot contributors"]
 edition = "2024"

@@ -130,7 +130,7 @@ const zh = {
     relativePath: '相对上传路径', cancelUpload: '取消上传', previewFile: '预览文件', openDirectory: '打开目录', deleteEntry: '删除{{type}}',
     emptyDirectory: '目录为空',
     uploaded: '已上传 · {{path}}', deleted: '已彻底删除 · {{type}}', deleteFolderTarget: '文件夹及其全部内容', deleteFileTarget: '文件',
-    deleteConfirm: '删除{{target}}“{{path}}”？\n\n将从宿主机直接删除，无法恢复。', closePreview: '关闭预览', binary: '二进制文件',
+    permanentDelete: '永久删除 Workspace 内容', deleteTitle: '删除“{{path}}”？', deleteDescription: '{{target}}将从宿主机直接删除，无法恢复。', closePreview: '关闭预览', binary: '二进制文件',
     uploadTo: '上传到 Workspace {{id}}', uploadedShort: '已上传', uploadFailed: '上传失败', dropFilesHere: '释放以上传文件',
     uploadingFiles: '正在上传 {{count}} 个文件...', uploadedFiles: '已上传 {{count}} 个文件', uploadPartial: '已上传 {{uploaded}} 个，{{failed}} 个失败：{{message}}',
     file: '文件', directory: '目录',

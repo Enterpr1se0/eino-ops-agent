@@ -129,7 +129,7 @@ const en = {
     relativePath: 'Relative upload path', cancelUpload: 'Cancel upload', previewFile: 'Preview file', openDirectory: 'Open directory', deleteEntry: 'Delete {{type}}',
     emptyDirectory: 'Empty directory',
     uploaded: 'Uploaded · {{path}}', deleted: 'Deleted permanently · {{type}}', deleteFolderTarget: 'folder and all of its contents', deleteFileTarget: 'file',
-    deleteConfirm: 'Delete {{target}} "{{path}}"?\n\nIt will be deleted directly from the host and cannot be recovered.', closePreview: 'Close preview', binary: 'Binary file',
+    permanentDelete: 'Permanently delete Workspace content', deleteTitle: 'Delete "{{path}}"?', deleteDescription: 'The {{target}} will be deleted directly from the host and cannot be recovered.', closePreview: 'Close preview', binary: 'Binary file',
     uploadTo: 'Upload to Workspace {{id}}', uploadedShort: 'Uploaded', uploadFailed: 'Upload failed', dropFilesHere: 'Drop files to upload',
     uploadingFiles: 'Uploading {{count}} files...', uploadedFiles: 'Uploaded {{count}} files', uploadPartial: 'Uploaded {{uploaded}}; {{failed}} failed: {{message}}',
     file: 'file', directory: 'directory',
