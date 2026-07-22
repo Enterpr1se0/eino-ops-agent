@@ -11,7 +11,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
@@ -478,7 +477,30 @@ func TestBuildModelContextPreservesTurnBoundaries(t *testing.T) {
 	if messages[5].Content != incompleteTurnContext {
 		t.Fatalf("incomplete turn marker = %q", messages[5].Content)
 	}
-	if stats.StoredTurns != 3 || stats.IncludedTurns != 3 || stats.ToolResults != 2 || stats.Truncated {
+	if stats.StoredTurns != 3 || stats.IncludedTurns != 3 || stats.ToolResults != 2 {
+		t.Fatalf("context stats = %#v", stats)
+	}
+}
+
+func TestBuildModelContextPreservesCompleteToolEvidence(t *testing.T) {
+	first := "first-start\n" + strings.Repeat("甲", 50_000) + "\nfirst-end"
+	second := "second-start\n" + strings.Repeat("乙", 50_000) + "\nsecond-end"
+	history := []domain.ChatMessage{
+		{Role: "user", Content: "inspect complete output", Status: "completed"},
+		{Role: "tool", ToolName: "ssh_exec", Content: first, Status: "completed"},
+		{Role: "tool", ToolName: "workspace_shell", Content: second, Status: "completed"},
+	}
+	messages, stats := buildModelContext(history, "continue")
+	if len(messages) != 3 {
+		t.Fatalf("model messages = %#v", messages)
+	}
+	evidence := messages[1].Content
+	for _, expected := range []string{first, second} {
+		if !strings.Contains(evidence, expected) {
+			t.Fatalf("complete tool evidence was not preserved: evidence_bytes=%d expected_bytes=%d", len(evidence), len(expected))
+		}
+	}
+	if stats.ToolResults != 2 || stats.IncludedTurns != 1 {
 		t.Fatalf("context stats = %#v", stats)
 	}
 }
@@ -527,19 +549,8 @@ func TestBuildMultimodalModelContextIncludesAllImages(t *testing.T) {
 			t.Fatalf("image part %d data = %q, err = %v", index, decoded, err)
 		}
 	}
-	if stats.Images != 3 || stats.ImageBytes != int64(len(historyImage)+len(currentImageOne)+len(currentImageTwo)) || stats.Truncated {
+	if stats.Images != 3 || stats.ImageBytes != int64(len(historyImage)+len(currentImageOne)+len(currentImageTwo)) {
 		t.Fatalf("multimodal context stats = %#v", stats)
-	}
-}
-
-func TestTruncateModelTextKeepsValidUTF8AndBothEnds(t *testing.T) {
-	value := strings.Repeat("开头", 100) + " middle " + strings.Repeat("结尾", 100)
-	truncated := truncateModelText(value, 180)
-	if !utf8.ValidString(truncated) || len(truncated) > 180 {
-		t.Fatalf("invalid truncation length=%d value=%q", len(truncated), truncated)
-	}
-	if !strings.HasPrefix(truncated, "开头") || !strings.HasSuffix(truncated, "结尾") || !strings.Contains(truncated, "truncated") {
-		t.Fatalf("truncation did not preserve both ends: %q", truncated)
 	}
 }
 

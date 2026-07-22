@@ -430,12 +430,11 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			emit(Event{Type: "interrupted", SessionID: sessionID, Content: interruptedRunMessage})
 		}
 	}()
-	history, recordLimitReached, err := r.store.ListChatContextMessages(ctx, sessionID, modelHistoryRecordLimit)
+	history, err := r.store.ListChatContextMessages(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}
 	messages, contextStats := buildMultimodalModelContext(history, domain.ChatMessage{Role: "user", Content: query, Attachments: attachments})
-	contextStats.RecordLimitReached = recordLimitReached
 	planInjected := false
 	planStatus := ""
 	if plan, planErr := r.store.GetAgentPlan(ctx, sessionID); planErr == nil {
@@ -456,7 +455,6 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		"tool_results", contextStats.ToolResults, "context_bytes", contextStats.Bytes,
 		"images", contextStats.Images, "image_bytes", contextStats.ImageBytes,
 		"plan_injected", planInjected, "plan_status", planStatus,
-		"truncated", contextStats.Truncated || contextStats.RecordLimitReached,
 	)
 	userMessageID, err := r.store.AppendPendingChatMessageWithAttachments(ctx, sessionID, "user", query, attachments)
 	if err != nil {

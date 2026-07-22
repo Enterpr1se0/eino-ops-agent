@@ -192,44 +192,34 @@ const (
 	DefaultWebSearchMaxResults     = 10
 	MinWebSearchMaxResults         = 1
 	MaxWebSearchMaxResults         = 20
-	DefaultWebExtractMaxContentKiB = 32
-	MinWebExtractMaxContentKiB     = 8
-	MaxWebExtractMaxContentKiB     = 128
-	DefaultWebExtractMaxTotalKiB   = 128
-	MinWebExtractMaxTotalKiB       = 32
-	MaxWebExtractMaxTotalKiB       = 512
 )
 
 type WebSearchSettings struct {
-	Enabled              bool      `json:"enabled"`
-	Provider             string    `json:"provider"`
-	BaseURL              string    `json:"base_url"`
-	APIKeyCipher         string    `json:"-"`
-	HasAPIKey            bool      `json:"has_api_key"`
-	ProxyURL             string    `json:"proxy_url,omitempty"`
-	ProxyUsername        string    `json:"proxy_username,omitempty"`
-	ProxyPasswordCipher  string    `json:"-"`
-	HasProxyPassword     bool      `json:"has_proxy_password"`
-	TimeoutSeconds       int       `json:"timeout_seconds"`
-	MaxResults           int       `json:"max_results"`
-	ExtractMaxContentKiB int       `json:"extract_max_content_kib"`
-	ExtractMaxTotalKiB   int       `json:"extract_max_total_kib"`
-	UpdatedAt            time.Time `json:"updated_at"`
+	Enabled             bool      `json:"enabled"`
+	Provider            string    `json:"provider"`
+	BaseURL             string    `json:"base_url"`
+	APIKeyCipher        string    `json:"-"`
+	HasAPIKey           bool      `json:"has_api_key"`
+	ProxyURL            string    `json:"proxy_url,omitempty"`
+	ProxyUsername       string    `json:"proxy_username,omitempty"`
+	ProxyPasswordCipher string    `json:"-"`
+	HasProxyPassword    bool      `json:"has_proxy_password"`
+	TimeoutSeconds      int       `json:"timeout_seconds"`
+	MaxResults          int       `json:"max_results"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 type WebSearchSettingsInput struct {
-	Enabled              bool   `json:"enabled"`
-	BaseURL              string `json:"base_url"`
-	APIKey               string `json:"api_key,omitempty"`
-	ClearAPIKey          bool   `json:"clear_api_key,omitempty"`
-	ProxyURL             string `json:"proxy_url,omitempty"`
-	ProxyUsername        string `json:"proxy_username,omitempty"`
-	ProxyPassword        string `json:"proxy_password,omitempty"`
-	ClearProxyPassword   bool   `json:"clear_proxy_password,omitempty"`
-	TimeoutSeconds       int    `json:"timeout_seconds"`
-	MaxResults           int    `json:"max_results"`
-	ExtractMaxContentKiB int    `json:"extract_max_content_kib"`
-	ExtractMaxTotalKiB   int    `json:"extract_max_total_kib"`
+	Enabled            bool   `json:"enabled"`
+	BaseURL            string `json:"base_url"`
+	APIKey             string `json:"api_key,omitempty"`
+	ClearAPIKey        bool   `json:"clear_api_key,omitempty"`
+	ProxyURL           string `json:"proxy_url,omitempty"`
+	ProxyUsername      string `json:"proxy_username,omitempty"`
+	ProxyPassword      string `json:"proxy_password,omitempty"`
+	ClearProxyPassword bool   `json:"clear_proxy_password,omitempty"`
+	TimeoutSeconds     int    `json:"timeout_seconds"`
+	MaxResults         int    `json:"max_results"`
 }
 
 type WebSearchRequest struct {
@@ -457,7 +447,6 @@ type ExecResult struct {
 	ExitCode            int           `json:"exit_code,omitempty"`
 	Stdout              string        `json:"stdout,omitempty"`
 	Stderr              string        `json:"stderr,omitempty"`
-	Truncated           bool          `json:"truncated,omitempty"`
 	Duration            time.Duration `json:"duration,omitempty"`
 	PolicyHits          []string      `json:"policy_hits,omitempty"`
 	CompletedAt         time.Time     `json:"completed_at,omitempty"`
@@ -542,7 +531,6 @@ type Run struct {
 	StderrRedacted string         `json:"stderr_redacted,omitempty"`
 	StdoutCipher   string         `json:"-"`
 	StderrCipher   string         `json:"-"`
-	Truncated      bool           `json:"truncated"`
 	Error          string         `json:"error,omitempty"`
 	AIReviewJSON   string         `json:"-"`
 	AIReview       *CommandReview `json:"ai_review,omitempty"`

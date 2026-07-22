@@ -74,12 +74,8 @@ func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection Co
 	timeout := effectiveTimeout(req.TimeoutSeconds, t.limits)
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
-	maxBytes := t.limits.MaxOutputBytes
-	if maxBytes <= 0 {
-		maxBytes = 10 << 20
-	}
-	stdout := newLimitBuffer(maxBytes)
-	stderr := newLimitBuffer(maxBytes)
+	stdout := newCaptureBuffer()
+	stderr := newCaptureBuffer()
 	stdoutWriter, stderrWriter := io.Writer(stdout), io.Writer(stderr)
 	if callback != nil {
 		stdoutWriter = io.MultiWriter(stdout, callbackWriter{stream: "stdout", callback: callback})
@@ -113,7 +109,7 @@ func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection Co
 		case <-done:
 		case <-time.After(time.Second):
 		}
-		result := RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Truncated: stdout.Truncated() || stderr.Truncated(), Duration: time.Since(started)}
+		result := RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Duration: time.Since(started)}
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
@@ -123,10 +119,10 @@ func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection Co
 		return result, execCtx.Err()
 	}
 	if ctx.Err() != nil {
-		return RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Truncated: stdout.Truncated() || stderr.Truncated(), Duration: time.Since(started)}, ctx.Err()
+		return RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Duration: time.Since(started)}, ctx.Err()
 	}
 	if execCtx.Err() != nil {
-		result := RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Truncated: stdout.Truncated() || stderr.Truncated(), Duration: time.Since(started)}
+		result := RawResult{ExitCode: -1, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Duration: time.Since(started)}
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
@@ -134,11 +130,10 @@ func (t *NativeSSHTransport) execWithCallback(ctx context.Context, connection Co
 	}
 
 	result := RawResult{
-		ExitCode:  nativeExitCode(runErr),
-		Stdout:    stdout.Bytes(),
-		Stderr:    stderr.Bytes(),
-		Truncated: stdout.Truncated() || stderr.Truncated(),
-		Duration:  time.Since(started),
+		ExitCode: nativeExitCode(runErr),
+		Stdout:   stdout.Bytes(),
+		Stderr:   stderr.Bytes(),
+		Duration: time.Since(started),
 	}
 	if runErr != nil {
 		var exitErr *ssh.ExitError

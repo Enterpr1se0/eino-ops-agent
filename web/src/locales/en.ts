@@ -101,7 +101,7 @@ const en = {
   },
   webSearch: {
     title: 'Tavily Web', baseURL: 'API URL', apiKey: 'API Key', proxyURL: 'Proxy URL', proxyUsername: 'Proxy username', proxyPassword: 'Proxy password',
-    timeout: 'Timeout (seconds)', maxResults: 'Search result limit', extractMaxContent: 'Per-page extract limit (KiB)', extractMaxTotal: 'Total extract limit (KiB)', savedSecret: 'Saved; leave blank to keep', saved: 'Tavily Web settings saved.', testPassed: 'Connection passed with {{count}} result.', clearKey: 'Clear Key', clearProxyPassword: 'Clear proxy password',
+    timeout: 'Timeout (seconds)', maxResults: 'Search result limit', savedSecret: 'Saved; leave blank to keep', saved: 'Tavily Web settings saved.', testPassed: 'Connection passed with {{count}} result.', clearKey: 'Clear Key', clearProxyPassword: 'Clear proxy password',
   },
   chat: {
     session: 'OpsPilot session', newSession: 'NEW SESSION', conversations: 'Conversations', openConversations: 'Open conversations', closeConversations: 'Close conversations',
@@ -127,7 +127,6 @@ const en = {
     emptyDirectory: 'Empty directory',
     uploaded: 'Uploaded · {{path}}', deleted: 'Deleted permanently · {{type}}', deleteFolderTarget: 'folder and all of its contents', deleteFileTarget: 'file',
     deleteConfirm: 'Delete {{target}} "{{path}}"?\n\nIt will be deleted directly from the host and cannot be recovered.', closePreview: 'Close preview', binary: 'Binary file',
-    truncated: 'Preview is limited to the first 1 MiB. The original file was not modified.',
     uploadTo: 'Upload to Workspace {{id}}', uploadedShort: 'Uploaded', uploadFailed: 'Upload failed',
     file: 'file', directory: 'directory',
   },
@@ -200,6 +199,7 @@ const en = {
   },
   logs: {
     search: 'Search messages, IDs, hosts, status...', minimumLevel: 'Level', component: 'Component', allComponents: 'All components', live: 'Live · 3s', paused: 'Paused',
+		export: 'Export logs',
     entries: '{{count}} recent entries', file: 'Log path: {{file}}', fileDisabled: 'File logging disabled',
     debugHint: 'Debug logs are off. Set OPS_AGENT_LOG_LEVEL=debug and restart the service.',
     columns: { time: 'Time', level: 'Level', component: 'Component', event: 'Event / fields' }, general: 'general', emptyTitle: 'No matching server logs',

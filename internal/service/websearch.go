@@ -15,7 +15,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode"
 
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/proxyx"
@@ -94,22 +93,6 @@ func (s *Service) SaveWebSearchSettings(ctx context.Context, input domain.WebSea
 	if input.MaxResults < domain.MinWebSearchMaxResults || input.MaxResults > domain.MaxWebSearchMaxResults {
 		return domain.WebSearchSettings{}, fmt.Errorf("max_results must be between %d and %d", domain.MinWebSearchMaxResults, domain.MaxWebSearchMaxResults)
 	}
-	if input.ExtractMaxContentKiB == 0 {
-		input.ExtractMaxContentKiB = domain.DefaultWebExtractMaxContentKiB
-	}
-	if input.ExtractMaxTotalKiB == 0 {
-		input.ExtractMaxTotalKiB = domain.DefaultWebExtractMaxTotalKiB
-	}
-	if input.ExtractMaxContentKiB < domain.MinWebExtractMaxContentKiB || input.ExtractMaxContentKiB > domain.MaxWebExtractMaxContentKiB {
-		return domain.WebSearchSettings{}, fmt.Errorf("extract_max_content_kib must be between %d and %d", domain.MinWebExtractMaxContentKiB, domain.MaxWebExtractMaxContentKiB)
-	}
-	if input.ExtractMaxTotalKiB < domain.MinWebExtractMaxTotalKiB || input.ExtractMaxTotalKiB > domain.MaxWebExtractMaxTotalKiB {
-		return domain.WebSearchSettings{}, fmt.Errorf("extract_max_total_kib must be between %d and %d", domain.MinWebExtractMaxTotalKiB, domain.MaxWebExtractMaxTotalKiB)
-	}
-	if input.ExtractMaxTotalKiB < input.ExtractMaxContentKiB {
-		return domain.WebSearchSettings{}, fmt.Errorf("extract_max_total_kib must not be less than extract_max_content_kib")
-	}
-
 	apiKeyCipher := current.APIKeyCipher
 	if input.ClearAPIKey {
 		apiKeyCipher = ""
@@ -143,7 +126,6 @@ func (s *Service) SaveWebSearchSettings(ctx context.Context, input domain.WebSea
 		Enabled: input.Enabled, Provider: "tavily", BaseURL: baseURL, APIKeyCipher: apiKeyCipher,
 		ProxyURL: proxyURL, ProxyUsername: proxyUsername, ProxyPasswordCipher: proxyPasswordCipher,
 		TimeoutSeconds: input.TimeoutSeconds, MaxResults: input.MaxResults,
-		ExtractMaxContentKiB: input.ExtractMaxContentKiB, ExtractMaxTotalKiB: input.ExtractMaxTotalKiB,
 	})
 	if err != nil {
 		return domain.WebSearchSettings{}, err
@@ -151,7 +133,6 @@ func (s *Service) SaveWebSearchSettings(ctx context.Context, input domain.WebSea
 	s.audit(ctx, "", "web_search_settings_updated", actor, map[string]any{
 		"enabled": saved.Enabled, "provider": saved.Provider, "base_url": saved.BaseURL,
 		"proxy_configured": saved.ProxyURL != "", "timeout_seconds": saved.TimeoutSeconds, "max_results": saved.MaxResults,
-		"extract_max_content_kib": saved.ExtractMaxContentKiB, "extract_max_total_kib": saved.ExtractMaxTotalKiB,
 	})
 	return publicWebSearchSettings(saved), nil
 }
@@ -168,12 +149,6 @@ func decorateWebSearchSettings(settings domain.WebSearchSettings) domain.WebSear
 	}
 	if settings.MaxResults == 0 {
 		settings.MaxResults = domain.DefaultWebSearchMaxResults
-	}
-	if settings.ExtractMaxContentKiB < domain.MinWebExtractMaxContentKiB || settings.ExtractMaxContentKiB > domain.MaxWebExtractMaxContentKiB {
-		settings.ExtractMaxContentKiB = domain.DefaultWebExtractMaxContentKiB
-	}
-	if settings.ExtractMaxTotalKiB < domain.MinWebExtractMaxTotalKiB || settings.ExtractMaxTotalKiB > domain.MaxWebExtractMaxTotalKiB || settings.ExtractMaxTotalKiB < settings.ExtractMaxContentKiB {
-		settings.ExtractMaxTotalKiB = domain.DefaultWebExtractMaxTotalKiB
 	}
 	settings.HasAPIKey = settings.APIKeyCipher != ""
 	settings.HasProxyPassword = settings.ProxyPasswordCipher != ""
@@ -245,10 +220,10 @@ func (s *Service) SearchWeb(ctx context.Context, input domain.WebSearchRequest, 
 		if containsWebSearchSecret(parsed.String(), settings) {
 			continue
 		}
-		result.Title = boundedWebSearchText(s.scrubWebSearchText(result.Title, settings), 500)
-		result.URL = boundedWebSearchText(parsed.String(), 2048)
-		result.Content = boundedWebSearchText(s.scrubWebSearchText(result.Content, settings), 4000)
-		result.PublishedDate = boundedWebSearchText(s.scrubWebSearchText(result.PublishedDate, settings), 100)
+		result.Title = s.scrubWebSearchText(result.Title, settings)
+		result.URL = parsed.String()
+		result.Content = s.scrubWebSearchText(result.Content, settings)
+		result.PublishedDate = s.scrubWebSearchText(result.PublishedDate, settings)
 		results = append(results, result)
 	}
 	s.audit(ctx, "", "web_search_completed", actor, map[string]any{
@@ -288,25 +263,17 @@ func (s *Service) ExtractWeb(ctx context.Context, input domain.WebExtractRequest
 		FailedResults: make([]domain.WebExtractFailedResult, 0, len(decoded.FailedResults)),
 		ResponseTime:  decoded.ResponseTime, ContentIsUntrusted: true,
 	}
-	maxContentBytes := settings.ExtractMaxContentKiB << 10
-	remaining := settings.ExtractMaxTotalKiB << 10
 	resultLimit := min(len(decoded.Results), maxWebExtractURLs)
-	for index, extracted := range decoded.Results[:resultLimit] {
-		if remaining <= 0 {
-			break
-		}
+	for _, extracted := range decoded.Results[:resultLimit] {
 		normalizedURL, err := normalizePublicWebURL(extracted.URL)
 		if err != nil || containsWebSearchSecret(normalizedURL, settings) {
 			continue
 		}
-		slotsRemaining := resultLimit - index
-		limit := min(maxContentBytes, remaining/slotsRemaining)
-		content := boundedWebSearchText(s.scrubWebSearchText(extracted.RawContent, settings), limit)
+		content := s.scrubWebSearchText(extracted.RawContent, settings)
 		if content == "" {
 			result.FailedResults = append(result.FailedResults, domain.WebExtractFailedResult{URL: normalizedURL, Error: "Tavily returned empty content"})
 			continue
 		}
-		remaining -= len(content)
 		result.Results = append(result.Results, domain.WebExtractResult{URL: normalizedURL, RawContent: content})
 	}
 	for _, failed := range decoded.FailedResults {
@@ -318,7 +285,7 @@ func (s *Service) ExtractWeb(ctx context.Context, input domain.WebExtractRequest
 			continue
 		}
 		result.FailedResults = append(result.FailedResults, domain.WebExtractFailedResult{
-			URL: normalizedURL, Error: boundedWebSearchText(s.scrubWebSearchText(failed.Error, settings), 1000),
+			URL: normalizedURL, Error: s.scrubWebSearchText(failed.Error, settings),
 		})
 	}
 	eventType := "web_extract_completed"
@@ -370,7 +337,7 @@ func (s *Service) requestTavily(ctx context.Context, settings resolvedWebSearchS
 		return fmt.Errorf("%w: response exceeded 2 MiB", ErrWebSearchUpstream)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		message := boundedWebSearchText(s.scrubWebSearchText(string(body), settings), 1000)
+		message := s.scrubWebSearchText(string(body), settings)
 		return fmt.Errorf("%w: Tavily returned %s: %s", ErrWebSearchUpstream, response.Status, message)
 	}
 	if err := json.Unmarshal(body, output); err != nil {
@@ -530,29 +497,4 @@ func normalizeWebSearchDomains(values []string) ([]string, error) {
 		}
 	}
 	return result, nil
-}
-
-func boundedWebSearchText(value string, limit int) string {
-	value = strings.Map(func(character rune) rune {
-		if unicode.IsControl(character) && character != '\n' && character != '\t' {
-			return -1
-		}
-		return character
-	}, strings.TrimSpace(value))
-	if len(value) <= limit {
-		return value
-	}
-	const marker = "\n[CONTENT TRUNCATED]"
-	if limit <= len(marker) {
-		return marker[:limit]
-	}
-	prefixLimit := limit - len(marker)
-	for prefixLimit > 0 && !utf8RuneStart(value[prefixLimit]) {
-		prefixLimit--
-	}
-	return value[:prefixLimit] + marker
-}
-
-func utf8RuneStart(value byte) bool {
-	return value&0xc0 != 0x80
 }

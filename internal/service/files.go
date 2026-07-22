@@ -30,12 +30,6 @@ func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, max
 	if offsetBytes < 0 || tailLines < 0 || (offsetBytes > 0 && tailLines > 0) {
 		return domain.ExecResult{}, fmt.Errorf("invalid file range: offset_bytes and tail_lines are non-negative and mutually exclusive")
 	}
-	if tailLines > 5000 {
-		tailLines = 5000
-	}
-	if maxBytes <= 0 || maxBytes > s.limits.ModelOutputBytes {
-		maxBytes = s.limits.ModelOutputBytes
-	}
 	quoted := shellQuote(path)
 	lines := []string{
 		"set -e",
@@ -46,11 +40,23 @@ func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, max
 	}
 	switch {
 	case tailLines > 0:
-		lines = append(lines, "tail -n "+strconv.Itoa(tailLines)+" -- "+quoted+" | head -c "+strconv.Itoa(maxBytes))
+		command := "tail -n " + strconv.Itoa(tailLines) + " -- " + quoted
+		if maxBytes > 0 {
+			command += " | head -c " + strconv.Itoa(maxBytes)
+		}
+		lines = append(lines, command)
 	case offsetBytes > 0:
-		lines = append(lines, "tail -c +"+strconv.FormatInt(offsetBytes+1, 10)+" -- "+quoted+" | head -c "+strconv.Itoa(maxBytes))
+		command := "tail -c +" + strconv.FormatInt(offsetBytes+1, 10) + " -- " + quoted
+		if maxBytes > 0 {
+			command += " | head -c " + strconv.Itoa(maxBytes)
+		}
+		lines = append(lines, command)
 	default:
-		lines = append(lines, "head -c "+strconv.Itoa(maxBytes)+" -- "+quoted)
+		if maxBytes > 0 {
+			lines = append(lines, "head -c "+strconv.Itoa(maxBytes)+" -- "+quoted)
+		} else {
+			lines = append(lines, "cat -- "+quoted)
+		}
 	}
 	result, err := s.Submit(ctx, domain.ExecRequest{
 		HostID: hostID, Mode: domain.ExecScript, Script: strings.Join(lines, "\n"), Elevated: elevated,
@@ -78,14 +84,11 @@ func (s *Service) SearchFile(ctx context.Context, hostID, path, pattern string, 
 	if contextLines < 0 {
 		return domain.ExecResult{}, fmt.Errorf("invalid context_lines")
 	}
-	if contextLines > 10 {
-		contextLines = 10
+	script := "grep -n -F -C " + strconv.Itoa(contextLines) + " -- " + shellQuote(pattern) + " " + shellQuote(path)
+	if maxMatches > 0 {
+		script += " | head -n " + strconv.Itoa(maxMatches)
 	}
-	if maxMatches <= 0 || maxMatches > 200 {
-		maxMatches = 100
-	}
-	script := "grep -n -F -C " + strconv.Itoa(contextLines) + " -- " + shellQuote(pattern) + " " + shellQuote(path) + " | head -n " + strconv.Itoa(maxMatches)
-	return s.Submit(ctx, domain.ExecRequest{HostID: hostID, Mode: domain.ExecScript, Script: script, Elevated: elevated, Reason: "search bounded literal matches in a remote file"}, actor)
+	return s.Submit(ctx, domain.ExecRequest{HostID: hostID, Mode: domain.ExecScript, Script: script, Elevated: elevated, Reason: "search literal matches in a remote file"}, actor)
 }
 
 func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, content, patchContent, expectedSHA256, validatorID string, elevated bool, reason, rollback, actor string) (domain.ExecResult, error) {

@@ -40,7 +40,7 @@ func TestChatAttachmentsPersistForHistoryAndModelContext(t *testing.T) {
 		t.Fatalf("public attachment metadata = %#v", metadata)
 	}
 
-	modelHistory, _, err := st.ListChatContextMessages(ctx, "session-images", 20)
+	modelHistory, err := st.ListChatContextMessages(ctx, "session-images")
 	if err != nil {
 		t.Fatal(err)
 	}

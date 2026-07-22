@@ -25,7 +25,7 @@ workspace_sandbox_path: bwrap
 validators: []
 
 logging:
-  level: info
+  level: debug
   format: text
   file: .data/ops-agent.log
   add_source: false
@@ -43,8 +43,6 @@ model:
 limits:
   sync_timeout_seconds: 60
   max_timeout_seconds: 600
-  max_output_bytes: 10485760
-  model_output_bytes: 32768
   global_concurrency: 8
   host_concurrency: 2
 `

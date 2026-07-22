@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -49,6 +51,13 @@ func TestWebAuthenticationCookieAndCSRF(t *testing.T) {
 	}
 	if cookie == nil || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode {
 		t.Fatalf("secure session cookie missing: %#v", cookie)
+	}
+
+	unauthenticatedExport := httptest.NewRequest(http.MethodGet, "/api/v1/logs/export", nil)
+	unauthenticatedExportResponse := httptest.NewRecorder()
+	handler.ServeHTTP(unauthenticatedExportResponse, unauthenticatedExport)
+	if unauthenticatedExportResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated log export returned %d", unauthenticatedExportResponse.Code)
 	}
 
 	withoutCSRF := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", bytes.NewBufferString(`{}`))
@@ -133,6 +142,30 @@ func TestAgentToolsEndpointReportsAnUnloadedRuntimeWithoutPanicking(t *testing.T
 	}
 	if catalog.Loaded || catalog.Count != 0 || catalog.Tools == nil {
 		t.Fatalf("unexpected unloaded catalog: %#v", catalog)
+	}
+}
+
+func TestLogExportReturnsDownloadableZip(t *testing.T) {
+	handler := New(nil, nil, nil).Handler()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/logs/export", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("log export status=%d body=%s", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "application/zip" {
+		t.Fatalf("log export content type = %q", contentType)
+	}
+	if disposition := response.Header().Get("Content-Disposition"); !strings.HasPrefix(disposition, "attachment;") || !strings.Contains(disposition, "opspilot-logs-") {
+		t.Fatalf("log export content disposition = %q", disposition)
+	}
+	archive, err := zip.NewReader(bytes.NewReader(response.Body.Bytes()), int64(response.Body.Len()))
+	if err != nil {
+		t.Fatalf("parse log export: %v", err)
+	}
+	if len(archive.File) != 1 || archive.File[0].Name != "ops-agent-memory.jsonl" {
+		t.Fatalf("unexpected log export entries: %#v", archive.File)
 	}
 }
 

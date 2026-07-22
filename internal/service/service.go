@@ -1316,7 +1316,7 @@ func execResultFromRun(run domain.Run, approvalID, operatorInstruction string) d
 	return domain.ExecResult{
 		RunID: run.ID, Status: run.Status, Risk: run.Risk, ApprovalID: approvalID,
 		OperatorInstruction: operatorInstruction, ExitCode: run.ExitCode,
-		Stdout: run.StdoutRedacted, Stderr: stderr, Truncated: run.Truncated,
+		Stdout: run.StdoutRedacted, Stderr: stderr,
 		Duration: duration, CompletedAt: run.CompletedAt,
 	}
 }
@@ -1387,9 +1387,8 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		raw, execErr = s.transport.Exec(ctx, connection, req)
 	}
 	run.ExitCode = raw.ExitCode
-	run.Truncated = raw.Truncated
-	run.StdoutRedacted = limitString(s.redactor.Redact(string(raw.Stdout)), s.limits.ModelOutputBytes)
-	run.StderrRedacted = limitString(s.redactor.Redact(string(raw.Stderr)), s.limits.ModelOutputBytes)
+	run.StdoutRedacted = s.redactor.Redact(string(raw.Stdout))
+	run.StderrRedacted = s.redactor.Redact(string(raw.Stderr))
 	run.StdoutCipher, _ = s.encryptor.Encrypt(raw.Stdout)
 	run.StderrCipher, _ = s.encryptor.Encrypt(raw.Stderr)
 	run.CompletedAt = time.Now().UTC()
@@ -1406,15 +1405,15 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		logger.ErrorContext(ctx, "persist SSH execution result failed", "error", err)
 		return domain.ExecResult{}, err
 	}
-	s.audit(ctx, run.ID, "command_completed", actor, map[string]any{"status": run.Status, "exit_code": run.ExitCode, "duration_ms": raw.Duration.Milliseconds(), "truncated": raw.Truncated})
+	s.audit(ctx, run.ID, "command_completed", actor, map[string]any{"status": run.Status, "exit_code": run.ExitCode, "duration_ms": raw.Duration.Milliseconds()})
 	completion := logger.InfoContext
 	if run.Status == "failed" {
 		completion = logger.ErrorContext
 	}
-	completion(ctx, "SSH execution completed", "status", run.Status, "exit_code", run.ExitCode, "duration_ms", raw.Duration.Milliseconds(), "stdout_bytes", len(raw.Stdout), "stderr_bytes", len(raw.Stderr), "truncated", raw.Truncated, "error", execErr)
+	completion(ctx, "SSH execution completed", "status", run.Status, "exit_code", run.ExitCode, "duration_ms", raw.Duration.Milliseconds(), "stdout_bytes", len(raw.Stdout), "stderr_bytes", len(raw.Stderr), "error", execErr)
 	result := domain.ExecResult{
 		RunID: run.ID, Status: run.Status, Risk: run.Risk, ExitCode: run.ExitCode,
-		Stdout: run.StdoutRedacted, Stderr: run.StderrRedacted, Truncated: run.Truncated,
+		Stdout: run.StdoutRedacted, Stderr: run.StderrRedacted,
 		Duration: raw.Duration, PolicyHits: hits, CompletedAt: run.CompletedAt,
 	}
 	return result, execErr
@@ -1634,9 +1633,9 @@ func (s *Service) StartTask(ctx context.Context, req domain.ExecRequest, actor s
 			defer s.taskMu.Unlock()
 			chunk := s.redactor.Redact(string(data))
 			if streamName == "stderr" {
-				state.result.Stderr = limitString(state.result.Stderr+chunk, s.limits.ModelOutputBytes)
+				state.result.Stderr += chunk
 			} else {
-				state.result.Stdout = limitString(state.result.Stdout+chunk, s.limits.ModelOutputBytes)
+				state.result.Stdout += chunk
 			}
 			_ = s.store.UpsertTask(context.Background(), state.task, state.result, state.err)
 		})
@@ -1986,13 +1985,6 @@ func approvalFingerprint(req domain.ExecRequest) (string, error) {
 	}
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:]), nil
-}
-
-func limitString(value string, limit int) string {
-	if limit <= 0 || len(value) <= limit {
-		return value
-	}
-	return value[:limit] + "\n[MODEL VIEW TRUNCATED]"
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }

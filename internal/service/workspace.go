@@ -57,7 +57,6 @@ type WorkspaceFileList struct {
 	WorkspaceID string               `json:"workspace_id"`
 	Path        string               `json:"path"`
 	Entries     []WorkspaceFileEntry `json:"entries"`
-	Truncated   bool                 `json:"truncated,omitempty"`
 }
 
 type WorkspaceFilePreview struct {
@@ -66,7 +65,6 @@ type WorkspaceFilePreview struct {
 	Size        int64  `json:"size"`
 	SHA256      string `json:"sha256"`
 	Content     string `json:"content,omitempty"`
-	Truncated   bool   `json:"truncated,omitempty"`
 	Binary      bool   `json:"binary,omitempty"`
 }
 
@@ -364,12 +362,8 @@ func (s *Service) ListAdminWorkspaceFiles(workspaceID, relativePath string) (Wor
 	if err != nil {
 		return WorkspaceFileList{}, err
 	}
-	result := WorkspaceFileList{WorkspaceID: workspace.ID, Path: relativePath, Entries: make([]WorkspaceFileEntry, 0, min(len(entries), 200))}
+	result := WorkspaceFileList{WorkspaceID: workspace.ID, Path: relativePath, Entries: make([]WorkspaceFileEntry, 0, len(entries))}
 	for _, entry := range entries {
-		if len(result.Entries) == 200 {
-			result.Truncated = true
-			break
-		}
 		if entry.Type()&os.ModeSymlink != 0 || isSensitiveWorkspaceComponent(entry.Name()) {
 			continue
 		}
@@ -413,14 +407,9 @@ func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (W
 	if err != nil || !info.Mode().IsRegular() {
 		return WorkspaceFilePreview{}, fmt.Errorf("workspace preview target is not a regular file")
 	}
-	const previewLimit = 1 << 20
-	data, err := io.ReadAll(io.LimitReader(file, previewLimit+1))
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return WorkspaceFilePreview{}, err
-	}
-	truncated := len(data) > previewLimit
-	if truncated {
-		data = data[:previewLimit]
 	}
 	digest := sha256.New()
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
@@ -432,7 +421,7 @@ func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (W
 	binary := bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data)
 	result := WorkspaceFilePreview{
 		WorkspaceID: workspace.ID, Path: relativePath, Size: info.Size(), SHA256: hex.EncodeToString(digest.Sum(nil)),
-		Truncated: truncated, Binary: binary,
+		Binary: binary,
 	}
 	if !binary {
 		result.Content = string(data)
@@ -586,9 +575,6 @@ func (s *Service) ReadWorkspaceFile(ctx context.Context, workspaceID, relativePa
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
-	if maxBytes <= 0 || maxBytes > s.limits.ModelOutputBytes {
-		maxBytes = s.limits.ModelOutputBytes
-	}
 	result, err := s.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecWorkspaceRead, WorkspaceID: workspaceID, RelativePath: relativePath,
 		MaxBytes: maxBytes, OffsetBytes: offset, Reason: "read a bounded file from an allowlisted workspace",
@@ -617,9 +603,6 @@ func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath
 	pattern = strings.TrimSpace(pattern)
 	if pattern == "" || len(pattern) > 512 || strings.ContainsAny(pattern, "\x00\r\n") {
 		return domain.ExecResult{}, fmt.Errorf("invalid workspace search pattern")
-	}
-	if maxMatches <= 0 || maxMatches > 200 {
-		maxMatches = 100
 	}
 	return s.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecWorkspaceSearch, WorkspaceID: workspaceID, RelativePath: relativePath,
@@ -1167,18 +1150,14 @@ func workspaceHostEnvironment(workspaceRoot string, input map[string]string) []s
 }
 
 func (s *Service) runWorkspaceProcess(execCtx context.Context, command *exec.Cmd, timeout int, operation string) (sshx.RawResult, error) {
-	maxOutput := s.limits.MaxOutputBytes
-	if maxOutput <= 0 {
-		maxOutput = 10 << 20
-	}
-	stdout := &workspaceLimitBuffer{limit: maxOutput}
-	stderr := &workspaceLimitBuffer{limit: maxOutput}
+	stdout := &workspaceCaptureBuffer{}
+	stderr := &workspaceCaptureBuffer{}
 	command.Stdout, command.Stderr = stdout, stderr
 	started := time.Now()
 	runErr := command.Run()
 	result := sshx.RawResult{
 		ExitCode: workspaceExitCode(runErr), Stdout: stdout.Bytes(), Stderr: stderr.Bytes(),
-		Truncated: stdout.truncated || stderr.truncated, Duration: time.Since(started),
+		Duration: time.Since(started),
 	}
 	if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
 		return result, fmt.Errorf("workspace %s timed out after %s", operation, time.Duration(timeout)*time.Second)
@@ -1192,29 +1171,15 @@ func (s *Service) runWorkspaceProcess(execCtx context.Context, command *exec.Cmd
 	return result, nil
 }
 
-type workspaceLimitBuffer struct {
-	buffer    bytes.Buffer
-	limit     int
-	truncated bool
+type workspaceCaptureBuffer struct {
+	buffer bytes.Buffer
 }
 
-func (b *workspaceLimitBuffer) Write(data []byte) (int, error) {
-	original := len(data)
-	remaining := b.limit - b.buffer.Len()
-	if remaining <= 0 {
-		b.truncated = true
-		return original, nil
-	}
-	if len(data) > remaining {
-		_, _ = b.buffer.Write(data[:remaining])
-		b.truncated = true
-		return original, nil
-	}
-	_, _ = b.buffer.Write(data)
-	return original, nil
+func (b *workspaceCaptureBuffer) Write(data []byte) (int, error) {
+	return b.buffer.Write(data)
 }
 
-func (b *workspaceLimitBuffer) Bytes() []byte { return bytes.Clone(b.buffer.Bytes()) }
+func (b *workspaceCaptureBuffer) Bytes() []byte { return bytes.Clone(b.buffer.Bytes()) }
 
 func workspaceExitCode(err error) int {
 	if err == nil {
@@ -1294,7 +1259,12 @@ func readWorkspaceFile(path, displayPath string, maxBytes int, offset int64) ([]
 	if _, err := file.Seek(offset, io.SeekStart); err != nil {
 		return nil, err
 	}
-	content, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)))
+	var content []byte
+	if maxBytes > 0 {
+		content, err = io.ReadAll(io.LimitReader(file, int64(maxBytes)))
+	} else {
+		content, err = io.ReadAll(file)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1348,8 +1318,8 @@ func searchWorkspaceFile(path, pattern string, maxMatches int) ([]byte, error) {
 		return nil, err
 	}
 	defer file.Close()
-	scanner := bufio.NewScanner(io.LimitReader(file, 10<<20))
-	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64<<10), int(^uint(0)>>1))
 	var output strings.Builder
 	line := 0
 	matches := 0
@@ -1358,7 +1328,7 @@ func searchWorkspaceFile(path, pattern string, maxMatches int) ([]byte, error) {
 		if strings.Contains(scanner.Text(), pattern) {
 			fmt.Fprintf(&output, "%d:%s\n", line, scanner.Text())
 			matches++
-			if matches >= maxMatches {
+			if maxMatches > 0 && matches >= maxMatches {
 				break
 			}
 		}
@@ -1491,9 +1461,6 @@ func (s *Service) runWorkspaceValidator(ctx context.Context, id string, workspac
 	var output bytes.Buffer
 	command.Stdout, command.Stderr = &output, &output
 	err = command.Run()
-	if output.Len() > s.limits.ModelOutputBytes {
-		return output.Bytes()[:s.limits.ModelOutputBytes], err
-	}
 	return output.Bytes(), err
 }
 

@@ -27,9 +27,11 @@ import (
 )
 
 type fakeTransport struct {
-	mu    sync.Mutex
-	calls []domain.ExecRequest
-	hosts []domain.Host
+	mu     sync.Mutex
+	calls  []domain.ExecRequest
+	hosts  []domain.Host
+	stdout []byte
+	stderr []byte
 }
 
 type fakeCommandExplainer struct {
@@ -103,8 +105,39 @@ func (f *fakeTransport) Exec(_ context.Context, connection sshx.ConnectionSpec, 
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
 	f.hosts = append(f.hosts, connection.Target)
+	stdout, stderr := f.stdout, f.stderr
 	f.mu.Unlock()
-	return sshx.RawResult{ExitCode: 0, Stdout: []byte("password=secret-value\nok\n"), Duration: time.Millisecond}, nil
+	if stdout == nil {
+		stdout = []byte("password=secret-value\nok\n")
+	}
+	return sshx.RawResult{ExitCode: 0, Stdout: stdout, Stderr: stderr, Duration: time.Millisecond}, nil
+}
+
+func TestExecutionPreservesCompleteOutput(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	wantStdout := strings.Repeat("stdout-data-", 30_000) + "stdout-end"
+	wantStderr := strings.Repeat("stderr-data-", 12_000) + "stderr-end"
+	transport.mu.Lock()
+	transport.stdout = []byte(wantStdout)
+	transport.stderr = []byte(wantStderr)
+	transport.mu.Unlock()
+
+	result, err := svc.Submit(context.Background(), domain.ExecRequest{
+		HostID: host.ID, Mode: domain.ExecProgram, Program: "uname", Args: []string{"-a"}, Reason: "verify complete output capture",
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stdout != wantStdout || result.Stderr != wantStderr {
+		t.Fatalf("tool output was not preserved: stdout=%d/%d stderr=%d/%d", len(result.Stdout), len(wantStdout), len(result.Stderr), len(wantStderr))
+	}
+	stored, err := svc.store.GetRun(context.Background(), result.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.StdoutRedacted != wantStdout || stored.StderrRedacted != wantStderr {
+		t.Fatalf("persisted output was not preserved: stdout=%d/%d stderr=%d/%d", len(stored.StdoutRedacted), len(wantStdout), len(stored.StderrRedacted), len(wantStderr))
+	}
 }
 
 func (f *fakeTransport) TransferFile(_ context.Context, source, destination sshx.ConnectionSpec, req domain.ExecRequest) (sshx.RawResult, error) {

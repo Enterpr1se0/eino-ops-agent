@@ -1,10 +1,14 @@
 package observability
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -53,5 +57,99 @@ func TestRotatingWriterKeepsBoundedBackups(t *testing.T) {
 	}
 	if string(current) != "second\n" || string(backup) != "first\n" {
 		t.Fatalf("unexpected rotation current=%q backup=%q", current, backup)
+	}
+}
+
+func TestWriteArchiveIncludesCurrentLogAndRotatedBackups(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "ops-agent.log")
+	files := map[string]string{
+		"ops-agent.log":   "current\n",
+		"ops-agent.log.1": "backup-one\n",
+		"ops-agent.log.2": "backup-two\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	previousFile := activeFile.Load()
+	activeFile.Store(&path)
+	t.Cleanup(func() {
+		activeFile.Store(previousFile)
+	})
+
+	var output bytes.Buffer
+	if err := WriteArchive(&output); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(output.Bytes()), int64(output.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reader.File) != len(files) {
+		t.Fatalf("archive entries = %d, want %d", len(reader.File), len(files))
+	}
+	for _, archived := range reader.File {
+		entry, err := archived.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		content, err := io.ReadAll(entry)
+		entry.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(content) != files[archived.Name] {
+			t.Fatalf("archive %q = %q, want %q", archived.Name, content, files[archived.Name])
+		}
+	}
+}
+
+func TestWriteArchiveFallsBackToInMemoryJSONL(t *testing.T) {
+	disabled := "-"
+	buffer := &Buffer{limit: 10, entries: []LogEntry{{Level: "debug", Message: "memory event", Component: "test"}}}
+	previousFile := activeFile.Load()
+	previousBuffer := activeBuffer.Load()
+	activeFile.Store(&disabled)
+	activeBuffer.Store(buffer)
+	t.Cleanup(func() {
+		activeFile.Store(previousFile)
+		activeBuffer.Store(previousBuffer)
+	})
+
+	var output bytes.Buffer
+	if err := WriteArchive(&output); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(output.Bytes()), int64(output.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reader.File) != 1 || reader.File[0].Name != "ops-agent-memory.jsonl" {
+		t.Fatalf("unexpected archive entries: %#v", reader.File)
+	}
+	entry, err := reader.File[0].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := io.ReadAll(entry)
+	entry.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), `"message":"memory event"`) {
+		t.Fatalf("in-memory log was not exported: %s", content)
+	}
+}
+
+func TestEmptyLogLevelDefaultsToDebug(t *testing.T) {
+	level, err := parseLevel("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if level != slog.LevelDebug {
+		t.Fatalf("empty level = %s, want debug", level)
 	}
 }

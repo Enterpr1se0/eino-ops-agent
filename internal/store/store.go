@@ -328,7 +328,6 @@ CREATE TABLE IF NOT EXISTS runs (
   stderr_redacted TEXT NOT NULL DEFAULT '',
   stdout_cipher TEXT NOT NULL DEFAULT '',
   stderr_cipher TEXT NOT NULL DEFAULT '',
-  truncated INTEGER NOT NULL DEFAULT 0,
   error TEXT NOT NULL DEFAULT '',
   ai_review_json TEXT NOT NULL DEFAULT '',
   started_at TEXT NOT NULL,
@@ -521,8 +520,6 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
   proxy_password_cipher TEXT NOT NULL DEFAULT '',
   timeout_seconds INTEGER NOT NULL DEFAULT 20,
   max_results INTEGER NOT NULL DEFAULT 10,
-  extract_max_content_kib INTEGER NOT NULL DEFAULT 32,
-  extract_max_total_kib INTEGER NOT NULL DEFAULT 128,
   updated_at TEXT NOT NULL
 );
 `
@@ -556,8 +553,6 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 		`ALTER TABLE model_providers ADD COLUMN proxy_url TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE model_providers ADD COLUMN proxy_password_cipher TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE web_search_settings ADD COLUMN extract_max_content_kib INTEGER NOT NULL DEFAULT 32`,
-		`ALTER TABLE web_search_settings ADD COLUMN extract_max_total_kib INTEGER NOT NULL DEFAULT 128`,
 		`ALTER TABLE system_settings ADD COLUMN chat_image_allowed_types_json TEXT NOT NULL DEFAULT '["image/png","image/jpeg","image/webp","image/gif"]'`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
@@ -972,16 +967,15 @@ func (s *Store) GetWebSearchSettings(ctx context.Context) (domain.WebSearchSetti
 	var settings domain.WebSearchSettings
 	var enabled int
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,extract_max_content_kib,extract_max_total_kib,updated_at
+	err := s.db.QueryRowContext(ctx, `SELECT enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,updated_at
 FROM web_search_settings WHERE id=1`).Scan(
 		&enabled, &settings.Provider, &settings.BaseURL, &settings.APIKeyCipher, &settings.ProxyURL, &settings.ProxyUsername,
-		&settings.ProxyPasswordCipher, &settings.TimeoutSeconds, &settings.MaxResults, &settings.ExtractMaxContentKiB, &settings.ExtractMaxTotalKiB, &updated,
+		&settings.ProxyPasswordCipher, &settings.TimeoutSeconds, &settings.MaxResults, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.WebSearchSettings{
 			Provider: "tavily", BaseURL: domain.DefaultWebSearchBaseURL,
 			TimeoutSeconds: domain.DefaultWebSearchTimeoutSeconds, MaxResults: domain.DefaultWebSearchMaxResults,
-			ExtractMaxContentKiB: domain.DefaultWebExtractMaxContentKiB, ExtractMaxTotalKiB: domain.DefaultWebExtractMaxTotalKiB,
 		}, nil
 	}
 	if err != nil {
@@ -994,14 +988,14 @@ FROM web_search_settings WHERE id=1`).Scan(
 
 func (s *Store) SaveWebSearchSettings(ctx context.Context, settings domain.WebSearchSettings) (domain.WebSearchSettings, error) {
 	settings.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO web_search_settings(id,enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,extract_max_content_kib,extract_max_total_kib,updated_at)
-VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO web_search_settings(id,enabled,provider,base_url,api_key_cipher,proxy_url,proxy_username,proxy_password_cipher,timeout_seconds,max_results,updated_at)
+VALUES(1,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,provider=excluded.provider,base_url=excluded.base_url,
 api_key_cipher=excluded.api_key_cipher,proxy_url=excluded.proxy_url,proxy_username=excluded.proxy_username,
 proxy_password_cipher=excluded.proxy_password_cipher,timeout_seconds=excluded.timeout_seconds,max_results=excluded.max_results,
-extract_max_content_kib=excluded.extract_max_content_kib,extract_max_total_kib=excluded.extract_max_total_kib,updated_at=excluded.updated_at`,
+updated_at=excluded.updated_at`,
 		boolInt(settings.Enabled), settings.Provider, settings.BaseURL, settings.APIKeyCipher, settings.ProxyURL, settings.ProxyUsername,
-		settings.ProxyPasswordCipher, settings.TimeoutSeconds, settings.MaxResults, settings.ExtractMaxContentKiB, settings.ExtractMaxTotalKiB, formatTime(settings.UpdatedAt))
+		settings.ProxyPasswordCipher, settings.TimeoutSeconds, settings.MaxResults, formatTime(settings.UpdatedAt))
 	if err != nil {
 		return domain.WebSearchSettings{}, err
 	}
@@ -1114,28 +1108,30 @@ func (s *Store) UpdateRun(ctx context.Context, run domain.Run) error {
 		completed = formatTime(run.CompletedAt)
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE runs SET status=?,exit_code=?,stdout_redacted=?,stderr_redacted=?,
-stdout_cipher=?,stderr_cipher=?,truncated=?,error=?,completed_at=? WHERE id=?`, run.Status, run.ExitCode,
-		run.StdoutRedacted, run.StderrRedacted, run.StdoutCipher, run.StderrCipher, boolInt(run.Truncated),
-		run.Error, completed, run.ID)
+stdout_cipher=?,stderr_cipher=?,error=?,completed_at=? WHERE id=?`, run.Status, run.ExitCode,
+		run.StdoutRedacted, run.StderrRedacted, run.StdoutCipher, run.StderrCipher, run.Error, completed, run.ID)
 	return err
 }
 
 func (s *Store) GetRun(ctx context.Context, id string) (domain.Run, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
-exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,truncated,error,ai_review_json,started_at,completed_at
+exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
 FROM runs WHERE id=?`, id)
 	return scanRun(row)
 }
 
 func (s *Store) SearchRuns(ctx context.Context, query, hostID string, limit int) ([]domain.Run, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
 	pattern := "%" + strings.ReplaceAll(query, "%", "\\%") + "%"
-	rows, err := s.db.QueryContext(ctx, `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
-exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,truncated,error,ai_review_json,started_at,completed_at
+	statement := `SELECT id,session_id,host_id,request_json,request_cipher,request_digest,risk,status,
+exit_code,stdout_redacted,stderr_redacted,stdout_cipher,stderr_cipher,error,ai_review_json,started_at,completed_at
 FROM runs WHERE (?='' OR host_id=?) AND (?='' OR request_json LIKE ? ESCAPE '\' OR stdout_redacted LIKE ? ESCAPE '\'
-OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC LIMIT ?`, hostID, hostID, query, pattern, pattern, pattern, limit)
+		OR stderr_redacted LIKE ? ESCAPE '\') ORDER BY started_at DESC`
+	arguments := []any{hostID, hostID, query, pattern, pattern, pattern}
+	if limit > 0 {
+		statement += " LIMIT ?"
+		arguments = append(arguments, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, statement, arguments...)
 	if err != nil {
 		return nil, err
 	}
@@ -1155,17 +1151,15 @@ func scanRun(row scanner) (domain.Run, error) {
 	var run domain.Run
 	var started string
 	var completed sql.NullString
-	var truncated int
 	err := row.Scan(&run.ID, &run.SessionID, &run.HostID, &run.RequestJSON, &run.RequestCipher, &run.RequestDigest, &run.Risk,
 		&run.Status, &run.ExitCode, &run.StdoutRedacted, &run.StderrRedacted, &run.StdoutCipher,
-		&run.StderrCipher, &truncated, &run.Error, &run.AIReviewJSON, &started, &completed)
+		&run.StderrCipher, &run.Error, &run.AIReviewJSON, &started, &completed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Run{}, ErrNotFound
 	}
 	if err != nil {
 		return domain.Run{}, err
 	}
-	run.Truncated = truncated != 0
 	if run.AIReviewJSON != "" {
 		var review domain.CommandReview
 		if json.Unmarshal([]byte(run.AIReviewJSON), &review) == nil {
@@ -1581,43 +1575,34 @@ func (s *Store) ListChatModelMessages(ctx context.Context, sessionID string, lim
 // ListChatContextMessages returns the persisted, provider-relevant transcript.
 // Reasoning is deliberately excluded, while tool evidence and failed turns are
 // retained so the next model run can recover operational state.
-func (s *Store) ListChatContextMessages(ctx context.Context, sessionID string, limit int) ([]domain.ChatMessage, bool, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 500
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,role,content,tool_name,status,created_at FROM (
-SELECT id,role,content,tool_name,status,created_at FROM chat_messages
+func (s *Store) ListChatContextMessages(ctx context.Context, sessionID string) ([]domain.ChatMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,role,content,tool_name,status,created_at FROM chat_messages
 WHERE session_id=? AND role IN ('user','assistant','tool') AND status IN ('completed','failed')
-ORDER BY created_at DESC LIMIT ?)
-ORDER BY created_at`, sessionID, limit+1)
+ORDER BY created_at`, sessionID)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	defer rows.Close()
-	result := make([]domain.ChatMessage, 0, limit+1)
+	result := make([]domain.ChatMessage, 0)
 	for rows.Next() {
 		var message domain.ChatMessage
 		var created string
 		if err := rows.Scan(&message.ID, &message.Role, &message.Content, &message.ToolName, &message.Status, &created); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		message.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		result = append(result, message)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if err := rows.Close(); err != nil {
-		return nil, false, err
-	}
-	truncated := len(result) > limit
-	if truncated {
-		result = result[len(result)-limit:]
+		return nil, err
 	}
 	if err := s.loadChatAttachments(ctx, result, true); err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return result, truncated, nil
+	return result, nil
 }
 
 func (s *Store) listChatMessages(ctx context.Context, sessionID string, limit int, modelOnly bool) ([]domain.ChatMessage, error) {

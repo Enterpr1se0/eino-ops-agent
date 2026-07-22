@@ -102,7 +102,7 @@ const zh = {
   },
   webSearch: {
     title: 'Tavily Web', baseURL: 'API 地址', apiKey: 'API Key', proxyURL: '代理地址', proxyUsername: '代理用户名', proxyPassword: '代理密码',
-    timeout: '超时时间（秒）', maxResults: '搜索结果上限', extractMaxContent: '单页提取上限（KiB）', extractMaxTotal: '单次提取总上限（KiB）', savedSecret: '已保存，留空不变', saved: 'Tavily Web 设置已保存。', testPassed: '连接正常，返回 {{count}} 条结果。', clearKey: '清除 Key', clearProxyPassword: '清除代理密码',
+    timeout: '超时时间（秒）', maxResults: '搜索结果上限', savedSecret: '已保存，留空不变', saved: 'Tavily Web 设置已保存。', testPassed: '连接正常，返回 {{count}} 条结果。', clearKey: '清除 Key', clearProxyPassword: '清除代理密码',
   },
   chat: {
     session: 'OpsPilot 会话', newSession: '新会话', conversations: '会话记录', openConversations: '打开会话记录', closeConversations: '关闭会话记录',
@@ -128,7 +128,6 @@ const zh = {
     emptyDirectory: '目录为空',
     uploaded: '已上传 · {{path}}', deleted: '已彻底删除 · {{type}}', deleteFolderTarget: '文件夹及其全部内容', deleteFileTarget: '文件',
     deleteConfirm: '删除{{target}}“{{path}}”？\n\n将从宿主机直接删除，无法恢复。', closePreview: '关闭预览', binary: '二进制文件',
-    truncated: '预览仅显示前 1 MiB，原文件未被修改。',
     uploadTo: '上传到 Workspace {{id}}', uploadedShort: '已上传', uploadFailed: '上传失败',
     file: '文件', directory: '目录',
   },
@@ -201,6 +200,7 @@ const zh = {
   },
   logs: {
     search: '搜索消息、ID、主机和状态...', minimumLevel: '级别', component: '组件', allComponents: '全部组件', live: '实时 · 3 秒', paused: '已暂停',
+		export: '导出日志',
     entries: '最近 {{count}} 条', file: '日志路径：{{file}}', fileDisabled: '文件日志未启用',
     debugHint: 'Debug 日志未启用。设置 OPS_AGENT_LOG_LEVEL=debug 后重启服务。',
     columns: { time: '时间', level: '级别', component: '组件', event: '事件 / 字段' }, general: '通用', emptyTitle: '没有匹配的服务日志',

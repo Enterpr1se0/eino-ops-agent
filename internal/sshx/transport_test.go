@@ -1,6 +1,7 @@
 package sshx
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"os/exec"
@@ -10,6 +11,20 @@ import (
 
 	"eino-ops-agent/internal/domain"
 )
+
+func TestCaptureBufferPreservesCompleteOutput(t *testing.T) {
+	payload := bytes.Repeat([]byte("complete-output-"), 100_000)
+	buffer := newCaptureBuffer()
+	for offset := 0; offset < len(payload); offset += 8191 {
+		end := min(offset+8191, len(payload))
+		if _, err := buffer.Write(payload[offset:end]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := buffer.Bytes(); !bytes.Equal(got, payload) {
+		t.Fatalf("captured output differs: got=%d want=%d", len(got), len(payload))
+	}
+}
 
 func TestBuildRemoteProgramQuotesArguments(t *testing.T) {
 	command, stdin, err := buildRemoteCommand(domain.ExecRequest{

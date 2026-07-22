@@ -77,8 +77,6 @@ type Model struct {
 type Limits struct {
 	SyncTimeoutSeconds int `yaml:"sync_timeout_seconds"`
 	MaxTimeoutSeconds  int `yaml:"max_timeout_seconds"`
-	MaxOutputBytes     int `yaml:"max_output_bytes"`
-	ModelOutputBytes   int `yaml:"model_output_bytes"`
 	GlobalConcurrency  int `yaml:"global_concurrency"`
 	HostConcurrency    int `yaml:"host_concurrency"`
 }
@@ -90,7 +88,7 @@ func Default() Config {
 		DatabasePath:  ".data/ops-agent.db",
 		PolicyPath:    "configs/policy.yaml",
 		Logging: Logging{
-			Level: "info", Format: "text", File: ".data/ops-agent.log",
+			Level: "debug", Format: "text", File: ".data/ops-agent.log",
 			MaxSizeMB: 20, MaxBackups: 3, RecentLimit: 2000,
 		},
 		SSH: SSH{
@@ -100,8 +98,6 @@ func Default() Config {
 		Limits: Limits{
 			SyncTimeoutSeconds: 60,
 			MaxTimeoutSeconds:  600,
-			MaxOutputBytes:     10 << 20,
-			ModelOutputBytes:   32 << 10,
 			GlobalConcurrency:  8,
 			HostConcurrency:    2,
 		},

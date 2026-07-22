@@ -28,7 +28,6 @@ import (
 const (
 	mcpConnectTimeout = 20 * time.Second
 	mcpCallTimeout    = 90 * time.Second
-	mcpMaxResultBytes = 128 << 10
 	mcpMaxSchemaBytes = 256 << 10
 	mcpMaxTools       = 128
 )
@@ -327,25 +326,13 @@ func (s *Service) callMCPTool(ctx context.Context, serverID, toolName string, ar
 	if err != nil {
 		return "", err
 	}
-	resultPayload, err := json.Marshal(result)
-	if err != nil {
-		return "", err
-	}
-	var exposedResult any = result
-	if len(resultPayload) > mcpMaxResultBytes {
-		previewLimit := mcpMaxResultBytes - 2048
-		exposedResult = map[string]any{
-			"_opspilot_truncated": true,
-			"preview":             strings.ToValidUTF8(string(resultPayload[:previewLimit]), "�"),
-		}
-	}
 	envelope := map[string]any{
 		"tool_version":         "1.1",
 		"ok":                   !result.IsError,
 		"status":               "completed",
 		"code":                 "completed",
 		"content_is_untrusted": true,
-		"result":               exposedResult,
+		"result":               result,
 	}
 	if result.IsError {
 		envelope["status"] = "failed"

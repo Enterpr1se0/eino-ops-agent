@@ -292,8 +292,6 @@ export interface WebSearchSettings {
   has_proxy_password: boolean
   timeout_seconds: number
   max_results: number
-  extract_max_content_kib: number
-  extract_max_total_kib: number
   updated_at?: string
 }
 
@@ -308,8 +306,6 @@ export interface WebSearchSettingsInput {
   clear_proxy_password?: boolean
   timeout_seconds: number
   max_results: number
-  extract_max_content_kib: number
-  extract_max_total_kib: number
 }
 
 export interface WebSearchResponse {
@@ -376,7 +372,6 @@ export interface WorkspaceFileList {
   workspace_id: string
   path: string
   entries: WorkspaceFileEntry[]
-  truncated?: boolean
 }
 
 export interface WorkspaceFilePreview {
@@ -385,7 +380,6 @@ export interface WorkspaceFilePreview {
   size: number
   sha256: string
   content?: string
-  truncated?: boolean
   binary?: boolean
 }
 

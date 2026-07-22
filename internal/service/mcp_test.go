@@ -61,9 +61,11 @@ func TestManagedMCPServerInjectsNamespacedToolAndCanBeDisabled(t *testing.T) {
 	if !ok {
 		t.Fatalf("MCP tool is not invokable: %T", loaded[0])
 	}
-	output, err := invokable.InvokableRun(context.Background(), `{"message":"hello"}`)
-	if err != nil || !strings.Contains(output, "hello") {
-		t.Fatalf("MCP invocation output=%q err=%v", output, err)
+	largeMessage := "mcp-start-" + strings.Repeat("m", 200<<10) + "-mcp-end"
+	arguments, _ := json.Marshal(map[string]string{"message": largeMessage})
+	output, err := invokable.InvokableRun(context.Background(), string(arguments))
+	if err != nil || !strings.Contains(output, largeMessage) {
+		t.Fatalf("complete MCP invocation output was not preserved: bytes=%d err=%v", len(output), err)
 	}
 
 	server, err = svc.SetMCPServerEnabled(context.Background(), server.ID, false, "test")

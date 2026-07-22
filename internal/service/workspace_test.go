@@ -121,7 +121,7 @@ func TestWorkspaceReadPatchAndTraversalProtection(t *testing.T) {
 	if err := os.WriteFile(path, []byte("port=8080\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	read, err := svc.ReadWorkspaceFile(context.Background(), "project", "app.conf", 1024, 0, "test")
+	read, err := svc.ReadWorkspaceFile(context.Background(), "project", "app.conf", 0, 0, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,6 +146,21 @@ func TestWorkspaceReadPatchAndTraversalProtection(t *testing.T) {
 	}
 	if _, err := svc.ReadWorkspaceFile(context.Background(), "project", "../outside", 100, 0, "test"); err == nil || !strings.Contains(err.Error(), "relative") {
 		t.Fatalf("workspace traversal was not rejected: %v", err)
+	}
+}
+
+func TestWorkspaceReadPreservesCompleteLargeFile(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_only")
+	want := strings.Repeat("workspace-file-data\n", 20_000) + "workspace-file-end\n"
+	if err := os.WriteFile(filepath.Join(root, "large.log"), []byte(want), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.ReadWorkspaceFile(context.Background(), "project", "large.log", 0, 0, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stdout != want || result.File == nil || result.File.ReturnedBytes != len(want) {
+		t.Fatalf("complete workspace file was not returned: got=%d want=%d metadata=%#v", len(result.Stdout), len(want), result.File)
 	}
 }
 
@@ -321,7 +336,7 @@ func TestWorkspaceAdminUploadIsAtomicAndNeverOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.Path != "main.go" || preview.Content != string(content) || preview.SHA256 != wantSHA || preview.Binary || preview.Truncated {
+	if preview.Path != "main.go" || preview.Content != string(content) || preview.SHA256 != wantSHA || preview.Binary {
 		t.Fatalf("unexpected workspace preview: %#v", preview)
 	}
 	deleted, err := svc.DeleteAdminWorkspaceEntry(context.Background(), "project", "main.go", "admin-web")
@@ -593,6 +608,20 @@ func TestWorkspaceShellBackendValidation(t *testing.T) {
 	}
 	if err := validateRequestLimits(valid, limits, nil); err != nil {
 		t.Fatalf("valid workspace shell backend was rejected: %v", err)
+	}
+}
+
+func TestWorkspaceCaptureBufferPreservesCompleteOutput(t *testing.T) {
+	payload := bytes.Repeat([]byte("workspace-output-"), 100_000)
+	buffer := &workspaceCaptureBuffer{}
+	for offset := 0; offset < len(payload); offset += 8191 {
+		end := min(offset+8191, len(payload))
+		if _, err := buffer.Write(payload[offset:end]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := buffer.Bytes(); !bytes.Equal(got, payload) {
+		t.Fatalf("captured workspace output differs: got=%d want=%d", len(got), len(payload))
 	}
 }
 

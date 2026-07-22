@@ -429,6 +429,13 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	if !strings.Contains(transport.request.Script, "head -c 1") || strings.Contains(transport.request.Script, "tail -n") || strings.Contains(transport.request.Script, "tail -c") {
 		t.Fatalf("metadata-only request did not minimize the remote read: %s", transport.request.Script)
 	}
+	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stdout == "" || !strings.Contains(transport.request.Script, "cat -- '/etc/example.conf'") || strings.Contains(transport.request.Script, "head -c") {
+		t.Fatalf("default file read did not request complete content: result=%#v script=%s", result, transport.request.Script)
+	}
 }
 
 func TestUnifiedHistoryToolSearchesAndReadsExactRun(t *testing.T) {

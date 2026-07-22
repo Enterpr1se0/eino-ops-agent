@@ -1,14 +1,17 @@
 package observability
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -150,10 +153,128 @@ func File() string {
 	return *value
 }
 
+// WriteArchive streams the complete active log file and its rotated backups as
+// a ZIP archive. When file logging is disabled or no log file exists, it
+// exports the current process's in-memory structured log entries instead.
+func WriteArchive(writer io.Writer) error {
+	archive := zip.NewWriter(writer)
+	written := 0
+	if logFile := File(); logFile != "" {
+		logFiles, err := existingLogFiles(logFile)
+		if err != nil {
+			_ = archive.Close()
+			return err
+		}
+		for _, path := range logFiles {
+			added, err := addLogFileToArchive(archive, path)
+			if err != nil {
+				_ = archive.Close()
+				return err
+			}
+			if added {
+				written++
+			}
+		}
+	}
+	if written == 0 {
+		entry, err := archive.Create("ops-agent-memory.jsonl")
+		if err != nil {
+			_ = archive.Close()
+			return fmt.Errorf("create in-memory log archive entry: %w", err)
+		}
+		encoder := json.NewEncoder(entry)
+		for _, logEntry := range snapshotEntries() {
+			if err := encoder.Encode(logEntry); err != nil {
+				_ = archive.Close()
+				return fmt.Errorf("write in-memory log archive entry: %w", err)
+			}
+		}
+	}
+	if err := archive.Close(); err != nil {
+		return fmt.Errorf("finalize log archive: %w", err)
+	}
+	return nil
+}
+
+func existingLogFiles(logFile string) ([]string, error) {
+	directory := filepath.Dir(logFile)
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return []string{logFile}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list log directory %q: %w", directory, err)
+	}
+	type backup struct {
+		path  string
+		index int
+	}
+	prefix := filepath.Base(logFile) + "."
+	backups := make([]backup, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(entry.Name(), prefix))
+		if err != nil || index < 1 {
+			continue
+		}
+		backups = append(backups, backup{path: filepath.Join(directory, entry.Name()), index: index})
+	}
+	sort.Slice(backups, func(left, right int) bool { return backups[left].index > backups[right].index })
+	paths := make([]string, 0, len(backups)+1)
+	for _, item := range backups {
+		paths = append(paths, item.path)
+	}
+	return append(paths, logFile), nil
+}
+
+func addLogFileToArchive(archive *zip.Writer, logFile string) (bool, error) {
+	file, err := os.Open(logFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("open log file %q: %w", logFile, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return false, fmt.Errorf("stat log file %q: %w", logFile, err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("log file %q is not a regular file", logFile)
+	}
+	header, err := zip.FileInfoHeader(info)
+	if err != nil {
+		return false, fmt.Errorf("prepare log file %q: %w", logFile, err)
+	}
+	header.Name = filepath.Base(logFile)
+	header.Method = zip.Deflate
+	entry, err := archive.CreateHeader(header)
+	if err != nil {
+		return false, fmt.Errorf("create archive entry for %q: %w", logFile, err)
+	}
+	if _, err := io.Copy(entry, file); err != nil {
+		return false, fmt.Errorf("archive log file %q: %w", logFile, err)
+	}
+	return true, nil
+}
+
+func snapshotEntries() []LogEntry {
+	buffer := activeBuffer.Load()
+	if buffer == nil {
+		return []LogEntry{}
+	}
+	buffer.mu.RLock()
+	defer buffer.mu.RUnlock()
+	return append([]LogEntry(nil), buffer.entries...)
+}
+
 func parseLevel(value string) (slog.Level, error) {
 	var level slog.Level
 	if strings.TrimSpace(value) == "" {
-		return slog.LevelInfo, nil
+		return slog.LevelDebug, nil
 	}
 	if err := level.UnmarshalText([]byte(value)); err != nil {
 		return 0, fmt.Errorf("invalid log level %q: use debug, info, warn, or error", value)

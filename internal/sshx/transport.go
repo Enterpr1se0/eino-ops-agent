@@ -17,11 +17,10 @@ import (
 )
 
 type RawResult struct {
-	ExitCode  int
-	Stdout    []byte
-	Stderr    []byte
-	Truncated bool
-	Duration  time.Duration
+	ExitCode int
+	Stdout   []byte
+	Stderr   []byte
+	Duration time.Duration
 }
 
 type HostInfo struct {
@@ -232,11 +231,9 @@ func validateHost(host domain.Host) error {
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
 
-type limitBuffer struct {
-	mu        sync.Mutex
-	buf       bytes.Buffer
-	limit     int
-	truncated bool
+type captureBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
 }
 
 type callbackWriter struct {
@@ -249,36 +246,18 @@ func (w callbackWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func newLimitBuffer(limit int) *limitBuffer { return &limitBuffer{limit: limit} }
+func newCaptureBuffer() *captureBuffer { return &captureBuffer{} }
 
-func (b *limitBuffer) Write(data []byte) (int, error) {
+func (b *captureBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	original := len(data)
-	remaining := b.limit - b.buf.Len()
-	if remaining <= 0 {
-		b.truncated = true
-		return original, nil
-	}
-	if len(data) > remaining {
-		_, _ = b.buf.Write(data[:remaining])
-		b.truncated = true
-		return original, nil
-	}
-	_, _ = b.buf.Write(data)
-	return original, nil
+	return b.buf.Write(data)
 }
 
-func (b *limitBuffer) Bytes() []byte {
+func (b *captureBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return bytes.Clone(b.buf.Bytes())
-}
-
-func (b *limitBuffer) Truncated() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.truncated
 }
 
 func sortStrings(values []string) {

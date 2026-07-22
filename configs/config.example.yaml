@@ -29,7 +29,7 @@ validators:
     path_patterns: ["/etc/nginx/**"]
 
 logging:
-  level: info # use debug for detailed HTTP, Agent, policy, and SSH lifecycle logs
+  level: debug # use info in production when detailed lifecycle logs are not needed
   format: text # terminal format: text or json; the rotating file is always JSONL
   file: .data/ops-agent.log # set to "-" to disable file output
   add_source: false
@@ -47,7 +47,5 @@ model:
 limits:
   sync_timeout_seconds: 60
   max_timeout_seconds: 600
-  max_output_bytes: 10485760
-  model_output_bytes: 32768
   global_concurrency: 8
   host_concurrency: 2
