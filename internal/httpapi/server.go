@@ -16,12 +16,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"eino-ops-agent/internal/agent"
+	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/ids"
 	"eino-ops-agent/internal/observability"
@@ -40,6 +42,14 @@ type Server struct {
 	mux           *http.ServeMux
 	loginMu       sync.Mutex
 	loginAttempts map[string]loginAttempt
+	options       Options
+}
+
+type Options struct {
+	SecureCookies bool
+	Version       string
+	StartedAt     time.Time
+	Logging       config.Logging
 }
 
 type loginAttempt struct {
@@ -47,15 +57,20 @@ type loginAttempt struct {
 	Reset time.Time
 }
 
-func New(svc *service.Service, runtime *agent.Runtime, auth *security.WebAuth, secureCookies ...bool) *Server {
-	secure := len(secureCookies) > 0 && secureCookies[0]
-	s := &Server{service: svc, agent: runtime, auth: auth, secureCookies: secure, mux: http.NewServeMux(), loginAttempts: make(map[string]loginAttempt)}
+func New(svc *service.Service, agentRuntime *agent.Runtime, auth *security.WebAuth, options Options) *Server {
+	if options.StartedAt.IsZero() {
+		options.StartedAt = time.Now().UTC()
+	}
+	if strings.TrimSpace(options.Version) == "" {
+		options.Version = "unknown"
+	}
+	s := &Server{service: svc, agent: agentRuntime, auth: auth, secureCookies: options.SecureCookies, mux: http.NewServeMux(), loginAttempts: make(map[string]loginAttempt), options: options}
 	s.routes()
 	return s
 }
 
 func (s *Server) Handler() http.Handler {
-	return requestLogMiddleware(recoverMiddleware(corsMiddleware(s.authMiddleware(s.mux))))
+	return requestLogMiddleware(recoverMiddleware(corsMiddleware(s.authMiddleware(s.mux))), slog.Default())
 }
 
 func (s *Server) routes() {
@@ -102,6 +117,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/workspaces/{id}/files", s.uploadWorkspaceFile)
 	s.mux.HandleFunc("DELETE /api/v1/workspaces/{id}/files", s.deleteWorkspaceEntry)
 	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/preview", s.previewWorkspaceFile)
+	s.mux.HandleFunc("GET /api/v1/workspaces/{id}/events", s.workspaceFileEvents)
 	s.mux.HandleFunc("PUT /api/v1/settings", s.saveSystemSettings)
 	s.mux.HandleFunc("GET /api/v1/hosts", s.listHosts)
 	s.mux.HandleFunc("POST /api/v1/hosts", s.saveHost)
@@ -467,6 +483,63 @@ func (s *Server) uploadWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, result)
 }
 
+func (s *Server) workspaceFileEvents(w http.ResponseWriter, r *http.Request) {
+	watch, err := s.service.WatchAdminWorkspaceFiles(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if _, ok := w.(http.Flusher); !ok {
+		writeError(w, fmt.Errorf("streaming is unavailable"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Connection", "keep-alive")
+	controller := http.NewResponseController(w)
+	write := func(payload string) error {
+		if _, err := io.WriteString(w, payload); err != nil {
+			return err
+		}
+		return controller.Flush()
+	}
+	if err := write("retry: 1000\n: connected\n\n"); err != nil {
+		return
+	}
+
+	heartbeat := time.NewTicker(20 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case change, open := <-watch.Changes:
+			if !open {
+				return
+			}
+			payload, marshalErr := json.Marshal(change)
+			if marshalErr != nil {
+				return
+			}
+			if err := write("event: workspace-change\ndata: " + string(payload) + "\n\n"); err != nil {
+				return
+			}
+		case watchErr, open := <-watch.Errors:
+			if !open {
+				return
+			}
+			observability.FromContext(r.Context()).WarnContext(r.Context(), "workspace file watcher stopped", "component", "workspace", "workspace_id", r.PathValue("id"), "error", watchErr)
+			return
+		case <-heartbeat.C:
+			if err := write(": heartbeat\n\n"); err != nil {
+				return
+			}
+		}
+	}
+}
+
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.auth == nil || !strings.HasPrefix(r.URL.Path, "/api/v1/") || r.URL.Path == "/api/v1/health" || r.URL.Path == "/api/v1/auth/login" {
@@ -598,13 +671,95 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) exportLogs(w http.ResponseWriter, r *http.Request) {
-	filename := "opspilot-logs-" + time.Now().UTC().Format("20060102-150405") + ".zip"
+	filename := "opspilot-diagnostics-" + time.Now().UTC().Format("20060102-150405") + ".zip"
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
 	w.Header().Set("Cache-Control", "no-store")
-	if err := observability.WriteArchive(w); err != nil {
+	if err := observability.WriteArchive(w, s.diagnostics(r.Context())); err != nil {
 		observability.FromContext(r.Context()).ErrorContext(r.Context(), "log export failed", "component", "server", "error", err)
 	}
+}
+
+func (s *Server) diagnostics(ctx context.Context) observability.Diagnostics {
+	now := time.Now().UTC()
+	uptime := now.Sub(s.options.StartedAt).Seconds()
+	if uptime < 0 {
+		uptime = 0
+	}
+	result := observability.Diagnostics{
+		SchemaVersion: 1,
+		GeneratedAt:   now,
+		Application: observability.ApplicationDiagnostics{
+			Version: s.options.Version, GoVersion: runtime.Version(), OS: runtime.GOOS, Architecture: runtime.GOARCH,
+			StartedAt: s.options.StartedAt.UTC(), UptimeSeconds: int64(uptime),
+		},
+		Logging: observability.LoggingDiagnostics{
+			Level: observability.MinimumLevel(), Format: s.options.Logging.Format, FileEnabled: observability.File() != "",
+			AddSource: s.options.Logging.AddSource, MaxSizeMB: s.options.Logging.MaxSizeMB,
+			MaxBackups: s.options.Logging.MaxBackups, RecentLimit: s.options.Logging.RecentLimit,
+		},
+		Resources: observability.ResourceDiagnostics{MCPStatuses: map[string]int{}},
+	}
+	if result.Logging.Format == "" {
+		result.Logging.Format = "text"
+	}
+	redactor := security.NewRedactor()
+	addError := func(component string, err error) {
+		if err != nil {
+			result.CollectionErrors = append(result.CollectionErrors, component+": "+redactor.Redact(err.Error()))
+		}
+	}
+	if s.agent != nil {
+		status := s.agent.Status()
+		catalog := s.agent.ToolCatalog()
+		result.Agent = observability.AgentDiagnostics{
+			Available: s.agent.Available(), Source: status.Source, ProviderName: redactor.Redact(status.Name), Model: redactor.Redact(status.Model),
+			ToolCount: len(catalog.Tools), ExplanationAgentAvailable: status.ExplanationAgentAvailable,
+			ModelError: redactor.Redact(status.Error), ExplanationError: redactor.Redact(status.ExplanationError),
+		}
+	} else {
+		result.Agent.Source = "none"
+	}
+	if s.service == nil {
+		return result
+	}
+	hosts, err := s.service.ListHosts(ctx)
+	addError("hosts", err)
+	result.Resources.Hosts = len(hosts)
+	providers, err := s.service.ListModelProviders(ctx)
+	addError("model_providers", err)
+	result.Resources.ModelProviders = len(providers)
+	for _, provider := range providers {
+		if provider.Active {
+			result.Resources.ActiveProviders++
+		}
+	}
+	mcpServers, err := s.service.ListMCPServers(ctx)
+	addError("mcp_servers", err)
+	result.Resources.MCPServers = len(mcpServers)
+	for _, server := range mcpServers {
+		status := strings.TrimSpace(server.Status)
+		if status == "" {
+			status = "unknown"
+		}
+		result.Resources.MCPStatuses[status]++
+	}
+	workspaces := s.service.ListWorkspaceCapabilities()
+	result.Resources.Workspaces = len(workspaces)
+	for _, workspace := range workspaces {
+		if workspace.Access == "read_write" {
+			result.Resources.WritableWorkspaces++
+		}
+	}
+	managedSkills, err := s.service.ListSkills()
+	addError("skills", err)
+	result.Resources.Skills = len(managedSkills)
+	for _, managedSkill := range managedSkills {
+		if managedSkill.Enabled {
+			result.Resources.EnabledSkills++
+		}
+	}
+	return result
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -1344,11 +1499,16 @@ func (w *logResponseWriter) Flush() {
 
 func (w *logResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-func requestLogMiddleware(next http.Handler) http.Handler {
+const slowReadRequestThreshold = 2 * time.Second
+
+func requestLogMiddleware(next http.Handler, baseLogger *slog.Logger) http.Handler {
+	if baseLogger == nil {
+		baseLogger = slog.Default()
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		requestID := ids.New("request")
-		logger := slog.Default().With("request_id", requestID)
+		logger := baseLogger.With("request_id", requestID)
 		ctx := observability.WithLogger(r.Context(), logger)
 		r = r.WithContext(ctx)
 		w.Header().Set("X-Request-ID", requestID)
@@ -1358,26 +1518,39 @@ func requestLogMiddleware(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		if r.URL.Path == "/api/v1/logs" || r.URL.Path == "/api/v1/health" || (strings.HasPrefix(r.URL.Path, "/api/v1/chat/") && strings.HasSuffix(r.URL.Path, "/state")) {
+		duration := time.Since(started)
+		if status < http.StatusBadRequest && strings.HasPrefix(strings.ToLower(recorder.Header().Get("Content-Type")), "text/event-stream") {
+			return
+		}
+		level, message, emit := requestLogDecision(r.Method, status, duration)
+		if !emit {
 			return
 		}
 		host := r.RemoteAddr
 		if parsed, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			host = parsed
 		}
-		level := slog.LevelDebug
-		if r.Method != http.MethodGet && r.Method != http.MethodOptions {
-			level = slog.LevelInfo
-		}
-		if status >= 500 {
-			level = slog.LevelError
-		} else if status >= 400 {
-			level = slog.LevelWarn
-		}
-		logger.With("component", "http").LogAttrs(ctx, level, "HTTP request completed",
+		logger.With("component", "http").LogAttrs(ctx, level, message,
 			slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Int("status", status),
-			slog.Int64("duration_ms", time.Since(started).Milliseconds()), slog.Int("response_bytes", recorder.bytes), slog.String("remote_ip", host))
+			slog.Int64("duration_ms", duration.Milliseconds()), slog.Int("response_bytes", recorder.bytes), slog.String("remote_ip", host))
 	})
+}
+
+func requestLogDecision(method string, status int, duration time.Duration) (slog.Level, string, bool) {
+	if status >= http.StatusInternalServerError {
+		return slog.LevelError, "HTTP request failed", true
+	}
+	if status >= http.StatusBadRequest {
+		return slog.LevelWarn, "HTTP request rejected", true
+	}
+	readOnly := method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions
+	if readOnly {
+		if duration >= slowReadRequestThreshold {
+			return slog.LevelWarn, "slow HTTP read request completed", true
+		}
+		return 0, "", false
+	}
+	return slog.LevelInfo, "HTTP request completed", true
 }
 
 func spaHandler(root fs.FS) http.Handler {

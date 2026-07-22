@@ -2,6 +2,7 @@ package observability
 
 import (
 	"archive/zip"
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"eino-ops-agent/internal/config"
+	"eino-ops-agent/internal/security"
 )
 
 type LogEntry struct {
@@ -35,6 +37,58 @@ type LogFilter struct {
 	Limit     int
 }
 
+type Diagnostics struct {
+	SchemaVersion    int                    `json:"schema_version"`
+	GeneratedAt      time.Time              `json:"generated_at"`
+	Application      ApplicationDiagnostics `json:"application"`
+	Logging          LoggingDiagnostics     `json:"logging"`
+	Agent            AgentDiagnostics       `json:"agent"`
+	Resources        ResourceDiagnostics    `json:"resources"`
+	CollectionErrors []string               `json:"collection_errors,omitempty"`
+}
+
+type ApplicationDiagnostics struct {
+	Version       string    `json:"version"`
+	GoVersion     string    `json:"go_version"`
+	OS            string    `json:"os"`
+	Architecture  string    `json:"architecture"`
+	StartedAt     time.Time `json:"started_at"`
+	UptimeSeconds int64     `json:"uptime_seconds"`
+}
+
+type LoggingDiagnostics struct {
+	Level       string `json:"level"`
+	Format      string `json:"format"`
+	FileEnabled bool   `json:"file_enabled"`
+	AddSource   bool   `json:"add_source"`
+	MaxSizeMB   int    `json:"max_size_mb"`
+	MaxBackups  int    `json:"max_backups"`
+	RecentLimit int    `json:"recent_limit"`
+}
+
+type AgentDiagnostics struct {
+	Available                 bool   `json:"available"`
+	Source                    string `json:"source"`
+	ProviderName              string `json:"provider_name,omitempty"`
+	Model                     string `json:"model,omitempty"`
+	ToolCount                 int    `json:"tool_count"`
+	ExplanationAgentAvailable bool   `json:"explanation_agent_available"`
+	ModelError                string `json:"model_error,omitempty"`
+	ExplanationError          string `json:"explanation_error,omitempty"`
+}
+
+type ResourceDiagnostics struct {
+	Hosts              int            `json:"hosts"`
+	ModelProviders     int            `json:"model_providers"`
+	ActiveProviders    int            `json:"active_providers"`
+	MCPServers         int            `json:"mcp_servers"`
+	MCPStatuses        map[string]int `json:"mcp_statuses"`
+	Workspaces         int            `json:"workspaces"`
+	WritableWorkspaces int            `json:"writable_workspaces"`
+	Skills             int            `json:"skills"`
+	EnabledSkills      int            `json:"enabled_skills"`
+}
+
 type Buffer struct {
 	mu      sync.RWMutex
 	entries []LogEntry
@@ -44,6 +98,7 @@ type Buffer struct {
 var activeBuffer atomic.Pointer[Buffer]
 var activeLevel atomic.Int64
 var activeFile atomic.Pointer[string]
+var logRedactor = security.NewRedactor()
 
 type loggerContextKey struct{}
 
@@ -99,7 +154,7 @@ func Configure(cfg config.Logging) error {
 	buffer := &Buffer{limit: cfg.RecentLimit}
 	activeBuffer.Store(buffer)
 	handlers = append(handlers, &bufferHandler{buffer: buffer, level: levelVar})
-	logger := slog.New(slog.NewMultiHandler(handlers...)).With("service", "ops-agent")
+	logger := slog.New(&redactingHandler{next: slog.NewMultiHandler(handlers...)}).With("service", "ops-agent")
 	slog.SetDefault(logger)
 	slog.SetLogLoggerLevel(level)
 	return nil
@@ -153,11 +208,22 @@ func File() string {
 	return *value
 }
 
-// WriteArchive streams the complete active log file and its rotated backups as
-// a ZIP archive. When file logging is disabled or no log file exists, it
-// exports the current process's in-memory structured log entries instead.
-func WriteArchive(writer io.Writer) error {
+// WriteArchive streams a diagnostic manifest plus the complete active log file
+// and its rotated backups. When file logging is disabled or no log file exists,
+// it exports the current process's in-memory structured log entries instead.
+func WriteArchive(writer io.Writer, diagnostics Diagnostics) error {
 	archive := zip.NewWriter(writer)
+	manifest, err := archive.Create("diagnostics.json")
+	if err != nil {
+		_ = archive.Close()
+		return fmt.Errorf("create diagnostic manifest: %w", err)
+	}
+	encoder := json.NewEncoder(manifest)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(sanitizeAny(diagnostics)); err != nil {
+		_ = archive.Close()
+		return fmt.Errorf("write diagnostic manifest: %w", err)
+	}
 	written := 0
 	if logFile := File(); logFile != "" {
 		logFiles, err := existingLogFiles(logFile)
@@ -184,7 +250,7 @@ func WriteArchive(writer io.Writer) error {
 		}
 		encoder := json.NewEncoder(entry)
 		for _, logEntry := range snapshotEntries() {
-			if err := encoder.Encode(logEntry); err != nil {
+			if err := encoder.Encode(sanitizeAny(logEntry)); err != nil {
 				_ = archive.Close()
 				return fmt.Errorf("write in-memory log archive entry: %w", err)
 			}
@@ -255,8 +321,24 @@ func addLogFileToArchive(archive *zip.Writer, logFile string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("create archive entry for %q: %w", logFile, err)
 	}
-	if _, err := io.Copy(entry, file); err != nil {
-		return false, fmt.Errorf("archive log file %q: %w", logFile, err)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64<<10), 64<<20)
+	encoder := json.NewEncoder(entry)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var value any
+		if err := json.Unmarshal(line, &value); err == nil {
+			if err := encoder.Encode(sanitizeAny(value)); err != nil {
+				return false, fmt.Errorf("archive structured log file %q: %w", logFile, err)
+			}
+			continue
+		}
+		if _, err := fmt.Fprintln(entry, logRedactor.Redact(string(line))); err != nil {
+			return false, fmt.Errorf("archive legacy log file %q: %w", logFile, err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("read log file %q: %w", logFile, err)
 	}
 	return true, nil
 }
@@ -282,26 +364,112 @@ func parseLevel(value string) (slog.Level, error) {
 	return level, nil
 }
 
-func replaceSensitiveAttr(_ []string, attr slog.Attr) slog.Attr {
-	if sensitiveKey(attr.Key) {
+type redactingHandler struct {
+	next slog.Handler
+}
+
+func (h *redactingHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.next.Enabled(ctx, level)
+}
+
+func (h *redactingHandler) Handle(ctx context.Context, record slog.Record) error {
+	record = record.Clone()
+	record.Message = logRedactor.Redact(record.Message)
+	return h.next.Handle(ctx, record)
+}
+
+func (h *redactingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &redactingHandler{next: h.next.WithAttrs(attrs)}
+}
+
+func (h *redactingHandler) WithGroup(name string) slog.Handler {
+	return &redactingHandler{next: h.next.WithGroup(name)}
+}
+
+func replaceSensitiveAttr(groups []string, attr slog.Attr) slog.Attr {
+	key := strings.Join(append(append([]string{}, groups...), attr.Key), ".")
+	if sensitiveKey(key) {
 		return slog.String(attr.Key, "[REDACTED]")
 	}
+	attr.Value = sanitizeSlogValue(attr.Value)
 	return attr
 }
 
 func sensitiveKey(key string) bool {
 	key = strings.ToLower(key)
 	for _, suffix := range []string{"_bytes", "_count", "_segments"} {
-		if strings.HasSuffix(key, suffix) {
+		if strings.HasSuffix(key, suffix) && !strings.Contains(key, "password") && !strings.Contains(key, "secret") && !strings.Contains(key, "authorization") && !strings.Contains(key, "api_key") && !strings.Contains(key, "apikey") && !strings.Contains(key, "private_key") {
 			return false
 		}
 	}
-	for _, fragment := range []string{"password", "secret", "token", "authorization", "api_key", "apikey", "private_key", "request_body", "response_body", "stdout", "stderr", "reasoning", "content"} {
+	for _, fragment := range []string{"password", "secret", "token", "authorization", "api_key", "apikey", "private_key"} {
+		if strings.Contains(key, fragment) {
+			return true
+		}
+	}
+	for _, fragment := range []string{"request_body", "response_body", "stdout", "stderr", "reasoning", "content"} {
 		if strings.Contains(key, fragment) {
 			return true
 		}
 	}
 	return false
+}
+
+func sanitizeSlogValue(value slog.Value) slog.Value {
+	value = value.Resolve()
+	switch value.Kind() {
+	case slog.KindString:
+		return slog.StringValue(logRedactor.Redact(value.String()))
+	case slog.KindAny:
+		return slog.AnyValue(sanitizeAny(value.Any()))
+	default:
+		return value
+	}
+}
+
+func sanitizeAny(value any) any {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case string:
+		return logRedactor.Redact(typed)
+	case error:
+		return logRedactor.Redact(typed.Error())
+	case bool, float32, float64, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, json.Number:
+		return typed
+	case map[string]any:
+		result := make(map[string]any, len(typed))
+		for key, item := range typed {
+			if sensitiveKey(key) {
+				result[key] = "[REDACTED]"
+			} else {
+				result[key] = sanitizeAny(item)
+			}
+		}
+		return result
+	case []any:
+		result := make([]any, len(typed))
+		for index, item := range typed {
+			result[index] = sanitizeAny(item)
+		}
+		return result
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return logRedactor.Redact(fmt.Sprint(value))
+	}
+	var decoded any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return logRedactor.Redact(fmt.Sprint(value))
+	}
+	switch typed := decoded.(type) {
+	case map[string]any, []any:
+		return sanitizeAny(typed)
+	case string:
+		return logRedactor.Redact(typed)
+	default:
+		return typed
+	}
 }
 
 type bufferHandler struct {
@@ -327,7 +495,7 @@ func (h *bufferHandler) Handle(_ context.Context, record slog.Record) error {
 	component, _ := fields["component"].(string)
 	delete(fields, "component")
 	delete(fields, "service")
-	h.buffer.add(LogEntry{Time: record.Time.UTC(), Level: strings.ToLower(record.Level.String()), Message: record.Message, Component: component, Fields: fields})
+	h.buffer.add(LogEntry{Time: record.Time.UTC(), Level: strings.ToLower(record.Level.String()), Message: logRedactor.Redact(record.Message), Component: component, Fields: fields})
 	return nil
 }
 
@@ -372,7 +540,7 @@ func appendAttr(fields map[string]any, groups []string, attr slog.Attr) {
 func logValue(value slog.Value) any {
 	switch value.Kind() {
 	case slog.KindString:
-		return value.String()
+		return logRedactor.Redact(value.String())
 	case slog.KindBool:
 		return value.Bool()
 	case slog.KindDuration:
@@ -386,13 +554,7 @@ func logValue(value slog.Value) any {
 	case slog.KindUint64:
 		return value.Uint64()
 	case slog.KindAny:
-		if err, ok := value.Any().(error); ok {
-			return err.Error()
-		}
-		if _, err := json.Marshal(value.Any()); err != nil {
-			return fmt.Sprint(value.Any())
-		}
-		return value.Any()
+		return sanitizeAny(value.Any())
 	default:
 		return value.String()
 	}

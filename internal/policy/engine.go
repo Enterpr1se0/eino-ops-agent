@@ -281,6 +281,16 @@ func shellSource(req domain.ExecRequest) (string, error) {
 		return "ls " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
 	case domain.ExecWorkspaceSearch:
 		return "grep " + shellQuote(req.SearchPattern) + " " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
+	case domain.ExecRemoteRead:
+		if !posixpath.IsAbs(req.RemotePath) {
+			return "", fmt.Errorf("remote file read requires an absolute path")
+		}
+		return "cat " + shellQuote(req.RemotePath), nil
+	case domain.ExecRemoteSearch:
+		if !posixpath.IsAbs(req.RemotePath) || req.SearchPattern == "" {
+			return "", fmt.Errorf("remote file search requires an absolute path and pattern")
+		}
+		return "grep " + shellQuote(req.SearchPattern) + " " + shellQuote(req.RemotePath), nil
 	case domain.ExecWorkspaceEdit:
 		if req.WorkspaceID == "" || req.RelativePath == "" || req.Change == nil || req.Change.Diff == "" {
 			return "", fmt.Errorf("workspace edit requires a workspace file and a structured change")

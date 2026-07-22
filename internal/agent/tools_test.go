@@ -130,8 +130,8 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 	if len(descriptors) != len(loaded) || len(descriptors) < 20 {
 		t.Fatalf("catalog=%d loaded=%d", len(descriptors), len(loaded))
 	}
-	if len(descriptors) != 23 {
-		t.Fatalf("built-in catalog size=%d, want 23", len(descriptors))
+	if len(descriptors) != 21 {
+		t.Fatalf("built-in catalog size=%d, want 21", len(descriptors))
 	}
 
 	seen := make(map[string]bool, len(descriptors))
@@ -165,8 +165,17 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		if descriptor.Name == "ssh_run_script" && !strings.Contains(string(descriptor.InputSchema), `"background"`) {
 			t.Fatalf("ssh_run_script metadata is missing background: %#v", descriptor)
 		}
-		if descriptor.Name == "ssh_file_read" && !strings.Contains(string(descriptor.InputSchema), `"metadata_only"`) {
-			t.Fatalf("ssh_file_read metadata_only mode is missing: %#v", descriptor)
+		if descriptor.Name == "ssh_file_read" {
+			schema := string(descriptor.InputSchema)
+			if !strings.Contains(schema, `"metadata_only"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"context_lines"`) || !strings.Contains(schema, `"max_matches"`) {
+				t.Fatalf("ssh_file_read merged modes are incomplete: %#v", descriptor)
+			}
+		}
+		if descriptor.Name == "workspace_file_read" {
+			schema := string(descriptor.InputSchema)
+			if !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"context_lines"`) || !strings.Contains(schema, `"max_matches"`) {
+				t.Fatalf("workspace_file_read merged modes are incomplete: %#v", descriptor)
+			}
 		}
 		if descriptor.Name == "ssh_file_edit" {
 			schema := string(descriptor.InputSchema)
@@ -202,7 +211,7 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 			t.Fatalf("web_extract metadata does not reflect its runtime schema: %#v", descriptor)
 		}
 	}
-	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_create", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get", "ops_plan_get"} {
+	for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get", "ops_plan_get"} {
 		if seen[retired] {
 			t.Fatalf("removed %s tool remains in the Agent catalog", retired)
 		}
@@ -431,7 +440,7 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true, MaxBytes: 4096, OffsetBytes: 20, TailLines: 5}, "test")
+	result, err := RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,12 +450,56 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	if !strings.Contains(transport.request.Script, "head -c 1") || strings.Contains(transport.request.Script, "tail -n") || strings.Contains(transport.request.Script, "tail -c") {
 		t.Fatalf("metadata-only request did not minimize the remote read: %s", transport.request.Script)
 	}
+	metadataRun, err := st.GetRun(ctx, result.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadataRequest domain.ExecRequest
+	if err := json.Unmarshal([]byte(metadataRun.RequestJSON), &metadataRequest); err != nil {
+		t.Fatal(err)
+	}
+	if metadataRequest.Mode != domain.ExecRemoteRead || metadataRequest.RemotePath != "/etc/example.conf" || !metadataRequest.MetadataOnly || metadataRequest.Script != "" {
+		t.Fatalf("metadata read was not persisted structurally: %#v", metadataRequest)
+	}
 	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Stdout == "" || !strings.Contains(transport.request.Script, "cat -- '/etc/example.conf'") || strings.Contains(transport.request.Script, "head -c") {
 		t.Fatalf("default file read did not request complete content: result=%#v script=%s", result, transport.request.Script)
+	}
+	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", OffsetBytes: -4}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(transport.request.Script, "tail -c 4 -- '/etc/example.conf'") || result.File == nil || result.File.OffsetBytes != 11 {
+		t.Fatalf("negative file offset did not read from the end: result=%#v script=%s", result, transport.request.Script)
+	}
+	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", ContextLines: 2, MaxMatches: 5}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || !strings.Contains(transport.request.Script, "grep -n -F -C 2 -- 'secret' '/etc/example.conf' | head -n 5") {
+		t.Fatalf("file read search mode was not dispatched: result=%#v script=%s", result, transport.request.Script)
+	}
+	searchRun, err := st.GetRun(ctx, result.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var searchRequest domain.ExecRequest
+	if err := json.Unmarshal([]byte(searchRun.RequestJSON), &searchRequest); err != nil {
+		t.Fatal(err)
+	}
+	if searchRequest.Mode != domain.ExecRemoteSearch || searchRequest.RemotePath != "/etc/example.conf" || searchRequest.SearchPattern != "secret" || searchRequest.ContextLines != 2 || searchRequest.MaxMatches != 5 || searchRequest.Script != "" {
+		t.Fatalf("remote search was not persisted structurally: %#v", searchRequest)
+	}
+	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", MaxBytes: 10}, "test")
+	if err != nil || result.OK || result.Code != "validation_failed" {
+		t.Fatalf("ambiguous file read mode was not rejected: result=%#v err=%v", result, err)
+	}
+	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true, MaxBytes: 10}, "test")
+	if err != nil || result.OK || result.Code != "validation_failed" {
+		t.Fatalf("ambiguous metadata read was not rejected: result=%#v err=%v", result, err)
 	}
 }
 

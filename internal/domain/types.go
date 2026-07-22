@@ -387,6 +387,8 @@ const (
 	ExecWorkspaceList   ExecMode = "workspace_list"
 	ExecWorkspaceSearch ExecMode = "workspace_search"
 	ExecWorkspaceEdit   ExecMode = "workspace_edit"
+	ExecRemoteRead      ExecMode = "remote_read"
+	ExecRemoteSearch    ExecMode = "remote_search"
 	ExecRemoteEdit      ExecMode = "remote_edit"
 	ExecWorkspaceUpload ExecMode = "workspace_upload"
 	ExecWorkspaceShell  ExecMode = "workspace_shell"
@@ -419,8 +421,12 @@ type ExecRequest struct {
 	RelativePath              string            `json:"relative_path,omitempty" jsonschema:"path relative to the workspace root"`
 	ExpectedSHA256            string            `json:"expected_sha256,omitempty" jsonschema:"workspace file version observed before mutation"`
 	Validator                 string            `json:"validator,omitempty" jsonschema:"allowlisted validator identifier"`
-	SearchPattern             string            `json:"search_pattern,omitempty" jsonschema:"literal workspace search pattern"`
-	OffsetBytes               int64             `json:"offset_bytes,omitempty" jsonschema:"bounded file read offset"`
+	SearchPattern             string            `json:"search_pattern,omitempty" jsonschema:"literal file search pattern"`
+	ContextLines              int               `json:"context_lines,omitempty" jsonschema:"lines around each file search match"`
+	MaxMatches                int               `json:"max_matches,omitempty" jsonschema:"maximum file search result lines; zero means unlimited"`
+	MetadataOnly              bool              `json:"metadata_only,omitempty" jsonschema:"return remote file metadata without content"`
+	TailLines                 int               `json:"tail_lines,omitempty" jsonschema:"number of final remote file lines to return"`
+	OffsetBytes               int64             `json:"offset_bytes,omitempty" jsonschema:"file read offset; negative values count from the end"`
 	MaxBytes                  int               `json:"max_bytes,omitempty" jsonschema:"bounded file read length"`
 	LocalPath                 string            `json:"-"`
 }

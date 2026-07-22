@@ -494,7 +494,7 @@ CREATE TABLE IF NOT EXISTS web_search_settings (
 	if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS file_operations`); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name IN ('ssh_approval_status','ssh_task_start','ssh_task_status','ssh_task_tail','ssh_task_list','ssh_file_restore','ssh_file_create','workspace_file_create')`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_tool_settings WHERE name IN ('ssh_approval_status','ssh_task_start','ssh_task_status','ssh_task_tail','ssh_task_list','ssh_file_restore','ssh_file_create','workspace_file_create','ssh_file_search','workspace_file_search')`); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO system_settings(id,agent_max_iterations,updated_at) VALUES(1,?,?)`,

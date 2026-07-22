@@ -38,3 +38,15 @@ func TestRedactor(t *testing.T) {
 		}
 	}
 }
+
+func TestRedactorCoversStructuredCLIAndURLCredentials(t *testing.T) {
+	redactor := NewRedactor()
+	secrets := []string{"json-secret", "basic-token", "cli-secret", "proxy-secret", "query-secret"}
+	input := `request failed: {"password":"json-secret"} Basic basic-token --api-key cli-secret https://user:proxy-secret@proxy.example?access_token=query-secret`
+	output := redactor.Redact(input)
+	for _, secret := range secrets {
+		if strings.Contains(output, secret) {
+			t.Fatalf("redaction leaked %q: %s", secret, output)
+		}
+	}
+}

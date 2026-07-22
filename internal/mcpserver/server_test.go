@@ -35,12 +35,13 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	taskFound := false
 	fileTransferFound := false
 	fileReadFound := false
+	workspaceReadFound := false
 	fileEditFound := false
 	historyFound := false
 	skillFound := false
 	backgroundInputs := map[string]bool{"ssh_exec": false, "ssh_run_script": false}
 	for _, registered := range result.Tools {
-		for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_create", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get"} {
+		for _, retired := range []string{"ssh_approval_status", "ssh_task_start", "ssh_task_status", "ssh_task_tail", "ssh_task_list", "ssh_task_get", "ssh_task_cancel", "ssh_file_write", "ssh_file_apply_patch", "ssh_file_restore", "ssh_file_create", "ssh_file_stat", "ssh_config_apply", "ssh_config_restore", "workspace_file_apply_patch", "workspace_file_create", "ssh_file_search", "workspace_file_search", "ssh_history_search", "ssh_history_get", "ops_skill_list", "ops_skill_get"} {
 			if registered.Name == retired {
 				t.Fatalf("retired %s tool remains in the MCP catalog", retired)
 			}
@@ -66,7 +67,14 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 			if marshalErr != nil {
 				t.Fatal(marshalErr)
 			}
-			fileReadFound = strings.Contains(string(schemaJSON), `"metadata_only"`)
+			fileReadFound = strings.Contains(string(schemaJSON), `"metadata_only"`) && strings.Contains(string(schemaJSON), `"pattern"`)
+		}
+		if registered.Name == "workspace_file_read" {
+			schemaJSON, marshalErr := json.Marshal(registered.InputSchema)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			workspaceReadFound = strings.Contains(string(schemaJSON), `"pattern"`)
 		}
 		if registered.Name == "ssh_history" {
 			historyFound = true
@@ -98,7 +106,7 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 	if !taskFound || !backgroundInputs["ssh_exec"] || !backgroundInputs["ssh_run_script"] {
 		t.Fatalf("merged background task interface is incomplete: task=%v inputs=%#v", taskFound, backgroundInputs)
 	}
-	if !fileTransferFound || !fileReadFound || !historyFound || !skillFound {
-		t.Fatalf("merged read tools are incomplete: transfer=%v file_read=%v history=%v skill=%v", fileTransferFound, fileReadFound, historyFound, skillFound)
+	if !fileTransferFound || !fileReadFound || !workspaceReadFound || !historyFound || !skillFound {
+		t.Fatalf("merged read tools are incomplete: transfer=%v file_read=%v workspace_read=%v history=%v skill=%v", fileTransferFound, fileReadFound, workspaceReadFound, historyFound, skillFound)
 	}
 }

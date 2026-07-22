@@ -99,7 +99,7 @@ func toolGuard(name string) string {
 	switch name {
 	case "ops_plan_create", "ops_plan_step_update":
 		return "agent_state"
-	case "ssh_exec", "ssh_run_script", "ssh_file_read", "ssh_file_search":
+	case "ssh_exec", "ssh_run_script", "ssh_file_read":
 		return "policy_checked"
 	case "ssh_file_edit", "ssh_file_transfer", "workspace_file_edit", "workspace_file_upload", "workspace_shell":
 		return "approval_required"
@@ -153,8 +153,11 @@ type FileReadInput struct {
 	Path         string `json:"path" jsonschema:"absolute remote file path"`
 	MetadataOnly bool   `json:"metadata_only,omitempty" jsonschema:"return metadata and SHA256 without file content; defaults to false"`
 	MaxBytes     int    `json:"max_bytes,omitempty" jsonschema:"optional maximum bytes to return; omitted returns all remaining content"`
-	OffsetBytes  int64  `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset; cannot be combined with tail_lines"`
+	OffsetBytes  int64  `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset from the start; a negative value reads that many final bytes from the end; cannot be combined with tail_lines"`
 	TailLines    int    `json:"tail_lines,omitempty" jsonschema:"return the requested number of final lines; cannot be combined with offset_bytes"`
+	Pattern      string `json:"pattern,omitempty" jsonschema:"optional literal text to search for instead of returning a byte range"`
+	ContextLines int    `json:"context_lines,omitempty" jsonschema:"search mode only; lines around each literal match"`
+	MaxMatches   int    `json:"max_matches,omitempty" jsonschema:"search mode only; optional maximum result lines; omitted returns every match"`
 	Elevated     bool   `json:"elevated,omitempty" jsonschema:"read through managed sudo; requires break-glass approval"`
 }
 
@@ -170,15 +173,6 @@ type FileEditInput struct {
 	Validator string `json:"validator,omitempty" jsonschema:"optional registered remote validator id"`
 	Elevated  bool   `json:"elevated,omitempty" jsonschema:"edit through the host managed sudo policy; never include sudo or credentials"`
 	Reason    string `json:"reason" jsonschema:"why the edit is needed"`
-}
-
-type FileSearchInput struct {
-	HostID       string `json:"host_id" jsonschema:"registered host identifier"`
-	Path         string `json:"path" jsonschema:"absolute remote regular file path"`
-	Pattern      string `json:"pattern" jsonschema:"literal text to find; not a regular expression"`
-	ContextLines int    `json:"context_lines,omitempty" jsonschema:"lines around each match"`
-	MaxMatches   int    `json:"max_matches,omitempty" jsonschema:"optional maximum result lines; omitted returns every match"`
-	Elevated     bool   `json:"elevated,omitempty" jsonschema:"search through managed sudo; requires break-glass approval"`
 }
 
 type SSHFileTransferInput struct {
@@ -204,17 +198,13 @@ type WorkspacePathInput struct {
 }
 
 type WorkspaceReadInput struct {
-	WorkspaceID string `json:"workspace_id" jsonschema:"allowlisted workspace identifier"`
-	Path        string `json:"path" jsonschema:"clean path relative to the workspace root"`
-	MaxBytes    int    `json:"max_bytes,omitempty" jsonschema:"optional maximum bytes returned; omitted returns all remaining content"`
-	OffsetBytes int64  `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset"`
-}
-
-type WorkspaceSearchInput struct {
-	WorkspaceID string `json:"workspace_id" jsonschema:"allowlisted workspace identifier"`
-	Path        string `json:"path" jsonschema:"clean file path relative to the workspace root"`
-	Pattern     string `json:"pattern" jsonschema:"literal text to find"`
-	MaxMatches  int    `json:"max_matches,omitempty" jsonschema:"optional maximum matching lines; omitted returns every match"`
+	WorkspaceID  string `json:"workspace_id" jsonschema:"allowlisted workspace identifier"`
+	Path         string `json:"path" jsonschema:"clean path relative to the workspace root"`
+	MaxBytes     int    `json:"max_bytes,omitempty" jsonschema:"optional maximum bytes returned; omitted returns all remaining content"`
+	OffsetBytes  int64  `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset from the start; a negative value reads that many final bytes from the end"`
+	Pattern      string `json:"pattern,omitempty" jsonschema:"optional literal text to search for instead of returning a byte range"`
+	ContextLines int    `json:"context_lines,omitempty" jsonschema:"search mode only; lines around each literal match"`
+	MaxMatches   int    `json:"max_matches,omitempty" jsonschema:"search mode only; optional maximum result lines; omitted returns every match"`
 }
 
 type WorkspaceFileEditInput struct {
@@ -371,14 +361,37 @@ func RunTaskTool(svc *service.Service, input TaskInput, actor string) (domain.Ex
 }
 
 func RunFileReadTool(ctx context.Context, svc *service.Service, input FileReadInput, actor string) (domain.ExecResult, error) {
-	maxBytes, offsetBytes, tailLines := input.MaxBytes, input.OffsetBytes, input.TailLines
-	if input.MetadataOnly {
-		maxBytes, offsetBytes, tailLines = 1, 0, 0
+	searching := input.Pattern != ""
+	if searching && (input.MetadataOnly || input.MaxBytes != 0 || input.OffsetBytes != 0 || input.TailLines != 0) {
+		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid file read input: pattern cannot be combined with metadata_only, max_bytes, offset_bytes, or tail_lines"))
 	}
-	result, err := svc.ReadFileAdvanced(ctx, input.HostID, input.Path, maxBytes, offsetBytes, tailLines, input.Elevated, actor)
-	if input.MetadataOnly {
-		result.Stdout = ""
+	if !searching && (input.ContextLines != 0 || input.MaxMatches != 0) {
+		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid file read input: context_lines and max_matches require pattern"))
 	}
+	if searching {
+		result, err := svc.SearchFile(ctx, input.HostID, input.Path, input.Pattern, input.ContextLines, input.MaxMatches, input.Elevated, actor)
+		return NormalizeExecToolResult(result, err)
+	}
+	if input.MetadataOnly && (input.MaxBytes != 0 || input.OffsetBytes != 0 || input.TailLines != 0) {
+		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid file read input: metadata_only cannot be combined with max_bytes, offset_bytes, or tail_lines"))
+	}
+	result, err := svc.ReadFileAdvanced(ctx, input.HostID, input.Path, input.MetadataOnly, input.MaxBytes, input.OffsetBytes, input.TailLines, input.Elevated, actor)
+	return NormalizeExecToolResult(result, err)
+}
+
+func RunWorkspaceFileReadTool(ctx context.Context, svc *service.Service, input WorkspaceReadInput, actor string) (domain.ExecResult, error) {
+	searching := input.Pattern != ""
+	if searching && (input.MaxBytes != 0 || input.OffsetBytes != 0) {
+		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: pattern cannot be combined with max_bytes or offset_bytes"))
+	}
+	if !searching && (input.ContextLines != 0 || input.MaxMatches != 0) {
+		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: context_lines and max_matches require pattern"))
+	}
+	if searching {
+		result, err := svc.SearchWorkspace(ctx, input.WorkspaceID, input.Path, input.Pattern, input.ContextLines, input.MaxMatches, actor)
+		return NormalizeExecToolResult(result, err)
+	}
+	result, err := svc.ReadWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.MaxBytes, input.OffsetBytes, actor)
 	return NormalizeExecToolResult(result, err)
 }
 
@@ -587,14 +600,8 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_read", "Read complete remote file content by default, or an explicit byte range; set metadata_only=true to return only metadata and SHA256. Sensitive credential paths are denied.", func(ctx context.Context, input FileReadInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_file_read", "Read one remote file. By default returns complete content; byte ranges, tail lines, and metadata-only reads are optional. Set pattern to search literal text instead, with optional context_lines and max_matches. Read-range parameters and search parameters are mutually exclusive. Sensitive credential paths are denied.", func(ctx context.Context, input FileReadInput) (domain.ExecResult, error) {
 		return RunFileReadTool(ctx, svc, input, "eino-agent")
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("ssh_file_search", "Search literal text in one remote file and return every matching line with context unless max_matches is explicitly set. Sensitive paths are denied.", func(ctx context.Context, input FileSearchInput) (domain.ExecResult, error) {
-		result, err := svc.SearchFile(ctx, input.HostID, input.Path, input.Pattern, input.ContextLines, input.MaxMatches, input.Elevated, "eino-agent")
-		return NormalizeExecToolResult(result, err)
 	})); err != nil {
 		return nil, err
 	}
@@ -627,15 +634,8 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_file_read", "Read a complete file from an allowlisted workspace by default, or an explicit byte range, with SHA256 metadata. Sensitive paths are denied.", func(ctx context.Context, input WorkspaceReadInput) (domain.ExecResult, error) {
-		result, err := svc.ReadWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.MaxBytes, input.OffsetBytes, "eino-agent")
-		return NormalizeExecToolResult(result, err)
-	})); err != nil {
-		return nil, err
-	}
-	if err := appendTool(toolutils.InferTool("workspace_file_search", "Search literal text in a single allowlisted workspace file and return every match unless max_matches is explicitly set.", func(ctx context.Context, input WorkspaceSearchInput) (domain.ExecResult, error) {
-		result, err := svc.SearchWorkspace(ctx, input.WorkspaceID, input.Path, input.Pattern, input.MaxMatches, "eino-agent")
-		return NormalizeExecToolResult(result, err)
+	if err := appendTool(toolutils.InferTool("workspace_file_read", "Read one allowlisted Workspace file. By default returns complete content; byte ranges are optional and negative offset_bytes reads from the file end. Set pattern to search literal text instead, with optional context_lines and max_matches. Read-range and search parameters are mutually exclusive. SHA256 metadata is returned for content reads and sensitive paths are denied.", func(ctx context.Context, input WorkspaceReadInput) (domain.ExecResult, error) {
+		return RunWorkspaceFileReadTool(ctx, svc, input, "eino-agent")
 	})); err != nil {
 		return nil, err
 	}

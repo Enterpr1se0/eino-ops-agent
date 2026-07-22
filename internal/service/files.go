@@ -20,14 +20,37 @@ const (
 	fileValidationMarker = "__OPS_FILE_VALIDATION_OK__"
 )
 
-func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, maxBytes int, offsetBytes int64, tailLines int, elevated bool, actor string) (domain.ExecResult, error) {
+func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, metadataOnly bool, maxBytes int, offsetBytes int64, tailLines int, elevated bool, actor string) (domain.ExecResult, error) {
 	if err := validateRemoteFilePath(path); err != nil {
 		return domain.ExecResult{}, err
 	}
-	if offsetBytes < 0 || tailLines < 0 || (offsetBytes > 0 && tailLines > 0) {
-		return domain.ExecResult{}, fmt.Errorf("invalid file range: offset_bytes and tail_lines are non-negative and mutually exclusive")
+	if metadataOnly && (maxBytes != 0 || offsetBytes != 0 || tailLines != 0) {
+		return domain.ExecResult{}, fmt.Errorf("invalid file read range: metadata_only cannot be combined with max_bytes, offset_bytes, or tail_lines")
 	}
-	quoted := shellQuote(path)
+	if maxBytes < 0 || tailLines < 0 || (offsetBytes != 0 && tailLines > 0) {
+		return domain.ExecResult{}, fmt.Errorf("invalid file range: max_bytes and tail_lines must be non-negative; tail_lines cannot be combined with offset_bytes")
+	}
+	result, err := s.Submit(ctx, domain.ExecRequest{
+		HostID: hostID, Mode: domain.ExecRemoteRead, RemotePath: path, MetadataOnly: metadataOnly,
+		MaxBytes: maxBytes, OffsetBytes: offsetBytes, TailLines: tailLines, Elevated: elevated,
+		Reason: "read a bounded remote file with version metadata",
+	}, actor)
+	if result.Stdout != "" {
+		metadata, content := parseFileReadOutput(path, result.Stdout)
+		metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offsetBytes)
+		metadata.ReturnedBytes = len(content)
+		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
+		result.File = &metadata
+		result.Stdout = content
+	}
+	if metadataOnly {
+		result.Stdout = ""
+	}
+	return result, err
+}
+
+func buildRemoteFileReadScript(req domain.ExecRequest) string {
+	quoted := shellQuote(req.RemotePath)
 	lines := []string{
 		"set -e",
 		"printf '" + fileMetaMarker + "\\n'",
@@ -36,38 +59,52 @@ func (s *Service) ReadFileAdvanced(ctx context.Context, hostID, path string, max
 		"printf '" + fileContentMarker + "\\n'",
 	}
 	switch {
-	case tailLines > 0:
-		command := "tail -n " + strconv.Itoa(tailLines) + " -- " + quoted
-		if maxBytes > 0 {
-			command += " | head -c " + strconv.Itoa(maxBytes)
+	case req.MetadataOnly:
+		lines = append(lines, "head -c 1 -- "+quoted)
+	case req.TailLines > 0:
+		command := "tail -n " + strconv.Itoa(req.TailLines) + " -- " + quoted
+		if req.MaxBytes > 0 {
+			command += " | head -c " + strconv.Itoa(req.MaxBytes)
 		}
 		lines = append(lines, command)
-	case offsetBytes > 0:
-		command := "tail -c +" + strconv.FormatInt(offsetBytes+1, 10) + " -- " + quoted
-		if maxBytes > 0 {
-			command += " | head -c " + strconv.Itoa(maxBytes)
+	case req.OffsetBytes < 0:
+		command := "tail -c " + strings.TrimPrefix(strconv.FormatInt(req.OffsetBytes, 10), "-") + " -- " + quoted
+		if req.MaxBytes > 0 {
+			command += " | head -c " + strconv.Itoa(req.MaxBytes)
+		}
+		lines = append(lines, command)
+	case req.OffsetBytes > 0:
+		command := "tail -c +" + strconv.FormatInt(req.OffsetBytes+1, 10) + " -- " + quoted
+		if req.MaxBytes > 0 {
+			command += " | head -c " + strconv.Itoa(req.MaxBytes)
 		}
 		lines = append(lines, command)
 	default:
-		if maxBytes > 0 {
-			lines = append(lines, "head -c "+strconv.Itoa(maxBytes)+" -- "+quoted)
+		if req.MaxBytes > 0 {
+			lines = append(lines, "head -c "+strconv.Itoa(req.MaxBytes)+" -- "+quoted)
 		} else {
 			lines = append(lines, "cat -- "+quoted)
 		}
 	}
-	result, err := s.Submit(ctx, domain.ExecRequest{
-		HostID: hostID, Mode: domain.ExecScript, Script: strings.Join(lines, "\n"), Elevated: elevated,
-		Reason: "read a bounded remote file with version metadata",
-	}, actor)
-	if result.Stdout != "" {
-		metadata, content := parseFileReadOutput(path, result.Stdout)
-		metadata.OffsetBytes = offsetBytes
-		metadata.ReturnedBytes = len(content)
-		metadata.Sensitive = strings.Contains(content, "[REDACTED]")
-		result.File = &metadata
-		result.Stdout = content
+	return strings.Join(lines, "\n")
+}
+
+func buildRemoteFileSearchScript(req domain.ExecRequest) string {
+	script := "grep -n -F -C " + strconv.Itoa(req.ContextLines) + " -- " + shellQuote(req.SearchPattern) + " " + shellQuote(req.RemotePath)
+	if req.MaxMatches > 0 {
+		script += " | head -n " + strconv.Itoa(req.MaxMatches)
 	}
-	return result, err
+	return script
+}
+
+func resolvedFileOffset(size, requested int64) int64 {
+	if requested >= 0 {
+		return requested
+	}
+	if size <= 0 || requested < -size {
+		return 0
+	}
+	return size + requested
 }
 
 func (s *Service) SearchFile(ctx context.Context, hostID, path, pattern string, contextLines, maxMatches int, elevated bool, actor string) (domain.ExecResult, error) {
@@ -78,14 +115,13 @@ func (s *Service) SearchFile(ctx context.Context, hostID, path, pattern string, 
 	if pattern == "" || len(pattern) > 512 || strings.ContainsAny(pattern, "\x00\r\n") {
 		return domain.ExecResult{}, fmt.Errorf("invalid search pattern: use 1-512 characters on one line")
 	}
-	if contextLines < 0 {
-		return domain.ExecResult{}, fmt.Errorf("invalid context_lines")
+	if contextLines < 0 || maxMatches < 0 {
+		return domain.ExecResult{}, fmt.Errorf("context_lines and max_matches must be non-negative")
 	}
-	script := "grep -n -F -C " + strconv.Itoa(contextLines) + " -- " + shellQuote(pattern) + " " + shellQuote(path)
-	if maxMatches > 0 {
-		script += " | head -n " + strconv.Itoa(maxMatches)
-	}
-	return s.Submit(ctx, domain.ExecRequest{HostID: hostID, Mode: domain.ExecScript, Script: script, Elevated: elevated, Reason: "search literal matches in a remote file"}, actor)
+	return s.Submit(ctx, domain.ExecRequest{
+		HostID: hostID, Mode: domain.ExecRemoteSearch, RemotePath: path, SearchPattern: pattern,
+		ContextLines: contextLines, MaxMatches: maxMatches, Elevated: elevated, Reason: "search literal matches in a remote file",
+	}, actor)
 }
 
 func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, diff, validatorID string, elevated bool, reason, actor string) (domain.ExecResult, error) {

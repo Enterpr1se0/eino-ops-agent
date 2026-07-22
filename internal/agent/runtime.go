@@ -475,11 +475,15 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 		})
 
 		iter := runner.Run(runCtx, messages, adk.WithCheckPointID(sessionID))
-		var final strings.Builder
+		answerCandidate := ""
 		interrupted := false
 		events := 0
 		outputEvents := 0
 		streamChunks := 0
+		assistantOutputs := 0
+		assistantToolCallOutputs := 0
+		assistantEmptyOutputs := 0
+		lastFinishReason := ""
 		for {
 			event, ok := iter.Next()
 			if !ok {
@@ -503,8 +507,18 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 			outputEvents++
 			variant := event.Output.MessageOutput
 			role := string(variant.Role)
+			if variant.Role == schema.Assistant {
+				assistantOutputs++
+				answerCandidate = ""
+			}
+			if variant.Role == schema.Tool {
+				markActivity()
+				answerCandidate = ""
+			}
 			if variant.IsStreaming && variant.MessageStream != nil {
 				stream := variant.MessageStream
+				var assistantContent strings.Builder
+				assistantHasToolCalls := false
 				var toolResult strings.Builder
 				var reasoning strings.Builder
 				reasoningSegment := ""
@@ -522,14 +536,23 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 						continue
 					}
 					streamChunks++
-					if variant.Role == schema.Assistant && message.ReasoningContent != "" {
-						markActivity()
-						if reasoningSegment == "" {
-							reasoningSegment = ids.New("reasoning")
-							reasoningSegments++
+					if variant.Role == schema.Assistant {
+						if message.ResponseMeta != nil && message.ResponseMeta.FinishReason != "" {
+							lastFinishReason = message.ResponseMeta.FinishReason
 						}
-						reasoning.WriteString(message.ReasoningContent)
-						emit(Event{Type: "reasoning", Role: role, Content: message.ReasoningContent, SegmentID: reasoningSegment, SessionID: sessionID})
+						if len(message.ToolCalls) > 0 {
+							markActivity()
+							assistantHasToolCalls = true
+						}
+						if message.ReasoningContent != "" {
+							markActivity()
+							if reasoningSegment == "" {
+								reasoningSegment = ids.New("reasoning")
+								reasoningSegments++
+							}
+							reasoning.WriteString(message.ReasoningContent)
+							emit(Event{Type: "reasoning", Role: role, Content: message.ReasoningContent, SegmentID: reasoningSegment, SessionID: sessionID})
+						}
 					}
 					if message.Content == "" {
 						continue
@@ -544,10 +567,19 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					}
 					emit(Event{Type: "message", Role: role, ToolName: variant.ToolName, Content: message.Content, SessionID: sessionID})
 					if variant.Role == schema.Assistant {
-						final.WriteString(message.Content)
+						assistantContent.WriteString(message.Content)
 					}
 				}
 				stream.Close()
+				if variant.Role == schema.Assistant {
+					if assistantHasToolCalls {
+						assistantToolCallOutputs++
+					} else if assistantContent.Len() > 0 {
+						answerCandidate = assistantContent.String()
+					} else {
+						assistantEmptyOutputs++
+					}
+				}
 				if reasoning.Len() > 0 {
 					if err := r.store.AppendChatMessage(ctx, sessionID, "reasoning", reasoning.String()); err != nil {
 						return "", err
@@ -565,6 +597,20 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 				continue
 			}
 			if variant.Message != nil {
+				assistantHasToolCalls := variant.Role == schema.Assistant && len(variant.Message.ToolCalls) > 0
+				if variant.Role == schema.Assistant {
+					if variant.Message.ResponseMeta != nil && variant.Message.ResponseMeta.FinishReason != "" {
+						lastFinishReason = variant.Message.ResponseMeta.FinishReason
+					}
+					if assistantHasToolCalls {
+						markActivity()
+						assistantToolCallOutputs++
+					} else if variant.Message.Content != "" {
+						answerCandidate = variant.Message.Content
+					} else {
+						assistantEmptyOutputs++
+					}
+				}
 				if variant.Role == schema.Assistant && variant.Message.ReasoningContent != "" {
 					markActivity()
 					reasoningSegments++
@@ -592,27 +638,30 @@ func (r *Runtime) QueryWithAttachments(ctx context.Context, sessionID, query str
 					}
 				}
 				emit(Event{Type: "message", Role: role, ToolName: toolName, Content: displayContent, SessionID: sessionID})
-				if variant.Role == schema.Assistant {
-					final.WriteString(variant.Message.Content)
-				}
 			}
 		}
 
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		answer = final.String()
+		answer = answerCandidate
+		iterationAttrs := []any{
+			"attempt", attempt, "max_attempts", emptyResponseMaxAttempts, "history_messages", len(messages),
+			"events", events, "output_events", outputEvents, "stream_chunks", streamChunks,
+			"assistant_outputs", assistantOutputs, "assistant_tool_call_outputs", assistantToolCallOutputs,
+			"assistant_empty_outputs", assistantEmptyOutputs, "candidate_bytes", len(answerCandidate),
+			"last_finish_reason", lastFinishReason, "activity", attemptActivity.Load(), "interrupted", interrupted,
+		}
+		logger.DebugContext(ctx, "agent model iteration completed", iterationAttrs...)
 		if answer != "" || interrupted {
 			turnCompleted = true
 			break
 		}
 		if attemptActivity.Load() {
+			logger.WarnContext(ctx, "agent returned no terminal answer after activity", iterationAttrs...)
 			return "", fmt.Errorf("%w after agent activity; automatic retry was skipped to avoid repeating tool operations", ErrEmptyResponse)
 		}
-		logger.WarnContext(ctx, "agent returned an empty response",
-			"attempt", attempt, "max_attempts", emptyResponseMaxAttempts, "history_messages", len(messages),
-			"events", events, "output_events", outputEvents, "stream_chunks", streamChunks,
-		)
+		logger.WarnContext(ctx, "agent returned an empty response", iterationAttrs...)
 		if attempt == emptyResponseMaxAttempts {
 			return "", fmt.Errorf("%w after %d attempts; the failed turn was excluded from future model context", ErrEmptyResponse, emptyResponseMaxAttempts)
 		}

@@ -43,15 +43,9 @@ func New(svc *service.Service, version string) *Server {
 			output, err := agent.RunTaskTool(svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read a bounded remote file. Credential paths are denied."},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read one remote file or search it by optional literal pattern. Credential paths are denied."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileReadInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := agent.RunFileReadTool(ctx, svc, input, "mcp-client")
-			return nil, output, err
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_search", Description: "Search bounded literal matches in one remote file."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileSearchInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.SearchFile(ctx, input.HostID, input.Path, input.Pattern, input.ContextLines, input.MaxMatches, input.Elevated, "mcp-client")
-			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_list", Description: "List a remote directory without changing it."},
@@ -82,16 +76,9 @@ func New(svc *service.Service, version string) *Server {
 			output, err = agent.NormalizeExecToolResult(output, err)
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_read", Description: "Read a bounded workspace file with SHA256 metadata."},
+	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_read", Description: "Read one Workspace file or search it by optional literal pattern."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspaceReadInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.ReadWorkspaceFile(ctx, input.WorkspaceID, input.Path, input.MaxBytes, input.OffsetBytes, "mcp-client")
-			output, err = agent.NormalizeExecToolResult(output, err)
-			return nil, output, err
-		})
-	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_search", Description: "Search literal text in a bounded workspace file."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.WorkspaceSearchInput) (*mcp.CallToolResult, domain.ExecResult, error) {
-			output, err := svc.SearchWorkspace(ctx, input.WorkspaceID, input.Path, input.Pattern, input.MaxMatches, "mcp-client")
-			output, err = agent.NormalizeExecToolResult(output, err)
+			output, err := agent.RunWorkspaceFileReadTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
 		})
 	mcp.AddTool(server, &mcp.Tool{Name: "workspace_file_edit", Description: "Apply one reviewed unified diff to an existing file inside a read_write workspace."},

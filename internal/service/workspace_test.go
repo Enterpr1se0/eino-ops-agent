@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
@@ -161,6 +162,47 @@ func TestWorkspaceReadPreservesCompleteLargeFile(t *testing.T) {
 	}
 	if result.Stdout != want || result.File == nil || result.File.ReturnedBytes != len(want) {
 		t.Fatalf("complete workspace file was not returned: got=%d want=%d metadata=%#v", len(result.Stdout), len(want), result.File)
+	}
+}
+
+func TestWorkspaceReadNegativeOffsetReadsFromFileEnd(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_only")
+	if err := os.WriteFile(filepath.Join(root, "tail.log"), []byte("0123456789"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.ReadWorkspaceFile(context.Background(), "project", "tail.log", 0, -4, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stdout != "6789" || result.File == nil || result.File.OffsetBytes != 6 || result.File.ReturnedBytes != 4 {
+		t.Fatalf("negative Workspace offset returned %#v", result)
+	}
+
+	result, err = svc.ReadWorkspaceFile(context.Background(), "project", "tail.log", 0, -100, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stdout != "0123456789" || result.File == nil || result.File.OffsetBytes != 0 {
+		t.Fatalf("oversized negative Workspace offset returned %#v", result)
+	}
+}
+
+func TestWorkspaceSearchReturnsLiteralMatchesWithContext(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_only")
+	content := "before\nneedle one\nmiddle\nneedle two\nafter\n"
+	if err := os.WriteFile(filepath.Join(root, "search.log"), []byte(content), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.SearchWorkspace(context.Background(), "project", "search.log", "needle", 1, 4, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "1-before\n2:needle one\n3-middle\n4:needle two\n"
+	if result.Stdout != want {
+		t.Fatalf("Workspace search output = %q, want %q", result.Stdout, want)
+	}
+	if _, err := svc.SearchWorkspace(context.Background(), "project", "search.log", "needle", -1, 0, "test"); err == nil {
+		t.Fatal("Workspace search accepted negative context_lines")
 	}
 }
 
@@ -343,6 +385,51 @@ func TestWorkspaceAdminUploadIsAtomicAndNeverOverwrites(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, ".opspilot-trash")); !os.IsNotExist(err) {
 		t.Fatalf("delete created a recovery directory: %v", err)
+	}
+}
+
+func TestWorkspaceFileWatchReportsExternalDirectoryChanges(t *testing.T) {
+	svc, root := newWorkspaceService(t, "read_write")
+	ctx, cancel := context.WithCancel(context.Background())
+	watch, err := svc.WatchAdminWorkspaceFiles(ctx, "project", ".")
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(root, "external.txt")
+	for _, change := range []func() error{
+		func() error { return os.WriteFile(path, []byte("first"), 0o600) },
+		func() error { return os.WriteFile(path, []byte("second version"), 0o600) },
+		func() error { return os.Remove(path) },
+	} {
+		if err := change(); err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		select {
+		case event := <-watch.Changes:
+			if event.WorkspaceID != "project" || event.Path != "." {
+				cancel()
+				t.Fatalf("unexpected workspace change: %#v", event)
+			}
+		case watchErr := <-watch.Errors:
+			cancel()
+			t.Fatalf("workspace watcher failed: %v", watchErr)
+		case <-time.After(3 * time.Second):
+			cancel()
+			t.Fatal("timed out waiting for workspace file change")
+		}
+	}
+
+	cancel()
+	select {
+	case _, open := <-watch.Changes:
+		if open {
+			t.Fatal("workspace change channel remained open after cancellation")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("workspace watcher did not stop after cancellation")
 	}
 }
 

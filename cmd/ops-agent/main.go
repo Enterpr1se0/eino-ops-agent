@@ -37,10 +37,11 @@ import (
 const version = "0.1.0"
 
 type application struct {
-	config  config.Config
-	store   *store.Store
-	service *service.Service
-	agent   *agent.Runtime
+	config    config.Config
+	store     *store.Store
+	service   *service.Service
+	agent     *agent.Runtime
+	startedAt time.Time
 }
 
 type serveOptions struct {
@@ -173,7 +174,7 @@ func newApplication(ctx context.Context, cfg config.Config) (*application, error
 		return nil, err
 	}
 	slog.InfoContext(ctx, "application initialized", "component", "server", "duration_ms", time.Since(started).Milliseconds(), "agent_available", runtime.Available())
-	return &application{config: cfg, store: st, service: svc, agent: runtime}, nil
+	return &application{config: cfg, store: st, service: svc, agent: runtime, startedAt: started.UTC()}, nil
 }
 
 func prepareQuickStart() (string, bool, error) {
@@ -221,7 +222,13 @@ func serve(ctx context.Context, app *application, options serveOptions) error {
 		return fmt.Errorf("initialize web authentication: %w", err)
 	}
 	server := &http.Server{
-		Addr: app.config.ListenAddress, Handler: httpapi.New(app.service, app.agent, webAuth, app.config.WebAuth.SecureCookies).Handler(),
+		Addr: app.config.ListenAddress,
+		Handler: httpapi.New(app.service, app.agent, webAuth, httpapi.Options{
+			SecureCookies: app.config.WebAuth.SecureCookies,
+			Version:       version,
+			StartedAt:     app.startedAt,
+			Logging:       app.config.Logging,
+		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	shutdownCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

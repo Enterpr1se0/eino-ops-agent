@@ -21,6 +21,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/fsnotify/fsnotify"
+
 	"eino-ops-agent/internal/config"
 	"eino-ops-agent/internal/domain"
 	"eino-ops-agent/internal/ids"
@@ -59,6 +61,16 @@ type WorkspaceFileList struct {
 	Entries     []WorkspaceFileEntry `json:"entries"`
 }
 
+type WorkspaceFileChange struct {
+	WorkspaceID string `json:"workspace_id"`
+	Path        string `json:"path"`
+}
+
+type WorkspaceFileWatch struct {
+	Changes <-chan WorkspaceFileChange
+	Errors  <-chan error
+}
+
 type WorkspaceFilePreview struct {
 	WorkspaceID string `json:"workspace_id"`
 	Path        string `json:"path"`
@@ -76,7 +88,10 @@ type WorkspaceDeleteResult struct {
 	SHA256      string `json:"sha256,omitempty"`
 }
 
-const maxWorkspaceUploadBytes = 100 << 20
+const (
+	maxWorkspaceUploadBytes = 100 << 20
+	workspaceWatchDebounce  = 120 * time.Millisecond
+)
 
 var workspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
@@ -388,6 +403,101 @@ func (s *Service) ListAdminWorkspaceFiles(workspaceID, relativePath string) (Wor
 	return result, nil
 }
 
+// WatchAdminWorkspaceFiles subscribes to operating-system file notifications for
+// one visible Workspace directory. It deliberately watches only that directory:
+// changes below a child directory cannot alter the current listing, and avoiding
+// recursive watches keeps large projects from consuming one watch per folder.
+func (s *Service) WatchAdminWorkspaceFiles(ctx context.Context, workspaceID, relativePath string) (WorkspaceFileWatch, error) {
+	workspace, ok := s.workspaceByID(workspaceID)
+	if !ok {
+		return WorkspaceFileWatch{}, fmt.Errorf("workspace %q not found", workspaceID)
+	}
+	relativePath = strings.TrimSpace(relativePath)
+	if relativePath == "" {
+		relativePath = "."
+	}
+	directory, err := s.resolveWorkspacePath(workspace, relativePath, false)
+	if err != nil {
+		return WorkspaceFileWatch{}, err
+	}
+	info, err := os.Stat(directory)
+	if err != nil {
+		return WorkspaceFileWatch{}, err
+	}
+	if !info.IsDir() {
+		return WorkspaceFileWatch{}, fmt.Errorf("workspace watch target is not a directory")
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return WorkspaceFileWatch{}, fmt.Errorf("create workspace file watcher: %w", err)
+	}
+	if err := watcher.Add(directory); err != nil {
+		_ = watcher.Close()
+		return WorkspaceFileWatch{}, fmt.Errorf("watch workspace directory: %w", err)
+	}
+
+	changes := make(chan WorkspaceFileChange, 1)
+	errors := make(chan error, 1)
+	go func() {
+		defer close(changes)
+		defer close(errors)
+		defer watcher.Close()
+
+		var debounce *time.Timer
+		var debounceC <-chan time.Time
+		stopDebounce := func() {
+			if debounce != nil && !debounce.Stop() {
+				select {
+				case <-debounce.C:
+				default:
+				}
+			}
+		}
+		defer stopDebounce()
+		schedule := func() {
+			if debounce == nil {
+				debounce = time.NewTimer(workspaceWatchDebounce)
+			} else {
+				stopDebounce()
+				debounce.Reset(workspaceWatchDebounce)
+			}
+			debounceC = debounce.C
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, open := <-watcher.Events:
+				if !open {
+					return
+				}
+				if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0 {
+					schedule()
+				}
+			case watchErr, open := <-watcher.Errors:
+				if !open {
+					return
+				}
+				select {
+				case errors <- fmt.Errorf("workspace file watcher failed: %w", watchErr):
+				default:
+				}
+				return
+			case <-debounceC:
+				debounceC = nil
+				select {
+				case changes <- WorkspaceFileChange{WorkspaceID: workspace.ID, Path: relativePath}:
+				default:
+				}
+			}
+		}
+	}()
+
+	return WorkspaceFileWatch{Changes: changes, Errors: errors}, nil
+}
+
 func (s *Service) PreviewAdminWorkspaceFile(workspaceID, relativePath string) (WorkspaceFilePreview, error) {
 	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
@@ -580,7 +690,7 @@ func (s *Service) ReadWorkspaceFile(ctx context.Context, workspaceID, relativePa
 		MaxBytes: maxBytes, OffsetBytes: offset, Reason: "read a bounded file from an allowlisted workspace",
 	}, actor)
 	metadata, content := parseFileReadOutput(relativePath, result.Stdout)
-	metadata.OffsetBytes = offset
+	metadata.OffsetBytes = resolvedFileOffset(metadata.Size, offset)
 	metadata.ReturnedBytes = len(content)
 	metadata.Sensitive = strings.Contains(content, "[REDACTED]")
 	result.File, result.Stdout = &metadata, content
@@ -595,7 +705,7 @@ func (s *Service) ListWorkspaceFiles(ctx context.Context, workspaceID, relativeP
 	return s.Submit(ctx, domain.ExecRequest{HostID: host.ID, Mode: domain.ExecWorkspaceList, WorkspaceID: workspaceID, RelativePath: relativePath, Reason: "list an allowlisted workspace directory"}, actor)
 }
 
-func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath, pattern string, maxMatches int, actor string) (domain.ExecResult, error) {
+func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath, pattern string, contextLines, maxMatches int, actor string) (domain.ExecResult, error) {
 	host, err := s.workspaceHost(ctx, workspaceID)
 	if err != nil {
 		return domain.ExecResult{}, err
@@ -604,9 +714,12 @@ func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath
 	if pattern == "" || len(pattern) > 512 || strings.ContainsAny(pattern, "\x00\r\n") {
 		return domain.ExecResult{}, fmt.Errorf("invalid workspace search pattern")
 	}
+	if contextLines < 0 || maxMatches < 0 {
+		return domain.ExecResult{}, fmt.Errorf("workspace search context_lines and max_matches must be non-negative")
+	}
 	return s.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecWorkspaceSearch, WorkspaceID: workspaceID, RelativePath: relativePath,
-		SearchPattern: pattern, MaxBytes: maxMatches, Reason: "search literal text in an allowlisted workspace file",
+		SearchPattern: pattern, ContextLines: contextLines, MaxMatches: maxMatches, Reason: "search literal text in an allowlisted workspace file",
 	}, actor)
 }
 
@@ -773,7 +886,7 @@ func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest) 
 	case domain.ExecWorkspaceList:
 		result.Stdout, err = listWorkspaceDirectory(path)
 	case domain.ExecWorkspaceSearch:
-		result.Stdout, err = searchWorkspaceFile(path, req.SearchPattern, req.MaxBytes)
+		result.Stdout, err = searchWorkspaceFile(path, req.SearchPattern, req.ContextLines, req.MaxMatches)
 	case domain.ExecWorkspaceEdit:
 		if workspace.Access != "read_write" {
 			err = fmt.Errorf("workspace %q is read_only", workspace.ID)
@@ -1232,10 +1345,8 @@ func readWorkspaceFile(path, displayPath string, maxBytes int, offset int64) ([]
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("workspace target is not a regular file")
 	}
-	if offset < 0 {
-		return nil, fmt.Errorf("offset_bytes cannot be negative")
-	}
-	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+	resolvedOffset := resolvedFileOffset(info.Size(), offset)
+	if _, err := file.Seek(resolvedOffset, io.SeekStart); err != nil {
 		return nil, err
 	}
 	var content []byte
@@ -1291,7 +1402,7 @@ func isSensitiveWorkspaceComponent(name string) bool {
 	return strings.HasPrefix(lower, ".env") || strings.HasPrefix(lower, ".opspilot-") || lower == ".ssh" || lower == ".data" || lower == "master.key" || strings.Contains(lower, "credential")
 }
 
-func searchWorkspaceFile(path, pattern string, maxMatches int) ([]byte, error) {
+func searchWorkspaceFile(path, pattern string, contextLines, maxMatches int) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -1300,15 +1411,53 @@ func searchWorkspaceFile(path, pattern string, maxMatches int) ([]byte, error) {
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64<<10), int(^uint(0)>>1))
 	var output strings.Builder
-	line := 0
-	matches := 0
+	type bufferedLine struct {
+		number  int
+		content string
+		match   bool
+	}
+	before := make([]bufferedLine, 0, contextLines)
+	line, outputLines, lastOutputLine, afterRemaining := 0, 0, 0, 0
+	writeLine := func(item bufferedLine) bool {
+		if item.number <= lastOutputLine {
+			return true
+		}
+		if maxMatches > 0 && outputLines >= maxMatches {
+			return false
+		}
+		separator := "-"
+		if item.match {
+			separator = ":"
+		}
+		fmt.Fprintf(&output, "%d%s%s\n", item.number, separator, item.content)
+		lastOutputLine = item.number
+		outputLines++
+		return true
+	}
 	for scanner.Scan() {
 		line++
-		if strings.Contains(scanner.Text(), pattern) {
-			fmt.Fprintf(&output, "%d:%s\n", line, scanner.Text())
-			matches++
-			if maxMatches > 0 && matches >= maxMatches {
-				break
+		item := bufferedLine{number: line, content: scanner.Text()}
+		item.match = strings.Contains(item.content, pattern)
+		if item.match {
+			for _, previous := range before {
+				if !writeLine(previous) {
+					return []byte(output.String()), nil
+				}
+			}
+			if !writeLine(item) {
+				return []byte(output.String()), nil
+			}
+			afterRemaining = contextLines
+		} else if afterRemaining > 0 {
+			if !writeLine(item) {
+				return []byte(output.String()), nil
+			}
+			afterRemaining--
+		}
+		if contextLines > 0 {
+			before = append(before, item)
+			if len(before) > contextLines {
+				before = before[len(before)-contextLines:]
 			}
 		}
 	}

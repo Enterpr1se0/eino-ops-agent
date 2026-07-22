@@ -6,7 +6,7 @@ import {
   Activity, BookOpen, Bot, BrainCircuit, Braces, Check, ChevronRight, CircleDot, Clock3, Cpu, Edit3, Eye, EyeOff, FileText, FolderOpen, FunctionSquare, History, ImagePlus, KeyRound, LockKeyhole, LogOut,
   Copy, Download, ListChecks, LoaderCircle, Plus, Power, RefreshCw, Save, Search, Send, Server, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Square, TerminalSquare, Trash2, UploadCloud, X, Zap,
 } from 'lucide-react'
-import { api, chatAttachmentURL, streamChat } from './api'
+import { api, chatAttachmentURL, streamChat, workspaceFileEventsURL } from './api'
 import i18n, { localeFor, type SupportedLanguage } from './i18n'
 import type { AgentEvent, AgentPlan, Approval, ChatMessage, ChatSession, CommandReview, Health, Host, HostAuthType, HostInput, HostSudoMode, LLMToolCatalog, LLMToolDescriptor, LLMToolGuard, ManagedSkill, MCPServer, MCPServerInput, MCPTransport, ModelProvider, ModelProviderInput, ModelProviderKind, Run, ServerLogEntry, SystemSettings, ToolCapabilities, WebSearchSettings, WebSearchSettingsInput, WorkspaceCapability, WorkspaceFilePreview, WorkspaceInput, WorkspaceShellMode } from './types'
 
@@ -672,7 +672,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
   const streamingResponseStarted=entries.some((item)=>item.id==='streaming'&&item.content!=='')
 
   return <div className="chat-layout">
-    <ChatWorkspacePanel workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} onSelect={setWorkspaceID} refresh={refresh}/>
+    <ChatWorkspacePanel key={selectedWorkspace?.id||''} workspaces={capabilities.workspaces} workspaceID={selectedWorkspace?.id||''} onSelect={setWorkspaceID}/>
     <div className="chat-main panel">
 	  <div className="panel-header"><div><Bot size={18}/><span>{t('chat.session')}</span></div><div className="chat-header-actions"><span className="session-id">{sessionId ? sessionId.slice(0, 20) : t('chat.newSession')}</span><button className="mobile-history-button" onClick={()=>setHistoryOpen(true)} title={t('chat.conversations')} aria-label={t('chat.openConversations')}><History size={15}/>{activeSessionCount>0&&<em>{activeSessionCount}</em>}</button></div></div>
       <div className="session-approval-slot">{currentApprovals.length>0&&<ApprovalDialog key={currentApprovals[0].id} approval={currentApprovals[0]} pendingCount={currentApprovals.length} hosts={hosts} running={sessionBusy} stopping={stopping} onStop={()=>void stopAgent()} refresh={refresh} onNotice={setApprovalNotice}/>} {approvalNotice&&currentApprovals.length===0&&<div className="approval-toast"><ShieldCheck size={14}/><span>{approvalNotice}</span><button onClick={()=>setApprovalNotice('')}><X size={13}/></button></div>}</div>
@@ -685,7 +685,7 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
       </div>
 		  <form className="composer" onSubmit={submit}>
 			  {sessionBusy&&<div className="llm-work-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={13}/><b>{stopping?t('chat.stopping'):t('chat.running')}</b><button type="button" className="agent-stop-button" onClick={()=>void stopAgent()} disabled={stopping||!(activeStreamRef.current?.sessionId||sessionId)} title={t('chat.stopTitle')}><Square size={11} fill="currentColor"/>{t('chat.stop')}</button></div>}
-			  <div className="context-line"><span><Server size={13}/>{hosts.length?t('chat.hostsCount',{count:hosts.length,names:hostNames}):t('chat.noHosts')}</span><span className="composer-workspace"><FolderOpen size={13}/>{selectedWorkspace?t('chat.workspaceSelected',{id:selectedWorkspace.id}):t('chat.noWorkspace')}</span>{selectedWorkspace?.access==='read_write'&&<QuickWorkspaceUpload workspace={selectedWorkspace} refresh={refresh}/>}<span><Cpu size={13}/>{modelName || t('chat.noModel')}</span></div>
+			  <div className="context-line"><span><Server size={13}/>{hosts.length?t('chat.hostsCount',{count:hosts.length,names:hostNames}):t('chat.noHosts')}</span><span className="composer-workspace"><FolderOpen size={13}/>{selectedWorkspace?t('chat.workspaceSelected',{id:selectedWorkspace.id}):t('chat.noWorkspace')}</span>{selectedWorkspace?.access==='read_write'&&<QuickWorkspaceUpload workspace={selectedWorkspace}/>}<span><Cpu size={13}/>{modelName || t('chat.noModel')}</span></div>
 			  {pendingImages.length>0&&<div className="composer-images">{pendingImages.map(image=><div key={image.id}><img src={image.url} alt={image.file.name}/><span title={image.file.name}>{image.file.name}</span><button type="button" onClick={()=>removePendingImage(image.id)} title={t('chat.removeImage')}><X size={11}/></button></div>)}</div>}
 			  {imageNotice&&<div className="composer-image-notice">{imageNotice}<button type="button" onClick={()=>setImageNotice('')}><X size={11}/></button></div>}
 			  <div className="input-row"><label className="image-attach-button" title={t('chat.addImages')}><ImagePlus size={18}/><input key={imageInputKey} type="file" accept={imageTypes.join(',')} multiple disabled={!agentAvailable||sessionBusy||!!loadingSession} onChange={event=>addImages(Array.from(event.target.files||[]))}/></label><textarea value={message} onChange={(event) => setMessage(event.target.value)} onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(file=>file.type.startsWith('image/'));if(files.length)addImages(files)}} placeholder={!agentAvailable?t('chat.configureModel'):loadingSession?t('chat.loadingConversation'):sessionBusy?t('chat.busyPlaceholder'):t('chat.prompt')} disabled={!agentAvailable||sessionBusy||!!loadingSession} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }}/><button aria-label={t('common.next')} disabled={!agentAvailable || sessionBusy || !!loadingSession || (!message.trim()&&!pendingImages.length)}><Send size={18}/></button></div>
@@ -702,30 +702,127 @@ function ChatPage({ hosts, approvals, runs, capabilities, imageTypes, agentAvail
 
 function formatFileSize(size:number){if(size<1024)return `${size} B`;if(size<1024*1024)return `${(size/1024).toFixed(1)} KiB`;return `${(size/1024/1024).toFixed(1)} MiB`}
 
-function ChatWorkspacePanel({workspaces,workspaceID,onSelect,refresh}:{workspaces:WorkspaceCapability[];workspaceID:string;onSelect:(id:string)=>void;refresh:()=>Promise<void>}){
+type WorkspaceNotice={kind:'success'|'error';text:string}
+
+function workspaceChildPath(path:string,name:string){return path==='.'?name:`${path}/${name}`}
+
+function ChatWorkspacePanel({workspaces,workspaceID,onSelect}:{workspaces:WorkspaceCapability[];workspaceID:string;onSelect:(id:string)=>void}){
 	const {t}=useTranslation()
 	const workspace=workspaces.find(item=>item.id===workspaceID)||workspaces[0]
-	const activeWorkspaceID=workspace?.id
-	const [path,setPath]=useState('.'),[entries,setEntries]=useState<{name:string;type:'file'|'directory';size?:number}[]>([]),[loading,setLoading]=useState(false),[error,setError]=useState('')
-	const [file,setFile]=useState<File|null>(null),[target,setTarget]=useState(''),[uploading,setUploading]=useState(false),[notice,setNotice]=useState(''),[inputKey,setInputKey]=useState(0)
+	const activeWorkspaceID=workspace?.id||''
+	const [path,setPath]=useState('.')
+	const [entries,setEntries]=useState<{name:string;type:'file'|'directory';size?:number}[]>([])
+	const [loading,setLoading]=useState(false),[error,setError]=useState('')
+	const [file,setFile]=useState<File|null>(null),[target,setTarget]=useState(''),[uploading,setUploading]=useState(false),[inputKey,setInputKey]=useState(0)
+	const [notice,setNotice]=useState<WorkspaceNotice|null>(null),[dragging,setDragging]=useState(false)
 	const [preview,setPreview]=useState<WorkspaceFilePreview|null>(null),[previewLoading,setPreviewLoading]=useState(''),[deleting,setDeleting]=useState('')
-	const load=useCallback(async()=>{if(!activeWorkspaceID)return;setLoading(true);try{const result=await api.workspaceFiles(activeWorkspaceID,path);setEntries(result.entries||[]);setError('')}catch(err){setEntries([]);setError(errorText(err))}finally{setLoading(false)}},[activeWorkspaceID,path])
-	useEffect(()=>{setPath('.');setFile(null);setTarget('');setNotice('');setPreview(null)},[workspace?.id])
+	const loadRequestRef=useRef(0),previewPathRef=useRef('')
+
+	const load=useCallback(async(showLoading=true)=>{
+		if(!activeWorkspaceID)return
+		const requestID=++loadRequestRef.current
+		if(showLoading)setLoading(true)
+		try{
+			const result=await api.workspaceFiles(activeWorkspaceID,path)
+			if(loadRequestRef.current!==requestID)return
+			setEntries(result.entries||[]);setError('')
+		}catch(err){
+			if(loadRequestRef.current!==requestID)return
+			setEntries([]);setError(errorText(err))
+		}finally{
+			if(loadRequestRef.current===requestID)setLoading(false)
+		}
+	},[activeWorkspaceID,path])
+	const previewPath=preview?.path||''
+	useEffect(()=>{previewPathRef.current=previewPath},[previewPath])
+	const refreshPreview=useCallback(async()=>{
+		if(!activeWorkspaceID||!previewPath)return
+		try{const result=await api.previewWorkspaceFile(activeWorkspaceID,previewPath);if(previewPathRef.current===previewPath)setPreview(result)}catch{/* keep the last successful preview; the listing still reports the error */}
+	},[activeWorkspaceID,previewPath])
+	const synchronize=useCallback((showLoading=false)=>{void load(showLoading);void refreshPreview()},[load,refreshPreview])
+
 	useEffect(()=>{void load()},[load])
-	const choose=(event:React.ChangeEvent<HTMLInputElement>)=>{const selected=event.target.files?.[0]||null;setFile(selected);setTarget(selected?(path==='.'?selected.name:`${path}/${selected.name}`):'');setNotice('')}
-	const upload=async()=>{if(!workspace||!file||!target.trim())return;setUploading(true);setNotice('');try{const result=await api.uploadWorkspaceFile(workspace.id,file,target.trim());setNotice(t('workspace.uploaded',{path:result.path}));setFile(null);setTarget('');setInputKey(value=>value+1);await load();await refresh()}catch(err){setNotice(errorText(err))}finally{setUploading(false)}}
-	const openEntry=async(name:string,type:'file'|'directory')=>{const next=path==='.'?name:`${path}/${name}`;if(type==='directory'){setPath(next);return}if(!workspace)return;setPreviewLoading(next);setNotice('');try{setPreview(await api.previewWorkspaceFile(workspace.id,next))}catch(err){setNotice(errorText(err))}finally{setPreviewLoading('')}}
-	const removeEntry=async(name:string,type:'file'|'directory')=>{if(!workspace)return;const next=path==='.'?name:`${path}/${name}`;const target=type==='directory'?t('workspace.deleteFolderTarget'):t('workspace.deleteFileTarget');if(!confirm(t('workspace.deleteConfirm',{target,path:next})))return;setDeleting(next);setNotice('');try{const result=await api.deleteWorkspaceEntry(workspace.id,next);if(preview?.path===next)setPreview(null);setNotice(t('workspace.deleted',{type:t(`workspace.${result.type}`,{defaultValue:result.type})}));await load();await refresh()}catch(err){setNotice(errorText(err))}finally{setDeleting('')}}
+	useEffect(()=>{
+		if(!activeWorkspaceID)return
+		const source=new EventSource(workspaceFileEventsURL(activeWorkspaceID,path))
+		const changed=()=>synchronize(false)
+		source.addEventListener('workspace-change',changed)
+		source.onopen=changed
+		return()=>{source.removeEventListener('workspace-change',changed);source.close()}
+	},[activeWorkspaceID,path,synchronize])
+
+	const choose=(event:React.ChangeEvent<HTMLInputElement>)=>{
+		const selected=event.target.files?.[0]||null
+		setFile(selected);setTarget(selected?workspaceChildPath(path,selected.name):'');setNotice(null)
+	}
+	const upload=async()=>{
+		if(!workspace||!file||!target.trim())return
+		setUploading(true);setNotice(null)
+		try{
+			const result=await api.uploadWorkspaceFile(workspace.id,file,target.trim())
+			setNotice({kind:'success',text:t('workspace.uploaded',{path:result.path})});setFile(null);setTarget('');setInputKey(value=>value+1)
+		}catch(err){setNotice({kind:'error',text:errorText(err)})}
+		finally{setUploading(false)}
+	}
+	const uploadDropped=async(files:File[])=>{
+		if(!workspace||workspace.access!=='read_write'||uploading||!files.length)return
+		setUploading(true);setNotice({kind:'success',text:t('workspace.uploadingFiles',{count:files.length})})
+		let uploaded=0
+		const failures:string[]=[]
+		for(const dropped of files){
+			try{await api.uploadWorkspaceFile(workspace.id,dropped,workspaceChildPath(path,dropped.name));uploaded+=1}
+			catch(err){failures.push(`${dropped.name}: ${errorText(err)}`)}
+		}
+		if(failures.length){setNotice({kind:'error',text:t('workspace.uploadPartial',{uploaded,failed:failures.length,message:failures[0]})})}
+		else{setNotice({kind:'success',text:t('workspace.uploadedFiles',{count:uploaded})})}
+		setUploading(false)
+	}
+	const acceptsFiles=(event:React.DragEvent<HTMLElement>)=>workspace?.access==='read_write'&&Array.from(event.dataTransfer.types).includes('Files')
+	const dragEnter=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();setDragging(true)}
+	const dragOver=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect=uploading?'none':'copy'}
+	const dragLeave=(event:React.DragEvent<HTMLElement>)=>{if(workspace?.access!=='read_write')return;event.preventDefault();event.stopPropagation();if(event.relatedTarget instanceof Node&&event.currentTarget.contains(event.relatedTarget))return;setDragging(false)}
+	const drop=(event:React.DragEvent<HTMLElement>)=>{if(!acceptsFiles(event))return;event.preventDefault();event.stopPropagation();setDragging(false);if(!uploading)void uploadDropped(Array.from(event.dataTransfer.files))}
+	const openEntry=async(name:string,type:'file'|'directory')=>{
+		const next=workspaceChildPath(path,name)
+		if(type==='directory'){setPath(next);return}
+		if(!workspace)return
+		setPreviewLoading(next);setNotice(null)
+		try{setPreview(await api.previewWorkspaceFile(workspace.id,next))}catch(err){setNotice({kind:'error',text:errorText(err)})}finally{setPreviewLoading('')}
+	}
+	const removeEntry=async(name:string,type:'file'|'directory')=>{
+		if(!workspace)return
+		const next=workspaceChildPath(path,name)
+		const targetName=type==='directory'?t('workspace.deleteFolderTarget'):t('workspace.deleteFileTarget')
+		if(!confirm(t('workspace.deleteConfirm',{target:targetName,path:next})))return
+		setDeleting(next);setNotice(null)
+		try{
+			const result=await api.deleteWorkspaceEntry(workspace.id,next)
+			if(preview?.path===next)setPreview(null)
+			setNotice({kind:'success',text:t('workspace.deleted',{type:t(`workspace.${result.type}`,{defaultValue:result.type})})})
+		}catch(err){setNotice({kind:'error',text:errorText(err)})}finally{setDeleting('')}
+	}
 	const up=()=>{if(path==='.')return;const parts=path.split('/');parts.pop();setPath(parts.join('/')||'.')}
+
 	if(!workspace)return <aside className="workspace-browser-panel panel empty"><div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div></div><div className="workspace-empty"><FolderOpen size={23}/><span>{t('workspace.noConfigured')}</span></div></aside>
-	return <><aside className="workspace-browser-panel panel"><div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div><select value={workspace.id} disabled={workspaces.length<2} onChange={event=>onSelect(event.target.value)} aria-label={t('workspace.switchWorkspace')}>{workspaces.map(item=><option value={item.id} key={item.id}>{item.id}</option>)}</select></div><div className="chat-workspace-head"><span><b>{workspace.id}</b></span><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em></div><div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" onChange={choose}/></label>}<button onClick={()=>void load()} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>{file&&<div className="chat-upload-row"><input value={target} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=path==='.'?entry.name:`${path}/${entry.name}`;return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>void removeEntry(entry.name,entry.type)} disabled={deleting===fullPath} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>{notice&&<div className="chat-workspace-notice">{notice}</div>}</aside>{preview&&<div className="workspace-preview-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)setPreview(null)}}><section className="workspace-preview-dialog" role="dialog" aria-modal="true" aria-label={`${t('workspace.previewFile')} ${preview.path}`}><header><div><FileText size={18}/><span><b>{preview.path}</b><small>{formatFileSize(preview.size)} · SHA-256 {preview.sha256}</small></span></div><button onClick={()=>setPreview(null)} title={t('workspace.closePreview')}><X size={16}/></button></header>{preview.binary?<div className="workspace-binary-preview"><FileText size={30}/><b>{t('workspace.binary')}</b></div>:<pre>{preview.content||''}</pre>}</section></div>}</>
+	return <>
+		<aside className={`workspace-browser-panel panel ${dragging?'dragging':''}`} onDragEnter={dragEnter} onDragOver={dragOver} onDragLeave={dragLeave} onDrop={drop}>
+			<div className="panel-header"><div><FolderOpen size={17}/><span>{t('common.workspace')}</span></div><select value={workspace.id} disabled={workspaces.length<2} onChange={event=>onSelect(event.target.value)} aria-label={t('workspace.switchWorkspace')}>{workspaces.map(item=><option value={item.id} key={item.id}>{item.id}</option>)}</select></div>
+			<div className="chat-workspace-head"><span><b>{workspace.id}</b></span><em className={workspace.access}>{workspace.access==='read_write'?t('workspace.readWrite'):t('workspace.readOnly')}</em></div>
+			<div className="workspace-path-row"><button onClick={up} disabled={path==='.'} title={t('workspace.parent')}>‹</button><code title={path}>{path}</code>{workspace.access==='read_write'&&<label title={t('workspace.uploadFile')}><UploadCloud size={14}/><input key={inputKey} type="file" onChange={choose}/></label>}<button onClick={()=>synchronize(true)} title={t('workspace.refreshFiles')}><RefreshCw size={12}/></button></div>
+			{file&&<div className="chat-upload-row"><input value={target} onChange={event=>setTarget(event.target.value)} aria-label={t('workspace.relativePath')}/><button onClick={()=>void upload()} disabled={uploading||!target.trim()}>{uploading?'...':t('common.upload')}</button><button onClick={()=>{setFile(null);setTarget('');setInputKey(value=>value+1)}} title={t('workspace.cancelUpload')}><X size={11}/></button></div>}
+			<div className="workspace-file-list">{loading?<span className="workspace-files-state"><LoaderCircle className="spin" size={13}/>{t('common.loading')}</span>:error?<span className="workspace-files-state error">{error}</span>:entries.length?entries.map(entry=>{const fullPath=workspaceChildPath(path,entry.name);return <div className="workspace-file-row" key={`${entry.type}:${entry.name}`}><button className="workspace-file-open" onClick={()=>void openEntry(entry.name,entry.type)} title={entry.type==='file'?t('workspace.previewFile'):t('workspace.openDirectory')}>{previewLoading===fullPath?<LoaderCircle className="spin" size={13}/>:entry.type==='directory'?<FolderOpen size={13}/>:<FileText size={13}/>}<span>{entry.name}</span>{entry.type==='file'&&<small>{formatFileSize(entry.size??0)}</small>}</button>{workspace.access==='read_write'&&<button className="workspace-file-delete" onClick={()=>void removeEntry(entry.name,entry.type)} disabled={deleting===fullPath} title={t('workspace.deleteEntry',{type:t(`workspace.${entry.type}`)})}><Trash2 size={12}/></button>}</div>}):<span className="workspace-files-state">{t('workspace.emptyDirectory')}</span>}</div>
+			{notice&&<div className={`chat-workspace-notice ${notice.kind}`}>{notice.text}</div>}
+			{dragging&&<div className="workspace-drop-overlay"><UploadCloud size={27}/><b>{t('workspace.dropFilesHere')}</b><span>{path}</span></div>}
+		</aside>
+		{preview&&<div className="workspace-preview-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)setPreview(null)}}><section className="workspace-preview-dialog" role="dialog" aria-modal="true" aria-label={`${t('workspace.previewFile')} ${preview.path}`}><header><div><FileText size={18}/><span><b>{preview.path}</b><small>{formatFileSize(preview.size)} · SHA-256 {preview.sha256}</small></span></div><button onClick={()=>setPreview(null)} title={t('workspace.closePreview')}><X size={16}/></button></header>{preview.binary?<div className="workspace-binary-preview"><FileText size={30}/><b>{t('workspace.binary')}</b></div>:<pre>{preview.content||''}</pre>}</section></div>}
+	</>
 }
 
-function QuickWorkspaceUpload({workspace,refresh}:{workspace:WorkspaceCapability;refresh:()=>Promise<void>}){
+function QuickWorkspaceUpload({workspace}:{workspace:WorkspaceCapability}){
 	const {t}=useTranslation()
 	const [busy,setBusy]=useState(false),[status,setStatus]=useState(''),[inputKey,setInputKey]=useState(0)
 	useEffect(()=>{if(status!=='uploaded')return;const timer=window.setTimeout(()=>setStatus(''),3000);return()=>window.clearTimeout(timer)},[status])
-	const choose=async(event:React.ChangeEvent<HTMLInputElement>)=>{const file=event.target.files?.[0];if(!file)return;setBusy(true);setStatus('');try{await api.uploadWorkspaceFile(workspace.id,file,file.name);setStatus('uploaded');await refresh()}catch(err){setStatus(errorText(err))}finally{setBusy(false);setInputKey(value=>value+1)}}
+	const choose=async(event:React.ChangeEvent<HTMLInputElement>)=>{const file=event.target.files?.[0];if(!file)return;setBusy(true);setStatus('');try{await api.uploadWorkspaceFile(workspace.id,file,file.name);setStatus('uploaded')}catch(err){setStatus(errorText(err))}finally{setBusy(false);setInputKey(value=>value+1)}}
 	return <label className={`quick-workspace-upload ${busy?'busy':''} ${status&&status!=='uploaded'?'error':''}`} title={status&&status!=='uploaded'?status:t('workspace.uploadTo',{id:workspace.id})}><UploadCloud size={12}/><b>{busy?t('common.uploading'):status==='uploaded'?t('workspace.uploadedShort'):status?t('workspace.uploadFailed'):t('workspace.uploadFile')}</b><input key={inputKey} type="file" disabled={busy} onChange={event=>void choose(event)}/></label>
 }
 
@@ -816,6 +913,11 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const workspaceID=request?textValue(request.workspace_id):''
 	const relativePath=request?textValue(request.relative_path):''
 	const requestMode=request?textValue(request.mode):''
+	const unifiedFileRead=entry.tool==='ssh_file_read'||entry.tool==='workspace_file_read'
+	const fileSearchMode=unifiedFileRead&&(requestMode==='remote_search'||requestMode==='workspace_search')
+	const fileReadMode=unifiedFileRead&&(requestMode==='remote_read'||requestMode==='workspace_read')
+	const structuredFileOperation=fileReadMode||fileSearchMode
+	const searchPattern=request?textValue(request.search_pattern):''
 	const workspaceShellBackend=request?textValue(request.workspace_shell_backend):''
 	const workspaceTransfer=requestMode==='workspace_upload'
 	const sshTransfer=requestMode==='ssh_file_transfer'
@@ -824,29 +926,43 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const sourceHostName=hosts.find(host=>host.id===sourceHostID||host.name===sourceHostID)?.name||sourceHostID
 	const file=jsonRecord(payload.file)||jsonRecord(resultPayload?.file)
 	const filePath=textValue(file?.path)||remotePath||relativePath
+	const fileTarget=`${workspaceID?`${workspaceID}:`:''}${filePath}`
+	const eventToolLabel=structuredFileOperation?t(fileSearchMode?(workspaceID?'toolNames.workspace_file_search_mode':'toolNames.ssh_file_search_mode'):(workspaceID?'toolNames.workspace_file_read':'toolNames.ssh_file_read')):toolLabel(entry.tool||'')
+	const fileOperationParameters:Array<Array<unknown>>=structuredFileOperation&&request?[
+		...(workspaceID?[["workspace_id",workspaceID]]:[["host_id",hostID]]),
+		["path",filePath],
+		...(fileSearchMode?[["pattern",searchPattern],["context_lines",numberValue(request.context_lines)],["max_matches",numberValue(request.max_matches)]]:[
+			...(workspaceID?[]:[["metadata_only",request.metadata_only===true]]),
+			["max_bytes",numberValue(request.max_bytes)],
+			["offset_bytes",numberValue(request.offset_bytes)],
+			...(workspaceID?[]:[["tail_lines",numberValue(request.tail_lines)]])
+		]),
+		...(workspaceID?[]:[["elevated",request.elevated===true]])
+	]:[]
 	const transferSummary=workspaceTransfer?`${workspaceID}:${relativePath} → ${remotePath}`:sshTransfer?`${sourceHostName}:${sourcePath} → ${hostName}:${remotePath}`:''
   const planSteps=Array.isArray(payload.steps)?payload.steps.map(jsonRecord).filter((step):step is JsonRecord=>!!step):[]
   const planSummary=textValue(payload.goal)||textValue(planSteps.find(step=>textValue(step.status)==='in_progress'||textValue(step.status)==='blocked')?.title)
-	const operation=filePath||(script?t('tool.bashScript'):program||toolLabel(entry.tool||'')||t('tool.result'))
+	const operation=filePath||(script?t('tool.bashScript'):program||eventToolLabel||t('tool.result'))
   const args=request&&Array.isArray(request.args)?request.args.map(value=>String(value)):[]
   const env=request?jsonRecord(request.env):undefined
 	const rawStdout=textValue(payload.stdout)||textValue(resultPayload?.stdout)||run?.stdout_redacted||''
 	const stdout=change?cleanFileChangeOutput(rawStdout):rawStdout
   const stderr=textValue(payload.stderr)||textValue(resultPayload?.stderr)||run?.stderr_redacted||run?.error||''
   const stdoutPreview=latestOutput(stdout)
-	const commandSummary=transferSummary||filePath||program||(script?compactScript(script):'')||planSummary||operation
+	const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||operation
   const instruction=textValue(payload.operator_instruction)||textValue(taskPayload?.operator_instruction)||textValue(resultPayload?.operator_instruction)
   const rawPayload={...payload};delete rawPayload._display
   const [expanded,setExpanded]=useState(false)
   const resultExitCode=resultPayload?.exit_code
   const exitCode=typeof payload.exit_code==='number'?payload.exit_code:typeof resultExitCode==='number'?resultExitCode:run?.exit_code??'—'
   return <details className={`tool-event tool-event-rich ${status}`} open={expanded} onToggle={event=>setExpanded(event.currentTarget.open)}>
-	<summary><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><b>{toolLabel(entry.tool||'')||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div><span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>{t('tool.latestStdout',{count:Math.min(3,stdoutPreview.split('\n').length)})}</span><pre>{stdoutPreview}</pre></div>}</summary>
+	<summary><div className="tool-summary-icon"><TerminalSquare size={15}/></div><div className="tool-summary-copy"><b>{eventToolLabel||entry.tool||t('common.functions')}:</b><code title={commandSummary}>{commandSummary}</code></div><span className={`tool-status ${status}`}>{t(`statusLabels.${status}`,{defaultValue:status.replaceAll('_',' ')})}</span><ChevronRight size={14}/>{stdoutPreview&&<div className="tool-summary-preview"><span>{t('tool.latestStdout',{count:Math.min(3,stdoutPreview.split('\n').length)})}</span><pre>{stdoutPreview}</pre></div>}</summary>
     <div className="tool-event-body">
       {request?<div className="tool-execution-layout">
         <section className="tool-command-pane">
-		  <div className="tool-command-head"><span>{filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
-			  <div className="tool-command-block">{workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
+		  <div className="tool-command-head"><span>{structuredFileOperation?t(fileSearchMode?'tool.searchOperation':'tool.readOperation'):filePath?t('tool.fileOperation'):script?t('tool.fullScript'):t('tool.fullCommand')}</span>{workspaceShellBackend&&<em><TerminalSquare size={12}/>{workspaceShellBackend==='host'?t('approval.hostShell'):'Bubblewrap'}</em>}{request.elevated===true&&<em><ShieldAlert size={12}/>sudo / root</em>}</div>
+			  <div className="tool-command-block">{workspaceTransfer?<pre>workspace_upload {workspaceID}:{relativePath} → {remotePath}</pre>:sshTransfer?<pre>{sourceHostName}:{sourcePath} → {hostName}:{remotePath}</pre>:structuredFileOperation?<pre>{fileSearchMode?'search':'read'} {fileTarget}</pre>:filePath?<pre>{requestMode} {workspaceID?`${workspaceID}:`:''}{filePath}</pre>:script?<pre>{script}</pre>:program?<pre><span className="prompt-sign">$</span> {program}</pre>:<pre>{requestMode} {remotePath}</pre>}</div>
+		  {fileOperationParameters.length>0&&<CompactTable title={t('tool.actualParameters')} columns={[t('tool.parameter'),t('tool.value')]} rows={fileOperationParameters}/>}
 		  {change&&textValue(change.diff)&&<DiffViewer change={change}/>}
 		  {program&&<CompactTable title={t('tool.originalArgs')} columns={[t('tool.index'),t('tool.value')]} rows={[[0,textValue(request.program)],...args.map((arg,index)=>[index+1,JSON.stringify(arg)])]}/>}
 		  {env&&Object.keys(env).length>0&&<CompactTable title={t('tool.environment')} columns={[t('tool.key'),t('tool.value')]} rows={Object.entries(env).map(([key,value])=>[key,String(value)])}/>}
@@ -1401,6 +1517,7 @@ function ModelsPage({providers,health,refresh}:{providers:ModelProvider[];health
   const [form,setForm]=useState<ModelProviderInput>(emptyProviderForm)
   const [notice,setNotice]=useState('')
   const [busy,setBusy]=useState('')
+	const [deleteCandidate,setDeleteCandidate]=useState<ModelProvider|null>(null)
   const [catalog,setCatalog]=useState<string[]>([])
   const [discovering,setDiscovering]=useState(false)
   const editing=!!form.id
@@ -1414,7 +1531,7 @@ function ModelsPage({providers,health,refresh}:{providers:ModelProvider[];health
 	const save=async(event:FormEvent)=>{event.preventDefault();setBusy('save');try{const saved=await api.saveModelProvider(form);setNotice(t('models.saved',{name:saved.name}));setShowForm(false);setForm(emptyProviderForm);await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
 	const activate=async(provider:ModelProvider)=>{setBusy(provider.id);try{await api.activateModelProvider(provider.id);setNotice(t('models.activated',{name:provider.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
 	const test=async(provider:ModelProvider)=>{setBusy(`test-${provider.id}`);try{const result=await api.testModelProvider(provider.id);setNotice(t('models.healthy',{name:provider.name,response:result.response,latency:result.latency_ms}))}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
-	const remove=async(provider:ModelProvider)=>{if(!confirm(`${t('models.deleteConfirm',{name:provider.name})}${provider.active?t('models.deleteFallback'):''}`))return;setBusy(provider.id);try{await api.deleteModelProvider(provider.id);setNotice(t('models.deleted',{name:provider.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('')}}
+	const remove=async()=>{const provider=deleteCandidate;if(!provider)return;setBusy(`delete-${provider.id}`);setNotice('');try{await api.deleteModelProvider(provider.id);setNotice(t('models.deleted',{name:provider.name}));await refresh()}catch(err){setNotice(errorText(err))}finally{setBusy('');setDeleteCandidate(null)}}
 
   return <div className="page-stack">
 	<div className="page-actions"><div/><button className="primary" onClick={openCreate}><Plus size={16}/>{t('models.add')}</button></div>
@@ -1438,9 +1555,17 @@ function ModelsPage({providers,health,refresh}:{providers:ModelProvider[];health
 	  <div className="model-card-head"><div className="provider-glyph"><Cpu size={21}/></div><div><h3>{provider.name}</h3><span>{providerLabels[provider.kind]}</span></div>{provider.active&&<em><Zap size={12}/>{t('models.active')}</em>}</div>
       <div className="model-name">{provider.model}</div>
 	  <dl><div><dt>{t('models.endpoint')}</dt><dd>{provider.base_url||t('models.providerDefault')}</dd></div><div><dt>{t('models.proxy')}</dt><dd>{provider.proxy_url||t('models.noProxy')}{provider.has_proxy_password?` · ${t('models.proxyAuth')}`:''}</dd></div><div><dt>{t('models.credential')}</dt><dd>{provider.has_api_key?t('models.encryptedKey'):t('models.noApiKey')}</dd></div><div><dt>{t('common.updated')}</dt><dd>{new Date(provider.updated_at).toLocaleString(localeFor(instance.language))}</dd></div></dl>
-	  <div className="model-actions"><button onClick={()=>test(provider)} disabled={!!busy}><Activity size={14}/>{busy===`test-${provider.id}`?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(provider)} disabled={!!busy}><Edit3 size={14}/>{t('common.edit')}</button>{!provider.active&&<button className="use-model" onClick={()=>activate(provider)} disabled={!!busy}><Zap size={14}/>{busy===provider.id?t('models.switching'):t('models.useModel')}</button>}<button className="danger" title={t('common.delete')} onClick={()=>remove(provider)} disabled={!!busy}><Trash2 size={14}/></button></div>
+	  <div className="model-actions"><button onClick={()=>test(provider)} disabled={!!busy}><Activity size={14}/>{busy===`test-${provider.id}`?t('common.testing'):t('common.test')}</button><button onClick={()=>openEdit(provider)} disabled={!!busy}><Edit3 size={14}/>{t('common.edit')}</button>{!provider.active&&<button className="use-model" onClick={()=>activate(provider)} disabled={!!busy}><Zap size={14}/>{busy===provider.id?t('models.switching'):t('models.useModel')}</button>}<button className="danger" title={t('common.delete')} onClick={()=>setDeleteCandidate(provider)} disabled={!!busy}><Trash2 size={14}/></button></div>
     </article>)}</div>
 		{!providers.length&&<Empty icon={<Cpu/>} title={t('models.emptyTitle')}/>}
+		{deleteCandidate&&<DestructiveConfirmDialog
+			label={t('models.deleteDialogLabel')}
+			title={t('models.deleteTitle',{name:deleteCandidate.name})}
+			description={`${t('models.deleteText')}${deleteCandidate.active?` ${t('models.deleteActiveText')}`:''}`}
+			busy={busy===`delete-${deleteCandidate.id}`}
+			onCancel={()=>setDeleteCandidate(null)}
+			onConfirm={()=>void remove()}
+		/>}
   </div>
 }
 

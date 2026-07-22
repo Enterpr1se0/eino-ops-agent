@@ -529,6 +529,136 @@ func TestQueryDoesNotRetryAfterToolActivityWithoutFinalAnswer(t *testing.T) {
 	}
 }
 
+func TestQueryPersistsOnlyTerminalAssistantOutput(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	toolCall := schema.ToolCall{
+		ID: "call-1", Type: "function",
+		Function: schema.FunctionCall{Name: "ssh_exec", Arguments: `{}`},
+	}
+	preamble := schema.AssistantMessage("I will inspect the host.", []schema.ToolCall{toolCall})
+	preamble.ResponseMeta = &schema.ResponseMeta{FinishReason: "tool_calls"}
+	terminal := schema.AssistantMessage("Host memory is stable.", nil)
+	terminal.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop"}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(preamble, nil, schema.Assistant, ""),
+		adk.EventFromMessage(schema.ToolMessage("tool completed", "call-1", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec"),
+		adk.EventFromMessage(terminal, nil, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st}
+
+	answer, err := runtime.Query(ctx, "session_terminal", "inspect host", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Host memory is stable." {
+		t.Fatalf("answer = %q", answer)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_terminal", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "assistant" || messages[2].Content != answer {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+}
+
+func TestQueryRejectsReasoningOnlyTerminalOutputAfterToolActivity(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	toolCall := schema.ToolCall{
+		ID: "call-1", Type: "function",
+		Function: schema.FunctionCall{Name: "ssh_exec", Arguments: `{}`},
+	}
+	preamble := schema.AssistantMessage("I will inspect the host.", []schema.ToolCall{toolCall})
+	preamble.ResponseMeta = &schema.ResponseMeta{FinishReason: "tool_calls"}
+	reasoningOnly := &schema.Message{
+		Role: schema.Assistant, ReasoningContent: "I have the latest data and will summarize it.",
+		ResponseMeta: &schema.ResponseMeta{FinishReason: "stop"},
+	}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(preamble, nil, schema.Assistant, ""),
+		adk.EventFromMessage(schema.ToolMessage("tool completed", "call-1", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec"),
+		adk.EventFromMessage(reasoningOnly, nil, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st}
+	var emitted []Event
+
+	_, err = runtime.Query(ctx, "session_reasoning_only", "inspect host", func(event Event) {
+		emitted = append(emitted, event)
+	})
+	if !errors.Is(err, ErrEmptyResponse) {
+		t.Fatalf("error = %v", err)
+	}
+	calls, _ := runner.snapshot()
+	if calls != 1 {
+		t.Fatalf("unsafe retry after tool activity: calls = %d", calls)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_reasoning_only", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 || messages[0].Role != "user" || messages[0].Status != "failed" || messages[1].Role != "tool" || messages[2].Role != "reasoning" {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+	for _, event := range emitted {
+		if event.Type == "done" {
+			t.Fatalf("reasoning-only query emitted done: %#v", emitted)
+		}
+	}
+}
+
+func TestQueryStreamingPersistsOnlyTerminalAssistantOutput(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	toolCall := schema.ToolCall{
+		ID: "call-1", Type: "function",
+		Function: schema.FunctionCall{Name: "ssh_exec", Arguments: `{}`},
+	}
+	preambleStream := schema.StreamReaderFromArray([]*schema.Message{
+		{Role: schema.Assistant, Content: "I will "},
+		{Role: schema.Assistant, Content: "inspect.", ToolCalls: []schema.ToolCall{toolCall}, ResponseMeta: &schema.ResponseMeta{FinishReason: "tool_calls"}},
+	})
+	terminalStream := schema.StreamReaderFromArray([]*schema.Message{
+		{Role: schema.Assistant, ReasoningContent: "The command completed successfully."},
+		{Role: schema.Assistant, Content: "Host memory "},
+		{Role: schema.Assistant, Content: "is stable.", ResponseMeta: &schema.ResponseMeta{FinishReason: "stop"}},
+	})
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(nil, preambleStream, schema.Assistant, ""),
+		adk.EventFromMessage(schema.ToolMessage("tool completed", "call-1", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec"),
+		adk.EventFromMessage(nil, terminalStream, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, store: st}
+
+	answer, err := runtime.Query(ctx, "session_stream_terminal", "inspect host", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Host memory is stable." {
+		t.Fatalf("answer = %q", answer)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_stream_terminal", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 4 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "reasoning" || messages[3].Role != "assistant" || messages[3].Content != answer {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+}
+
 func TestNextQueryReceivesToolEvidenceFromFailedTurn(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")

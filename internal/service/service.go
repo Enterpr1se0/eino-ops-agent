@@ -1348,6 +1348,14 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 	}
 	approvedReq := req
 	transportReq := req
+	if req.Mode == domain.ExecRemoteRead {
+		transportReq.Mode = domain.ExecScript
+		transportReq.Script = buildRemoteFileReadScript(req)
+	}
+	if req.Mode == domain.ExecRemoteSearch {
+		transportReq.Mode = domain.ExecScript
+		transportReq.Script = buildRemoteFileSearchScript(req)
+	}
 	if req.Mode == domain.ExecRemoteEdit {
 		prepared, prepareErr := s.prepareRemoteFileChange(req)
 		if prepareErr != nil {
@@ -1486,6 +1494,25 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 			return fmt.Errorf("invalid workspace execution target")
 		}
 		return nil
+	}
+	switch req.Mode {
+	case domain.ExecRemoteRead:
+		if req.RemotePath == "" {
+			return fmt.Errorf("remote file read requires an absolute path")
+		}
+		if req.MetadataOnly && (req.MaxBytes != 0 || req.OffsetBytes != 0 || req.TailLines != 0) {
+			return fmt.Errorf("metadata_only cannot be combined with max_bytes, offset_bytes, or tail_lines")
+		}
+		if req.MaxBytes < 0 || req.TailLines < 0 || (req.OffsetBytes != 0 && req.TailLines != 0) {
+			return fmt.Errorf("invalid remote file read range")
+		}
+	case domain.ExecRemoteSearch:
+		if req.RemotePath == "" || req.SearchPattern == "" {
+			return fmt.Errorf("remote file search requires an absolute path and pattern")
+		}
+		if req.ContextLines < 0 || req.MaxMatches < 0 {
+			return fmt.Errorf("remote file search limits must be non-negative")
+		}
 	}
 	if req.Mode == domain.ExecSSHFileTransfer && req.Elevated {
 		return fmt.Errorf("elevated mode is not supported for SFTP transfers")
@@ -1729,7 +1756,7 @@ func (s *Service) CancelTask(id, actor string) error {
 }
 
 func (s *Service) ReadFile(ctx context.Context, hostID, path string, maxBytes int, actor string) (domain.ExecResult, error) {
-	return s.ReadFileAdvanced(ctx, hostID, path, maxBytes, 0, 0, false, actor)
+	return s.ReadFileAdvanced(ctx, hostID, path, false, maxBytes, 0, 0, false, actor)
 }
 
 func (s *Service) ListFiles(ctx context.Context, hostID, path string, actor string) (domain.ExecResult, error) {

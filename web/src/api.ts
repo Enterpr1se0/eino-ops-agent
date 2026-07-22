@@ -99,6 +99,10 @@ export function chatAttachmentURL(sessionId:string,attachmentId:string){
 	return `/api/v1/chat/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`
 }
 
+export function workspaceFileEventsURL(workspaceId:string,path:string){
+	return `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/events?path=${encodeURIComponent(path)}`
+}
+
 export async function streamChat(sessionId: string, message: string, images:File[], onEvent: (event: AgentEvent) => void, signal?: AbortSignal) {
 	const body=new FormData()
 	body.set('session_id',sessionId)

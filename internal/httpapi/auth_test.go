@@ -27,7 +27,7 @@ func TestWebAuthenticationCookieAndCSRF(t *testing.T) {
 	if err := auth.Initialize(ctx, "correct horse battery staple"); err != nil {
 		t.Fatal(err)
 	}
-	handler := New(nil, nil, auth).Handler()
+	handler := New(nil, nil, auth, Options{}).Handler()
 
 	login := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"password":"correct horse battery staple"}`))
 	login.Header.Set("Content-Type", "application/json")
@@ -87,7 +87,7 @@ func TestWebAuthenticationCookieAndCSRF(t *testing.T) {
 }
 
 func TestUnknownAPIRouteReturnsJSONNotSPA(t *testing.T) {
-	handler := New(nil, nil, nil).Handler()
+	handler := New(nil, nil, nil, Options{}).Handler()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/no-such-endpoint", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -124,7 +124,7 @@ func TestSPAHandlerServesAssetsAndIndexFallback(t *testing.T) {
 }
 
 func TestAgentToolsEndpointReportsAnUnloadedRuntimeWithoutPanicking(t *testing.T) {
-	handler := New(nil, nil, nil).Handler()
+	handler := New(nil, nil, nil, Options{}).Handler()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/agent/tools", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -146,7 +146,7 @@ func TestAgentToolsEndpointReportsAnUnloadedRuntimeWithoutPanicking(t *testing.T
 }
 
 func TestLogExportReturnsDownloadableZip(t *testing.T) {
-	handler := New(nil, nil, nil).Handler()
+	handler := New(nil, nil, nil, Options{Version: "test-version"}).Handler()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/logs/export", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -157,20 +157,37 @@ func TestLogExportReturnsDownloadableZip(t *testing.T) {
 	if contentType := response.Header().Get("Content-Type"); contentType != "application/zip" {
 		t.Fatalf("log export content type = %q", contentType)
 	}
-	if disposition := response.Header().Get("Content-Disposition"); !strings.HasPrefix(disposition, "attachment;") || !strings.Contains(disposition, "opspilot-logs-") {
+	if disposition := response.Header().Get("Content-Disposition"); !strings.HasPrefix(disposition, "attachment;") || !strings.Contains(disposition, "opspilot-diagnostics-") {
 		t.Fatalf("log export content disposition = %q", disposition)
 	}
 	archive, err := zip.NewReader(bytes.NewReader(response.Body.Bytes()), int64(response.Body.Len()))
 	if err != nil {
 		t.Fatalf("parse log export: %v", err)
 	}
-	if len(archive.File) != 1 || archive.File[0].Name != "ops-agent-memory.jsonl" {
+	if len(archive.File) != 2 || archive.File[0].Name != "diagnostics.json" || archive.File[1].Name != "ops-agent-memory.jsonl" {
 		t.Fatalf("unexpected log export entries: %#v", archive.File)
+	}
+	manifest, err := archive.File[0].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manifest.Close()
+	var diagnostics struct {
+		SchemaVersion int `json:"schema_version"`
+		Application   struct {
+			Version string `json:"version"`
+		} `json:"application"`
+	}
+	if err := json.NewDecoder(manifest).Decode(&diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	if diagnostics.SchemaVersion != 1 || diagnostics.Application.Version != "test-version" {
+		t.Fatalf("unexpected diagnostics: %#v", diagnostics)
 	}
 }
 
 func TestCancelChatSessionReportsUnavailableRuntime(t *testing.T) {
-	handler := New(nil, nil, nil).Handler()
+	handler := New(nil, nil, nil, Options{}).Handler()
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/chat/session_test/cancel", bytes.NewBufferString(`{}`))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
