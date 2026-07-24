@@ -282,19 +282,43 @@ func TestWorkspaceReadNegativeOffsetReadsFromFileEnd(t *testing.T) {
 
 func TestWorkspaceSearchReturnsLiteralMatchesWithContext(t *testing.T) {
 	svc, root := newWorkspaceService(t, "read_only")
-	content := "before\nneedle one\nmiddle\nneedle two\nafter\n"
+	content := "before\nneedle one\nmiddle\nneedle two\nafter\nport|socks\n"
 	if err := os.WriteFile(filepath.Join(root, "search.log"), []byte(content), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	result := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
-		return svc.SearchWorkspace(ctx, "project", "search.log", "needle", 1, 4, "test")
+		return svc.SearchWorkspace(ctx, "project", "search.log", "needle", domain.FileSearchLiteral, 1, "test")
 	})
-	want := "1-before\n2:needle one\n3-middle\n4:needle two\n"
+	want := "1-before\n2:needle one\n3-middle\n4:needle two\n5-after\n"
 	if result.Stdout != want {
 		t.Fatalf("Workspace search output = %q, want %q", result.Stdout, want)
 	}
-	if _, err := svc.SearchWorkspace(context.Background(), "project", "search.log", "needle", -1, 0, "test"); err == nil {
+	if result.Search == nil || !result.Search.Found || result.Search.MatchMode != domain.FileSearchLiteral {
+		t.Fatalf("Workspace literal search metadata = %#v", result.Search)
+	}
+	literalPipe := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.SearchWorkspace(ctx, "project", "search.log", "port|socks", domain.FileSearchLiteral, 0, "test")
+	})
+	if literalPipe.Stdout != "6:port|socks\n" {
+		t.Fatalf("Workspace literal search interpreted pipe as regex: %q", literalPipe.Stdout)
+	}
+	regex := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.SearchWorkspace(ctx, "project", "search.log", "needle|port", domain.FileSearchRegex, 0, "test")
+	})
+	if regex.Stdout != "2:needle one\n4:needle two\n6:port|socks\n" || regex.Search == nil || !regex.Search.Found {
+		t.Fatalf("Workspace regex search = %#v", regex)
+	}
+	noMatches := runApprovedWorkspaceAccess(t, svc, func(ctx context.Context) (domain.ExecResult, error) {
+		return svc.SearchWorkspace(ctx, "project", "search.log", "absent", domain.FileSearchLiteral, 0, "test")
+	})
+	if noMatches.Status != "completed" || noMatches.Stdout != "" || noMatches.Search == nil || noMatches.Search.Found || noMatches.Message != "no matches found" {
+		t.Fatalf("Workspace no-match result = %#v", noMatches)
+	}
+	if _, err := svc.SearchWorkspace(context.Background(), "project", "search.log", "needle", domain.FileSearchLiteral, -1, "test"); err == nil {
 		t.Fatal("Workspace search accepted negative context_lines")
+	}
+	if _, err := svc.SearchWorkspace(context.Background(), "project", "search.log", "[", domain.FileSearchRegex, 0, "test"); err == nil || !strings.Contains(err.Error(), "POSIX") {
+		t.Fatalf("Workspace search accepted invalid regex: %v", err)
 	}
 }
 

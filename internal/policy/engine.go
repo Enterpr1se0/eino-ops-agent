@@ -311,7 +311,11 @@ func shellSource(req domain.ExecRequest) (string, error) {
 	case domain.ExecWorkspaceDirectoryList:
 		return "ls " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
 	case domain.ExecWorkspaceSearch:
-		return "grep " + shellQuote(req.SearchPattern) + " " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
+		flag, err := fileSearchFlag(req.SearchMatchMode)
+		if err != nil {
+			return "", err
+		}
+		return "grep " + flag + " " + shellQuote(req.SearchPattern) + " " + shellQuote(req.WorkspaceID+"/"+req.RelativePath), nil
 	case domain.ExecRemoteRead:
 		if !posixpath.IsAbs(req.RemotePath) {
 			return "", fmt.Errorf("remote file read requires an absolute path")
@@ -321,7 +325,11 @@ func shellSource(req domain.ExecRequest) (string, error) {
 		if !posixpath.IsAbs(req.RemotePath) || req.SearchPattern == "" {
 			return "", fmt.Errorf("remote file search requires an absolute path and pattern")
 		}
-		return "grep " + shellQuote(req.SearchPattern) + " " + shellQuote(req.RemotePath), nil
+		flag, err := fileSearchFlag(req.SearchMatchMode)
+		if err != nil {
+			return "", err
+		}
+		return "grep " + flag + " " + shellQuote(req.SearchPattern) + " " + shellQuote(req.RemotePath), nil
 	case domain.ExecWorkspaceEdit:
 		if req.WorkspaceID == "" || req.RelativePath == "" || req.Change == nil || req.Change.Diff == "" {
 			return "", fmt.Errorf("workspace edit requires a workspace file and a structured change")
@@ -412,6 +420,17 @@ func printNode(node syntax.Node) string {
 	var buf bytes.Buffer
 	_ = syntax.NewPrinter().Print(&buf, node)
 	return buf.String()
+}
+
+func fileSearchFlag(matchMode domain.FileSearchMatchMode) (string, error) {
+	switch matchMode {
+	case domain.FileSearchLiteral:
+		return "-F", nil
+	case domain.FileSearchRegex:
+		return "-E", nil
+	default:
+		return "", fmt.Errorf("file search match_mode must be literal or regex")
+	}
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }

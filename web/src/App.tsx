@@ -1021,6 +1021,10 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const fileReadMode=unifiedFileRead&&(requestMode==='remote_read'||requestMode==='workspace_read')
 	const structuredFileOperation=fileReadMode||fileSearchMode
 	const searchPattern=request?textValue(request.search_pattern):''
+	const searchResult=jsonRecord(payload.search)||jsonRecord(resultPayload?.search)
+	const searchMatchMode=(request?textValue(request.search_match_mode):'')||textValue(searchResult?.match_mode)
+	const searchMatchModeLabel=searchMatchMode==='literal'?t('tool.matchModeLiteral'):searchMatchMode==='regex'?t('tool.matchModeRegex'):searchMatchMode||'—'
+	const searchFound=searchResult?.found===true
 	const workspaceShellBackend=request?textValue(request.workspace_shell_backend):''
 	const workspaceTransfer=requestMode==='workspace_upload'||entry.tool==='workspace_file_upload'
 	const sshTransfer=requestMode==='ssh_file_transfer'||entry.tool==='ssh_file_transfer'
@@ -1036,7 +1040,7 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const fileOperationParameters:Array<Array<unknown>>=structuredFileOperation&&request?[
 		...(workspaceID?[["workspace_id",workspaceID]]:[["host_id",hostID]]),
 		["path",filePath],
-		...(fileSearchMode?[["pattern",searchPattern],["context_lines",numberValue(request.context_lines)],["max_matches",numberValue(request.max_matches)]]:[
+		...(fileSearchMode?[["match_mode",searchMatchModeLabel],["pattern",searchPattern],["context_lines",numberValue(request.context_lines)]]:[
 			...(workspaceID?[]:[["metadata_only",request.metadata_only===true]]),
 			["max_bytes",numberValue(request.max_bytes)],
 			["offset_bytes",numberValue(request.offset_bytes)],
@@ -1054,7 +1058,7 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
 	const stdout=change?cleanFileChangeOutput(rawStdout):rawStdout
   const stderr=textValue(payload.stderr)||textValue(resultPayload?.stderr)||run?.stderr_redacted||run?.error||''
   const stdoutPreview=latestOutput(stdout)
-	const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||operation
+	const commandSummary=transferSummary||(fileSearchMode?`${fileTarget} · ${searchMatchModeLabel} pattern=${JSON.stringify(searchPattern)}`:filePath)||program||(script?compactScript(script):'')||planSummary||operation
 	const historyRuns=[...recordArray(payload.runs),...recordArray(resultPayload?.runs)]
 	const historyHostIDs=[...new Set(historyRuns.map(item=>textValue(item.host_id)).filter(Boolean))]
 	const listedHosts=[...recordArray(payload.hosts),...recordArray(resultPayload?.hosts)]
@@ -1102,6 +1106,7 @@ function ToolEventCard({entry,runs,hosts}:{entry:ChatEntry;runs:Run[];hosts:Host
         </aside>
       </div>:<GenericToolResult payload={payload}/>} 
 	  {file&&<FileMetadataPanel file={file}/>}
+	  {fileSearchMode&&searchResult&&<div className={`file-search-result ${searchFound?'found':'empty'}`}><Search size={15}/><div><b>{t(searchFound?'tool.searchMatched':'tool.searchNoMatches')}</b><span>{searchMatchModeLabel} · {searchPattern}</span></div></div>}
 	  {(textValue(payload.message)||textValue(payload.next_action))&&<div className={`tool-guidance ${payload.ok===false?'error':''}`}><ShieldAlert size={15}/><div><b>{textValue(payload.code)||t('tool.result')}</b>{textValue(payload.message)&&<p>{textValue(payload.message)}</p>}{textValue(payload.next_action)&&<small>{t('common.next')} · {textValue(payload.next_action)}</small>}</div></div>}
 	  {instruction&&<div className="tool-instruction"><ShieldAlert size={15}/><div><b>{t('tool.operatorInstruction')}</b><p>{instruction}</p></div></div>}
       {(stdout||stderr)&&<div className="tool-output-grid">{stdout&&<div className="tool-output stdout"><span>STDOUT</span><pre>{stdout}</pre></div>}{stderr&&<div className="tool-output stderr"><span>{t('tool.stderrResult')}</span><pre>{stderr}</pre></div>}</div>}
@@ -1206,6 +1211,12 @@ function ApprovalDialog({
   const requestMode = textValue(request.mode),
     relativePath = textValue(request.relative_path),
     remotePath = textValue(request.remote_path);
+  const searchMatchMode = textValue(request.search_match_mode);
+  const searchMatchModeLabel = searchMatchMode === "literal"
+    ? t("tool.matchModeLiteral")
+    : searchMatchMode === "regex"
+      ? t("tool.matchModeRegex")
+      : searchMatchMode || "—";
   const workspaceShellBackend = textValue(request.workspace_shell_backend);
   const hostWorkspaceShell =
     requestMode === "workspace_shell" && workspaceShellBackend === "host";
@@ -1278,7 +1289,7 @@ function ApprovalDialog({
       ? `${workspaceID}:${relativePath} → ${remotePath}`
     : fullProgram(request) ||
       script ||
-      `${requestMode} ${filePath}${fileSearchApproval ? ` · pattern=${JSON.stringify(textValue(request.search_pattern))}` : ""}`.trim() ||
+      `${requestMode} ${filePath}${fileSearchApproval ? ` · ${searchMatchModeLabel} pattern=${JSON.stringify(textValue(request.search_pattern))}` : ""}`.trim() ||
       t("approval.pendingOperation");
   const targetHostIdentity = [targetHost, target?.id && target.id !== targetHost ? target.id : approval.host_id !== targetHost ? approval.host_id : ''].filter(Boolean).join(' · ')
   const sourceHostIdentity = [sourceHost, source?.id && source.id !== sourceHost ? source.id : sourceHostID !== sourceHost ? sourceHostID : ''].filter(Boolean).join(' · ')
@@ -1301,9 +1312,9 @@ function ApprovalDialog({
         ["path", filePath],
         ...(fileSearchApproval
           ? [
+              ["match_mode", searchMatchModeLabel],
               ["pattern", textValue(request.search_pattern)],
               ["context_lines", numberValue(request.context_lines)],
-              ["max_matches", numberValue(request.max_matches)],
             ]
           : [
               ...(workspaceID

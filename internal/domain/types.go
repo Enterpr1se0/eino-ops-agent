@@ -396,40 +396,47 @@ const (
 	ExecSSHFileTransfer        ExecMode = "ssh_file_transfer"
 )
 
+type FileSearchMatchMode string
+
+const (
+	FileSearchLiteral FileSearchMatchMode = "literal"
+	FileSearchRegex   FileSearchMatchMode = "regex"
+)
+
 type ExecRequest struct {
-	HostID                    string            `json:"host_id" jsonschema:"registered host identifier; never an address or credential"`
-	Mode                      ExecMode          `json:"mode,omitempty" jsonschema:"program for argv execution or script for a reviewed bash script"`
-	Program                   string            `json:"program,omitempty" jsonschema:"remote executable name for program mode"`
-	Args                      []string          `json:"args,omitempty" jsonschema:"separate arguments; do not include shell quoting"`
-	Script                    string            `json:"script,omitempty" jsonschema:"bash script content for script mode"`
-	Change                    *FileChange       `json:"change,omitempty"`
-	Cwd                       string            `json:"cwd,omitempty" jsonschema:"absolute remote working directory, or a clean workspace-relative directory for workspace_shell"`
-	Env                       map[string]string `json:"env,omitempty" jsonschema:"non-secret environment values"`
-	Elevated                  bool              `json:"elevated,omitempty" jsonschema:"request root through the host sudo policy; never pass sudo or a password as a program or argument"`
-	TimeoutSeconds            int               `json:"timeout_seconds,omitempty" jsonschema:"1-600 seconds for synchronous execution"`
-	Reason                    string            `json:"reason" jsonschema:"why this command is necessary"`
-	ExpectedChanges           string            `json:"expected_changes,omitempty" jsonschema:"expected server changes"`
-	Rollback                  string            `json:"rollback,omitempty" jsonschema:"rollback instructions for mutations"`
-	RemotePath                string            `json:"remote_path,omitempty" jsonschema:"absolute remote file path for transfers"`
-	SourceHostID              string            `json:"source_host_id,omitempty" jsonschema:"registered source host identifier for host-to-host transfers"`
-	SourcePath                string            `json:"source_path,omitempty" jsonschema:"absolute source path for host-to-host transfers"`
-	Overwrite                 bool              `json:"overwrite,omitempty" jsonschema:"replace an existing transfer destination; defaults to false"`
-	ExpectedDestinationSHA256 string            `json:"expected_destination_sha256,omitempty" jsonschema:"destination SHA256 required when overwriting an existing file"`
-	WorkspaceID               string            `json:"workspace_id,omitempty" jsonschema:"registered workspace identifier"`
-	WorkspaceShellBackend     string            `json:"workspace_shell_backend,omitempty" jsonschema:"control-plane-selected workspace shell backend bound into approval"`
-	SSHConnectionDigest       string            `json:"ssh_connection_digest,omitempty" jsonschema:"control-plane-selected SSH connection revision bound into approval"`
-	SourceConnectionDigest    string            `json:"source_connection_digest,omitempty" jsonschema:"control-plane-selected source SSH connection revision bound into approval"`
-	RelativePath              string            `json:"relative_path,omitempty" jsonschema:"path relative to the workspace root"`
-	ExpectedSHA256            string            `json:"expected_sha256,omitempty" jsonschema:"workspace file version observed before mutation"`
-	Validator                 string            `json:"validator,omitempty" jsonschema:"allowlisted validator identifier"`
-	SearchPattern             string            `json:"search_pattern,omitempty" jsonschema:"literal file search pattern"`
-	ContextLines              int               `json:"context_lines,omitempty" jsonschema:"lines around each file search match"`
-	MaxMatches                int               `json:"max_matches,omitempty" jsonschema:"maximum file search result lines; zero means unlimited"`
-	MetadataOnly              bool              `json:"metadata_only,omitempty" jsonschema:"return remote file metadata without content"`
-	TailLines                 int               `json:"tail_lines,omitempty" jsonschema:"number of final remote file lines to return"`
-	OffsetBytes               int64             `json:"offset_bytes,omitempty" jsonschema:"file read offset; negative values count from the end"`
-	MaxBytes                  int               `json:"max_bytes,omitempty" jsonschema:"bounded file read length"`
-	LocalPath                 string            `json:"-"`
+	HostID                    string              `json:"host_id" jsonschema:"registered host identifier; never an address or credential"`
+	Mode                      ExecMode            `json:"mode,omitempty" jsonschema:"program for argv execution or script for a reviewed bash script"`
+	Program                   string              `json:"program,omitempty" jsonschema:"remote executable name for program mode"`
+	Args                      []string            `json:"args,omitempty" jsonschema:"separate arguments; do not include shell quoting"`
+	Script                    string              `json:"script,omitempty" jsonschema:"bash script content for script mode"`
+	Change                    *FileChange         `json:"change,omitempty"`
+	Cwd                       string              `json:"cwd,omitempty" jsonschema:"absolute remote working directory, or a clean workspace-relative directory for workspace_shell"`
+	Env                       map[string]string   `json:"env,omitempty" jsonschema:"non-secret environment values"`
+	Elevated                  bool                `json:"elevated,omitempty" jsonschema:"request root through the host sudo policy; never pass sudo or a password as a program or argument"`
+	TimeoutSeconds            int                 `json:"timeout_seconds,omitempty" jsonschema:"1-600 seconds for synchronous execution"`
+	Reason                    string              `json:"reason" jsonschema:"why this command is necessary"`
+	ExpectedChanges           string              `json:"expected_changes,omitempty" jsonschema:"expected server changes"`
+	Rollback                  string              `json:"rollback,omitempty" jsonschema:"rollback instructions for mutations"`
+	RemotePath                string              `json:"remote_path,omitempty" jsonschema:"absolute remote file path for transfers"`
+	SourceHostID              string              `json:"source_host_id,omitempty" jsonschema:"registered source host identifier for host-to-host transfers"`
+	SourcePath                string              `json:"source_path,omitempty" jsonschema:"absolute source path for host-to-host transfers"`
+	Overwrite                 bool                `json:"overwrite,omitempty" jsonschema:"replace an existing transfer destination; defaults to false"`
+	ExpectedDestinationSHA256 string              `json:"expected_destination_sha256,omitempty" jsonschema:"destination SHA256 required when overwriting an existing file"`
+	WorkspaceID               string              `json:"workspace_id,omitempty" jsonschema:"registered workspace identifier"`
+	WorkspaceShellBackend     string              `json:"workspace_shell_backend,omitempty" jsonschema:"control-plane-selected workspace shell backend bound into approval"`
+	SSHConnectionDigest       string              `json:"ssh_connection_digest,omitempty" jsonschema:"control-plane-selected SSH connection revision bound into approval"`
+	SourceConnectionDigest    string              `json:"source_connection_digest,omitempty" jsonschema:"control-plane-selected source SSH connection revision bound into approval"`
+	RelativePath              string              `json:"relative_path,omitempty" jsonschema:"path relative to the workspace root"`
+	ExpectedSHA256            string              `json:"expected_sha256,omitempty" jsonschema:"workspace file version observed before mutation"`
+	Validator                 string              `json:"validator,omitempty" jsonschema:"allowlisted validator identifier"`
+	SearchPattern             string              `json:"search_pattern,omitempty" jsonschema:"file search pattern"`
+	SearchMatchMode           FileSearchMatchMode `json:"search_match_mode,omitempty" jsonschema:"file search matching mode: literal or regex"`
+	ContextLines              int                 `json:"context_lines,omitempty" jsonschema:"lines around each file search match"`
+	MetadataOnly              bool                `json:"metadata_only,omitempty" jsonschema:"return remote file metadata without content"`
+	TailLines                 int                 `json:"tail_lines,omitempty" jsonschema:"number of final remote file lines to return"`
+	OffsetBytes               int64               `json:"offset_bytes,omitempty" jsonschema:"file read offset; negative values count from the end"`
+	MaxBytes                  int                 `json:"max_bytes,omitempty" jsonschema:"bounded file read length"`
+	LocalPath                 string              `json:"-"`
 }
 
 type ToolMeta struct {
@@ -448,20 +455,28 @@ type ToolFailure struct {
 
 type ExecResult struct {
 	ToolMeta
-	RunID               string        `json:"run_id"`
-	TaskID              string        `json:"task_id,omitempty"`
-	Status              string        `json:"status"`
-	Risk                RiskLevel     `json:"risk"`
-	ApprovalID          string        `json:"approval_id,omitempty"`
-	OperatorInstruction string        `json:"operator_instruction,omitempty"`
-	ExitCode            int           `json:"exit_code,omitempty"`
-	Stdout              string        `json:"stdout,omitempty"`
-	Stderr              string        `json:"stderr,omitempty"`
-	Duration            time.Duration `json:"duration,omitempty"`
-	PolicyHits          []string      `json:"policy_hits,omitempty"`
-	CompletedAt         time.Time     `json:"completed_at,omitempty"`
-	File                *FileMetadata `json:"file,omitempty"`
-	Change              *FileChange   `json:"change,omitempty"`
+	RunID               string            `json:"run_id"`
+	TaskID              string            `json:"task_id,omitempty"`
+	Status              string            `json:"status"`
+	Risk                RiskLevel         `json:"risk"`
+	ApprovalID          string            `json:"approval_id,omitempty"`
+	OperatorInstruction string            `json:"operator_instruction,omitempty"`
+	ExitCode            int               `json:"exit_code,omitempty"`
+	Stdout              string            `json:"stdout,omitempty"`
+	Stderr              string            `json:"stderr,omitempty"`
+	Duration            time.Duration     `json:"duration,omitempty"`
+	PolicyHits          []string          `json:"policy_hits,omitempty"`
+	CompletedAt         time.Time         `json:"completed_at,omitempty"`
+	File                *FileMetadata     `json:"file,omitempty"`
+	Change              *FileChange       `json:"change,omitempty"`
+	Search              *FileSearchResult `json:"search,omitempty"`
+}
+
+type FileSearchResult struct {
+	Found        bool                `json:"found"`
+	Pattern      string              `json:"pattern"`
+	MatchMode    FileSearchMatchMode `json:"match_mode"`
+	ContextLines int                 `json:"context_lines"`
 }
 
 type FileMetadata struct {

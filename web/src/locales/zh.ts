@@ -146,6 +146,7 @@ const zh = {
     permission: '权限', hostAuthority: '宿主机完整权限', sandbox: 'Bubblewrap 沙盒', managedSudo: '托管 sudo', normalUser: '普通用户', exitCode: '退出码', duration: '耗时', runId: '运行 ID',
     reason: '执行原因', expectedChanges: '预期变化', rollback: '回滚方案', result: '工具结果', operatorInstruction: '操作员指令',
     rawJson: '原始 JSON', fileEvidence: '文件变更', diff: '文件差异', fileEdit: '编辑文件', bytesRead: '读取大小', validated: '校验通过', mode: '权限模式', owner: '所有者', validator: '校验器', after: '修改后', index: '序号', key: '键', value: '值', stderrResult: 'STDERR / 结果', sensitive: '敏感内容已脱敏，请勿用占位内容覆盖原文件。',
+    matchModeLiteral: '字面量', matchModeRegex: '正则表达式', searchMatched: '已找到匹配项', searchNoMatches: '未找到匹配项',
     emptyResult: '工具执行完成。',
   },
   approval: {

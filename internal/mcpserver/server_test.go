@@ -58,7 +58,8 @@ func TestServerExposesMergedBackgroundTaskTools(t *testing.T) {
 			if marshalErr != nil {
 				t.Fatal(marshalErr)
 			}
-			fileReadFound = strings.Contains(string(schemaJSON), `"metadata_only"`) && strings.Contains(string(schemaJSON), `"pattern"`)
+			schema := string(schemaJSON)
+			fileReadFound = strings.Contains(schema, `"metadata_only"`) && strings.Contains(schema, `"pattern"`) && strings.Contains(schema, `"match_mode"`) && strings.Contains(schema, `"regex"`) && !strings.Contains(schema, `"max_matches"`)
 		}
 		if registered.Name == "ssh_history" {
 			historyFound = true

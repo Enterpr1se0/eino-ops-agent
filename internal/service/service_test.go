@@ -27,11 +27,13 @@ import (
 )
 
 type fakeTransport struct {
-	mu     sync.Mutex
-	calls  []domain.ExecRequest
-	hosts  []domain.Host
-	stdout []byte
-	stderr []byte
+	mu       sync.Mutex
+	calls    []domain.ExecRequest
+	hosts    []domain.Host
+	stdout   []byte
+	stderr   []byte
+	exitCode int
+	execErr  error
 }
 
 type fakeCommandExplainer struct {
@@ -105,12 +107,12 @@ func (f *fakeTransport) Exec(_ context.Context, connection sshx.ConnectionSpec, 
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
 	f.hosts = append(f.hosts, connection.Target)
-	stdout, stderr := f.stdout, f.stderr
+	stdout, stderr, exitCode, execErr := f.stdout, f.stderr, f.exitCode, f.execErr
 	f.mu.Unlock()
 	if stdout == nil {
 		stdout = []byte("password=secret-value\nok\n")
 	}
-	return sshx.RawResult{ExitCode: 0, Stdout: stdout, Stderr: stderr, Duration: time.Millisecond}, nil
+	return sshx.RawResult{ExitCode: exitCode, Stdout: stdout, Stderr: stderr, Duration: time.Millisecond}, execErr
 }
 
 func TestExecutionPreservesCompleteOutput(t *testing.T) {
@@ -973,7 +975,7 @@ func TestFileContentCommandsRequireOneTimeApproval(t *testing.T) {
 		{Mode: domain.ExecProgram, Program: "cat", Args: []string{"/etc/app.conf"}},
 		{Mode: domain.ExecScript, Script: "set -e\ngrep token /etc/app.conf"},
 		{Mode: domain.ExecRemoteRead, RemotePath: "/etc/app.conf"},
-		{Mode: domain.ExecWorkspaceSearch, WorkspaceID: "project", RelativePath: "app.conf", SearchPattern: "token"},
+		{Mode: domain.ExecWorkspaceSearch, WorkspaceID: "project", RelativePath: "app.conf", SearchPattern: "token", SearchMatchMode: domain.FileSearchLiteral},
 	} {
 		if !requiresOneTimeApproval(req) {
 			t.Fatalf("file content access permits session approval: %#v", req)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"eino-ops-agent/internal/domain"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
+	einojsonschema "github.com/eino-contrib/jsonschema"
 )
 
 // ToolDescriptor is the exact function metadata exposed to the main ChatModel.
@@ -149,16 +151,16 @@ type ScriptInput struct {
 }
 
 type FileReadInput struct {
-	HostID       string `json:"host_id" jsonschema:"registered host identifier"`
-	Path         string `json:"path" jsonschema:"absolute remote file path"`
-	MetadataOnly bool   `json:"metadata_only,omitempty" jsonschema:"return metadata and SHA256 without file content; defaults to false"`
-	MaxBytes     int    `json:"max_bytes,omitempty" jsonschema:"optional maximum bytes to return; omitted returns all remaining content"`
-	OffsetBytes  int64  `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset from the start; a negative value reads that many final bytes from the end; cannot be combined with tail_lines"`
-	TailLines    int    `json:"tail_lines,omitempty" jsonschema:"return the requested number of final lines; cannot be combined with offset_bytes"`
-	Pattern      string `json:"pattern,omitempty" jsonschema:"optional literal text to search for instead of returning a byte range"`
-	ContextLines int    `json:"context_lines,omitempty" jsonschema:"search mode only; lines around each literal match"`
-	MaxMatches   int    `json:"max_matches,omitempty" jsonschema:"search mode only; optional maximum result lines; omitted returns every match"`
-	Elevated     bool   `json:"elevated,omitempty" jsonschema:"read through managed sudo; requires break-glass approval"`
+	HostID       string                     `json:"host_id" jsonschema:"registered host identifier"`
+	Path         string                     `json:"path" jsonschema:"absolute remote file path"`
+	MetadataOnly bool                       `json:"metadata_only,omitempty" jsonschema:"return metadata and SHA256 without file content; defaults to false"`
+	MaxBytes     int                        `json:"max_bytes,omitempty" jsonschema:"optional maximum bytes to return; omitted returns all remaining content"`
+	OffsetBytes  int64                      `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset from the start; a negative value reads that many final bytes from the end; cannot be combined with tail_lines"`
+	TailLines    int                        `json:"tail_lines,omitempty" jsonschema:"return the requested number of final lines; cannot be combined with offset_bytes"`
+	Pattern      string                     `json:"pattern,omitempty" jsonschema:"optional search pattern; when set, match_mode is required and file range parameters are forbidden"`
+	MatchMode    domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"Search mode only and required with pattern. Use literal for exact text or regex for a POSIX regular expression such as port|socks|proxy."`
+	ContextLines int                        `json:"context_lines,omitempty" jsonschema:"search mode only; lines around each match"`
+	Elevated     bool                       `json:"elevated,omitempty" jsonschema:"read through managed sudo; requires break-glass approval"`
 }
 
 type FileListInput struct {
@@ -193,12 +195,12 @@ type WorkspacePathInput struct {
 }
 
 type WorkspaceReadInput struct {
-	Path         string `json:"path" jsonschema:"clean path relative to the workspace root"`
-	MaxBytes     int    `json:"max_bytes,omitempty" jsonschema:"optional maximum bytes returned; omitted returns all remaining content"`
-	OffsetBytes  int64  `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset from the start; a negative value reads that many final bytes from the end"`
-	Pattern      string `json:"pattern,omitempty" jsonschema:"optional literal text to search for instead of returning a byte range"`
-	ContextLines int    `json:"context_lines,omitempty" jsonschema:"search mode only; lines around each literal match"`
-	MaxMatches   int    `json:"max_matches,omitempty" jsonschema:"search mode only; optional maximum result lines; omitted returns every match"`
+	Path         string                     `json:"path" jsonschema:"clean path relative to the workspace root"`
+	MaxBytes     int                        `json:"max_bytes,omitempty" jsonschema:"optional maximum bytes returned; omitted returns all remaining content"`
+	OffsetBytes  int64                      `json:"offset_bytes,omitempty" jsonschema:"zero-based byte offset from the start; a negative value reads that many final bytes from the end"`
+	Pattern      string                     `json:"pattern,omitempty" jsonschema:"optional search pattern; when set, match_mode is required and file range parameters are forbidden"`
+	MatchMode    domain.FileSearchMatchMode `json:"match_mode,omitempty" jsonschema:"Search mode only and required with pattern. Use literal for exact text or regex for a POSIX regular expression such as port|socks|proxy."`
+	ContextLines int                        `json:"context_lines,omitempty" jsonschema:"search mode only; lines around each match"`
 }
 
 type WorkspaceFileEditInput struct {
@@ -206,6 +208,14 @@ type WorkspaceFileEditInput struct {
 	Diff      string `json:"diff" jsonschema:"complete unified diff containing one or more hunks for this file"`
 	Validator string `json:"validator,omitempty" jsonschema:"allowlisted workspace validator id"`
 	Reason    string `json:"reason" jsonschema:"evidence-based reason for the change"`
+}
+
+func fileSearchSchemaOption() toolutils.Option {
+	return toolutils.WithSchemaModifier(func(jsonTagName string, _ reflect.Type, _ reflect.StructTag, schema *einojsonschema.Schema) {
+		if jsonTagName == "match_mode" {
+			schema.Enum = []any{string(domain.FileSearchLiteral), string(domain.FileSearchRegex)}
+		}
+	})
 }
 
 type WorkspaceUploadInput struct {
@@ -270,9 +280,9 @@ func normalizeToolStatus(meta *domain.ToolMeta, status string) {
 		meta.Message = "the human operator rejected this operation"
 		meta.NextAction = rejectedOperationNextAction
 	case "failed":
-		meta.Message = "the operation failed; inspect stderr in this Tool result"
+		meta.Message = "the operation failed; inspect this Tool result for available error details"
 		meta.Retryable = true
-		meta.NextAction = "use the returned stderr as evidence, correct the cause, and do not repeat unchanged input"
+		meta.NextAction = "correct the reported cause before retrying; do not repeat unchanged input"
 	case "denied":
 		meta.Message = "the operation was denied by policy"
 		meta.NextAction = "respect the policy decision and choose a safer operation"
@@ -356,11 +366,14 @@ func RunFileReadTool(ctx context.Context, svc *service.Service, input FileReadIn
 	if searching && (input.MetadataOnly || input.MaxBytes != 0 || input.OffsetBytes != 0 || input.TailLines != 0) {
 		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid file read input: pattern cannot be combined with metadata_only, max_bytes, offset_bytes, or tail_lines"))
 	}
-	if !searching && (input.ContextLines != 0 || input.MaxMatches != 0) {
-		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid file read input: context_lines and max_matches require pattern"))
+	if searching && input.MatchMode == "" {
+		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid file read input: match_mode is required with pattern"))
+	}
+	if !searching && (input.MatchMode != "" || input.ContextLines != 0) {
+		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid file read input: match_mode and context_lines require pattern"))
 	}
 	if searching {
-		result, err := svc.SearchFile(ctx, input.HostID, input.Path, input.Pattern, input.ContextLines, input.MaxMatches, input.Elevated, actor)
+		result, err := svc.SearchFile(ctx, input.HostID, input.Path, input.Pattern, input.MatchMode, input.ContextLines, input.Elevated, actor)
 		return NormalizeExecToolResult(result, err)
 	}
 	if input.MetadataOnly && (input.MaxBytes != 0 || input.OffsetBytes != 0 || input.TailLines != 0) {
@@ -379,11 +392,14 @@ func RunWorkspaceFileReadTool(ctx context.Context, svc *service.Service, input W
 	if searching && (input.MaxBytes != 0 || input.OffsetBytes != 0) {
 		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: pattern cannot be combined with max_bytes or offset_bytes"))
 	}
-	if !searching && (input.ContextLines != 0 || input.MaxMatches != 0) {
-		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: context_lines and max_matches require pattern"))
+	if searching && input.MatchMode == "" {
+		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: match_mode is required with pattern"))
+	}
+	if !searching && (input.MatchMode != "" || input.ContextLines != 0) {
+		return NormalizeExecToolResult(domain.ExecResult{}, fmt.Errorf("invalid Workspace file read input: match_mode and context_lines require pattern"))
 	}
 	if searching {
-		result, err := svc.SearchWorkspace(ctx, workspace.ID, input.Path, input.Pattern, input.ContextLines, input.MaxMatches, actor)
+		result, err := svc.SearchWorkspace(ctx, workspace.ID, input.Path, input.Pattern, input.MatchMode, input.ContextLines, actor)
 		return NormalizeExecToolResult(result, err)
 	}
 	result, err := svc.ReadWorkspaceFile(ctx, workspace.ID, input.Path, input.MaxBytes, input.OffsetBytes, actor)
@@ -595,9 +611,9 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("ssh_file_read", "Read one remote file after one-time human approval. By default returns complete content; byte ranges, tail lines, and metadata-only reads are optional. Set pattern to search literal text instead, with optional context_lines and max_matches; searches also require one-time approval. Read-range parameters and search parameters are mutually exclusive. Sensitive credential paths are denied.", func(ctx context.Context, input FileReadInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("ssh_file_read", "Read one remote file after one-time human approval. By default returns complete content; byte ranges, tail lines, and metadata-only reads are optional. To search, set pattern and the required match_mode: literal searches exact text, while regex uses POSIX regular expressions (for example port|socks|proxy). context_lines is optional and search results are never truncated. No matches is a successful result with search.found=false. Read-range and search parameters are mutually exclusive. Sensitive credential paths are denied.", func(ctx context.Context, input FileReadInput) (domain.ExecResult, error) {
 		return RunFileReadTool(ctx, svc, input, "eino-agent")
-	})); err != nil {
+	}, fileSearchSchemaOption())); err != nil {
 		return nil, err
 	}
 	if err := appendTool(toolutils.InferTool("ssh_file_list", "List a remote directory without changing it.", func(ctx context.Context, input FileListInput) (domain.ExecResult, error) {
@@ -628,9 +644,9 @@ func buildAvailableTools(svc *service.Service) ([]tool.BaseTool, error) {
 	})); err != nil {
 		return nil, err
 	}
-	if err := appendTool(toolutils.InferTool("workspace_file_read", "Read one file from the Workspace bound to this conversation after one-time human approval. By default returns complete content; byte ranges are optional and negative offset_bytes reads from the file end. Set pattern to search literal text instead, with optional context_lines and max_matches; searches also require one-time approval. Read-range and search parameters are mutually exclusive. SHA256 metadata is returned for content reads and sensitive paths are denied.", func(ctx context.Context, input WorkspaceReadInput) (domain.ExecResult, error) {
+	if err := appendTool(toolutils.InferTool("workspace_file_read", "Read one file from the Workspace bound to this conversation after one-time human approval. By default returns complete content; byte ranges are optional and negative offset_bytes reads from the file end. To search, set pattern and the required match_mode: literal searches exact text, while regex uses POSIX regular expressions (for example port|socks|proxy). context_lines is optional and search results are never truncated. No matches is a successful result with search.found=false. Read-range and search parameters are mutually exclusive. SHA256 metadata is returned for content reads and sensitive paths are denied.", func(ctx context.Context, input WorkspaceReadInput) (domain.ExecResult, error) {
 		return RunWorkspaceFileReadTool(ctx, svc, input, "eino-agent")
-	})); err != nil {
+	}, fileSearchSchemaOption())); err != nil {
 		return nil, err
 	}
 	if err := appendTool(toolutils.InferTool("workspace_file_edit", "Apply a unified diff to one existing file inside the conversation-bound read_write Workspace after human approval. The approval shows the exact added and deleted lines.", func(ctx context.Context, input WorkspaceFileEditInput) (domain.ExecResult, error) {

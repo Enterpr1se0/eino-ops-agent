@@ -8,6 +8,7 @@ import (
 	"eino-ops-agent/internal/service"
 	"eino-ops-agent/internal/sshx"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -43,7 +44,7 @@ func New(svc *service.Service, version string) *Server {
 			output, err := agent.RunTaskTool(svc, input, "mcp-client")
 			return nil, output, err
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read one remote file or search it by optional literal pattern after one-time human approval. Credential paths are denied."},
+	mcp.AddTool(server, &mcp.Tool{Name: "ssh_file_read", Description: "Read one remote file or search it after one-time human approval. Search requires pattern plus match_mode=literal|regex, returns every matching line, and reports no matches as search.found=false. Credential paths are denied.", InputSchema: fileSearchInputSchema[agent.FileReadInput]()},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input agent.FileReadInput) (*mcp.CallToolResult, domain.ExecResult, error) {
 			output, err := agent.RunFileReadTool(ctx, svc, input, "mcp-client")
 			return nil, output, err
@@ -77,6 +78,19 @@ func New(svc *service.Service, version string) *Server {
 			return nil, output, err
 		})
 	return &Server{server: server}
+}
+
+func fileSearchInputSchema[T any]() *jsonschema.Schema {
+	schema, err := jsonschema.For[T](nil)
+	if err != nil {
+		panic(err)
+	}
+	matchMode, ok := schema.Properties["match_mode"]
+	if !ok {
+		panic("file search input schema is missing match_mode")
+	}
+	matchMode.Enum = []any{string(domain.FileSearchLiteral), string(domain.FileSearchRegex)}
+	return schema
 }
 
 func (s *Server) Run(ctx context.Context) error {

@@ -55,6 +55,88 @@ func TestRemoteFileEditApprovesDeclarativeDiffAndBuildsScriptAfterApproval(t *te
 	}
 }
 
+func TestRemoteFileSearchSupportsExplicitModesAndNoMatchSuccess(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(directory, "config.yaml")
+	if err := os.WriteFile(target, []byte("port: 7890\nsocks-port: 7891\nport|socks: literal\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	run := func(matchMode domain.FileSearchMatchMode, pattern string) ([]byte, error) {
+		t.Helper()
+		script := buildRemoteFileSearchScript(domain.ExecRequest{
+			Mode: domain.ExecRemoteSearch, RemotePath: target, SearchPattern: pattern, SearchMatchMode: matchMode,
+		})
+		if strings.Contains(script, "head -n") {
+			t.Fatalf("remote search still truncates output:\n%s", script)
+		}
+		command := exec.Command("bash", "-se")
+		command.Stdin = strings.NewReader(script)
+		return command.CombinedOutput()
+	}
+	literal, err := run(domain.FileSearchLiteral, "port|socks")
+	if err != nil || string(literal) != "3:port|socks: literal\n" {
+		t.Fatalf("literal search output=%q err=%v", literal, err)
+	}
+	regex, err := run(domain.FileSearchRegex, "^(port|socks-port):")
+	if err != nil || !strings.Contains(string(regex), "1:port: 7890") || !strings.Contains(string(regex), "2:socks-port: 7891") {
+		t.Fatalf("regex search output=%q err=%v", regex, err)
+	}
+	noMatches, err := run(domain.FileSearchLiteral, "absent")
+	if err != nil || len(noMatches) != 0 {
+		t.Fatalf("no-match search output=%q err=%v", noMatches, err)
+	}
+	missingScript := buildRemoteFileSearchScript(domain.ExecRequest{
+		Mode: domain.ExecRemoteSearch, RemotePath: filepath.Join(directory, "missing"), SearchPattern: "x", SearchMatchMode: domain.FileSearchLiteral,
+	})
+	missingCommand := exec.Command("bash", "-se")
+	missingCommand.Stdin = strings.NewReader(missingScript)
+	missingOutput, err := missingCommand.CombinedOutput()
+	if err == nil || !strings.Contains(string(missingOutput), "No such file") {
+		t.Fatalf("missing file was not preserved as a real search error: output=%q err=%v", missingOutput, err)
+	}
+}
+
+func TestRemoteFileSearchReturnsStructuredNoMatchResult(t *testing.T) {
+	svc, transport, host := newTestService(t)
+	transport.stdout = []byte{}
+	pending, err := svc.SearchFile(context.Background(), host.ID, "/etc/app.conf", "port|socks", domain.FileSearchRegex, 0, false, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != "approval_required" {
+		t.Fatalf("remote search did not require approval: %#v", pending)
+	}
+	result, err := svc.Approve(context.Background(), pending.ApprovalID, "reviewed", "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "completed" || result.ExitCode != 0 || result.Search == nil || result.Search.Found || result.Search.MatchMode != domain.FileSearchRegex || result.Message != "no matches found" {
+		t.Fatalf("remote no-match result = %#v", result)
+	}
+	if len(transport.calls) != 1 || !strings.Contains(transport.calls[0].Script, "grep -n -E") {
+		t.Fatalf("remote regex search transport request = %#v", transport.calls)
+	}
+	transport.stderr = []byte("grep: /etc/app.conf: Permission denied\n")
+	transport.exitCode = 2
+	failedPending, err := svc.SearchFile(context.Background(), host.ID, "/etc/app.conf", "port", domain.FileSearchLiteral, 0, false, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := svc.Approve(context.Background(), failedPending.ApprovalID, "reviewed", "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != "failed" || failed.ExitCode != 2 || failed.Stderr != "grep: /etc/app.conf: Permission denied\n" || failed.Search != nil {
+		t.Fatalf("remote search did not preserve grep failure: %#v", failed)
+	}
+	if _, err := svc.SearchFile(context.Background(), host.ID, "/etc/app.conf", "[", domain.FileSearchRegex, 0, false, "test"); err == nil || !strings.Contains(err.Error(), "POSIX") {
+		t.Fatalf("remote search accepted invalid regex: %v", err)
+	}
+	if _, err := svc.SearchFile(context.Background(), host.ID, "/etc/app.conf", "port", "", 0, false, "test"); err == nil || !strings.Contains(err.Error(), "match_mode") {
+		t.Fatalf("remote search accepted a missing match mode: %v", err)
+	}
+}
+
 func TestFileEditHeredocMarkerCannotTerminateFromDiff(t *testing.T) {
 	change, err := buildEditChange("/etc/app.conf", "@@ -1 +1 @@\n-old\n+__OPS_FILE_EDIT_known__\n")
 	if err != nil {

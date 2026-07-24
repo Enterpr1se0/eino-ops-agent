@@ -136,7 +136,7 @@ func maskExplanationInput(input domain.CommandReviewInput) domain.CommandReviewI
 	return input
 }
 
-func runReadOnlySubagent(ctx context.Context, runner *adk.Runner, prompt string) (string, error) {
+func runReadOnlySubagent(ctx context.Context, runner agentRunner, prompt string) (string, error) {
 	const maxReviewOutputBytes = 64 << 10
 	iter := runner.Run(ctx, []*schema.Message{schema.UserMessage(prompt)})
 	var output strings.Builder

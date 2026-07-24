@@ -79,6 +79,9 @@ func (t *backgroundToolTransport) Exec(ctx context.Context, _ sshx.ConnectionSpe
 func (t *fileReadToolTransport) Exec(_ context.Context, _ sshx.ConnectionSpec, request domain.ExecRequest) (sshx.RawResult, error) {
 	t.request = request
 	t.callCount++
+	if strings.HasPrefix(request.Script, "grep -n ") {
+		return sshx.RawResult{Stdout: []byte("2:secret contents\n")}, nil
+	}
 	stdout := "__OPS_FILE_META__\n15\t640\tops\tops\t1700000000\n" + strings.Repeat("a", 64) + "  /etc/example.conf\n__OPS_FILE_CONTENT__\nsecret contents"
 	return sshx.RawResult{Stdout: []byte(stdout)}, nil
 }
@@ -171,13 +174,13 @@ func TestToolDescriptorsMatchTheEinoSchemasLoadedByTheAgent(t *testing.T) {
 		}
 		if descriptor.Name == "ssh_file_read" {
 			schema := string(descriptor.InputSchema)
-			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"metadata_only"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"context_lines"`) || !strings.Contains(schema, `"max_matches"`) {
+			if descriptor.Guard != "approval_required" || !strings.Contains(schema, `"metadata_only"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"match_mode"`) || !strings.Contains(schema, `"literal"`) || !strings.Contains(schema, `"regex"`) || !strings.Contains(schema, `"context_lines"`) || strings.Contains(schema, `"max_matches"`) {
 				t.Fatalf("ssh_file_read merged modes are incomplete: %#v", descriptor)
 			}
 		}
 		if descriptor.Name == "workspace_file_read" {
 			schema := string(descriptor.InputSchema)
-			if descriptor.Guard != "approval_required" || strings.Contains(schema, `"workspace_id"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"context_lines"`) || !strings.Contains(schema, `"max_matches"`) {
+			if descriptor.Guard != "approval_required" || strings.Contains(schema, `"workspace_id"`) || !strings.Contains(schema, `"pattern"`) || !strings.Contains(schema, `"match_mode"`) || !strings.Contains(schema, `"literal"`) || !strings.Contains(schema, `"regex"`) || !strings.Contains(schema, `"context_lines"`) || strings.Contains(schema, `"max_matches"`) {
 				t.Fatalf("workspace_file_read merged modes are incomplete: %#v", descriptor)
 			}
 		}
@@ -358,7 +361,7 @@ func TestTaskToolResultsExposeRejectionAndStderr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failed.OK || failed.Code != "failed" || !strings.Contains(string(encoded), `"stderr":"sleep: missing operand"`) || !strings.Contains(failed.NextAction, "stderr") {
+	if failed.OK || failed.Code != "failed" || !strings.Contains(string(encoded), `"stderr":"sleep: missing operand"`) || !strings.Contains(failed.NextAction, "do not repeat unchanged input") {
 		t.Fatalf("failed task did not expose stderr to the model: output=%#v json=%s", failed, encoded)
 	}
 }
@@ -580,8 +583,8 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	if !strings.Contains(transport.request.Script, "tail -c 4 -- '/etc/example.conf'") || result.File == nil || result.File.OffsetBytes != 11 {
 		t.Fatalf("negative file offset did not read from the end: result=%#v script=%s", result, transport.request.Script)
 	}
-	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", ContextLines: 2, MaxMatches: 5})
-	if !result.OK || !strings.Contains(transport.request.Script, "grep -n -F -C 2 -- 'secret' '/etc/example.conf' | head -n 5") {
+	result = runRead(FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret|token", MatchMode: domain.FileSearchRegex, ContextLines: 2})
+	if !result.OK || result.Search == nil || !result.Search.Found || !strings.Contains(transport.request.Script, "grep -n -E -C 2 -- 'secret|token' '/etc/example.conf'") || strings.Contains(transport.request.Script, "head -n") {
 		t.Fatalf("file read search mode was not dispatched: result=%#v script=%s", result, transport.request.Script)
 	}
 	searchRun, err := st.GetRun(ctx, result.RunID)
@@ -592,12 +595,16 @@ func TestFileReadMetadataOnlyKeepsSHA256WithoutContent(t *testing.T) {
 	if err := json.Unmarshal([]byte(searchRun.RequestJSON), &searchRequest); err != nil {
 		t.Fatal(err)
 	}
-	if searchRequest.Mode != domain.ExecRemoteSearch || searchRequest.RemotePath != "/etc/example.conf" || searchRequest.SearchPattern != "secret" || searchRequest.ContextLines != 2 || searchRequest.MaxMatches != 5 || searchRequest.Script != "" {
+	if searchRequest.Mode != domain.ExecRemoteSearch || searchRequest.RemotePath != "/etc/example.conf" || searchRequest.SearchPattern != "secret|token" || searchRequest.SearchMatchMode != domain.FileSearchRegex || searchRequest.ContextLines != 2 || searchRequest.Script != "" {
 		t.Fatalf("remote search was not persisted structurally: %#v", searchRequest)
 	}
-	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", MaxBytes: 10}, "test")
+	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret", MatchMode: domain.FileSearchLiteral, MaxBytes: 10}, "test")
 	if err != nil || result.OK || result.Code != "validation_failed" {
 		t.Fatalf("ambiguous file read mode was not rejected: result=%#v err=%v", result, err)
+	}
+	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", Pattern: "secret"}, "test")
+	if err != nil || result.OK || result.Code != "validation_failed" || !strings.Contains(result.Message, "match_mode") {
+		t.Fatalf("search without match_mode was not rejected: result=%#v err=%v", result, err)
 	}
 	result, err = RunFileReadTool(ctx, svc, FileReadInput{HostID: host.ID, Path: "/etc/example.conf", MetadataOnly: true, MaxBytes: 10}, "test")
 	if err != nil || result.OK || result.Code != "validation_failed" {

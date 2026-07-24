@@ -529,6 +529,109 @@ func TestQueryDoesNotRetryAfterToolActivityWithoutFinalAnswer(t *testing.T) {
 	}
 }
 
+func TestQueryUsesNoToolFinalizerAfterToolActivityWithoutFinalAnswer(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.ReplaceAgentPlan(ctx, domain.AgentPlan{
+		SessionID: "session_safe_finalizer",
+		Goal:      "Deploy the service",
+		Status:    "completed",
+		Steps: []domain.AgentPlanStep{
+			{Number: 1, Title: "Deploy", Status: "completed", Evidence: "service is active"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(schema.ToolMessage(`{"status":"completed","stdout":"active"}`, "call-1", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec"),
+	}}}
+	finalizer := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(schema.AssistantMessage("服务已部署并验证为 active。", nil), nil, schema.Assistant, ""),
+	}}}
+	runtime := &Runtime{runner: runner, finalizer: finalizer, store: st}
+	var emitted []Event
+
+	answer, err := runtime.Query(ctx, "session_safe_finalizer", "部署服务", func(event Event) {
+		emitted = append(emitted, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "服务已部署并验证为 active。" {
+		t.Fatalf("answer = %q", answer)
+	}
+	runnerCalls, _ := runner.snapshot()
+	finalizerCalls, finalizerInputs := finalizer.snapshot()
+	if runnerCalls != 1 || finalizerCalls != 1 {
+		t.Fatalf("calls: runner=%d finalizer=%d", runnerCalls, finalizerCalls)
+	}
+	if len(finalizerInputs) != 1 || len(finalizerInputs[0]) != 1 || finalizerInputs[0][0].Role != schema.User {
+		t.Fatalf("finalizer inputs = %#v", finalizerInputs)
+	}
+	var input finalAnswerInput
+	if err := json.Unmarshal([]byte(finalizerInputs[0][0].Content), &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.Request != "部署服务" || input.Plan == nil || input.Plan.Status != "completed" || len(input.ToolResults) != 1 || input.ToolResults[0].ToolName != "ssh_exec" || !strings.Contains(input.ToolResults[0].Content, "active") {
+		t.Fatalf("final answer context = %#v", input)
+	}
+	messages, err := st.ListChatMessages(ctx, "session_safe_finalizer", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 || messages[0].Status != "completed" || messages[1].Role != "tool" || messages[2].Role != "assistant" || messages[2].Content != answer {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+	messageEvents, doneEvents := 0, 0
+	for _, event := range emitted {
+		if event.Type == "message" && event.Role == string(schema.Assistant) && event.Content == answer {
+			messageEvents++
+		}
+		if event.Type == "done" && event.Content == answer {
+			doneEvents++
+		}
+	}
+	if messageEvents != 1 || doneEvents != 1 {
+		t.Fatalf("final answer events = %#v", emitted)
+	}
+}
+
+func TestQueryReportsFinalizerFailureWithoutRerunningTools(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runner := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{{
+		adk.EventFromMessage(schema.ToolMessage("tool completed", "call-1", schema.WithToolName("ssh_exec")), nil, schema.Tool, "ssh_exec"),
+	}}}
+	finalizer := &scriptedAgentRunner{attempts: [][]*adk.AgentEvent{nil}}
+	runtime := &Runtime{runner: runner, finalizer: finalizer, store: st}
+	var emitted []Event
+
+	_, err = runtime.Query(ctx, "session_failed_finalizer", "inspect host", func(event Event) {
+		emitted = append(emitted, event)
+	})
+	if !errors.Is(err, ErrEmptyResponse) || !strings.Contains(err.Error(), "safe final answer generation failed") {
+		t.Fatalf("error = %v", err)
+	}
+	runnerCalls, _ := runner.snapshot()
+	finalizerCalls, _ := finalizer.snapshot()
+	if runnerCalls != 1 || finalizerCalls != 1 {
+		t.Fatalf("unsafe retry: runner=%d finalizer=%d", runnerCalls, finalizerCalls)
+	}
+	for _, event := range emitted {
+		if event.Type == "done" {
+			t.Fatalf("failed finalizer emitted done: %#v", emitted)
+		}
+	}
+}
+
 func TestQueryPersistsOnlyTerminalAssistantOutput(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir()+"/runtime.db")

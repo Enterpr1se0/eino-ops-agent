@@ -145,6 +145,7 @@ const en = {
     permission: 'Permission', hostAuthority: 'Full host authority', sandbox: 'Bubblewrap sandbox', managedSudo: 'Managed sudo', normalUser: 'Standard user', exitCode: 'Exit code', duration: 'Duration', runId: 'Run ID',
     reason: 'Execution reason', expectedChanges: 'Expected changes', rollback: 'Rollback', result: 'Tool result', operatorInstruction: 'Operator instruction',
     rawJson: 'Raw JSON', fileEvidence: 'File changes', diff: 'File diff', fileEdit: 'Edit file', bytesRead: 'Bytes read', validated: 'Validated', mode: 'Mode', owner: 'Owner', validator: 'Validator', after: 'After', index: 'Index', key: 'Key', value: 'Value', stderrResult: 'STDERR / result', sensitive: 'Sensitive content is redacted. Do not overwrite the source file with placeholders.',
+    matchModeLiteral: 'Literal', matchModeRegex: 'Regular expression', searchMatched: 'Matches found', searchNoMatches: 'No matches found',
     emptyResult: 'Tool completed.',
   },
   approval: {

@@ -1527,6 +1527,9 @@ func (s *Service) execute(ctx context.Context, host domain.Host, req domain.Exec
 		Stdout: run.StdoutRedacted, Stderr: run.StderrRedacted,
 		Duration: raw.Duration, PolicyHits: hits, Change: approvedReq.Change, CompletedAt: run.CompletedAt,
 	}
+	if run.Status == "completed" && (approvedReq.Mode == domain.ExecRemoteSearch || approvedReq.Mode == domain.ExecWorkspaceSearch) {
+		decorateFileSearchResult(&result, approvedReq.SearchPattern, approvedReq.SearchMatchMode, approvedReq.ContextLines)
+	}
 	if approvedReq.Change != nil {
 		path := approvedReq.RemotePath
 		if approvedReq.Mode == domain.ExecWorkspaceEdit {
@@ -1575,6 +1578,14 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 		if host.AuthType != "workspace" || req.Elevated {
 			return fmt.Errorf("invalid workspace execution target")
 		}
+		if req.Mode == domain.ExecWorkspaceSearch {
+			if req.WorkspaceID == "" || req.RelativePath == "" {
+				return fmt.Errorf("workspace file search requires a workspace, path, and pattern")
+			}
+			if err := validateFileSearchInput(req.SearchPattern, req.SearchMatchMode, req.ContextLines); err != nil {
+				return fmt.Errorf("invalid Workspace file search: %w", err)
+			}
+		}
 		return nil
 	}
 	switch req.Mode {
@@ -1592,8 +1603,8 @@ func validateExecutionRequest(host domain.Host, req domain.ExecRequest) error {
 		if req.RemotePath == "" || req.SearchPattern == "" {
 			return fmt.Errorf("remote file search requires an absolute path and pattern")
 		}
-		if req.ContextLines < 0 || req.MaxMatches < 0 {
-			return fmt.Errorf("remote file search limits must be non-negative")
+		if err := validateFileSearchInput(req.SearchPattern, req.SearchMatchMode, req.ContextLines); err != nil {
+			return fmt.Errorf("invalid remote file search: %w", err)
 		}
 	}
 	if req.Mode == domain.ExecSSHFileTransfer && req.Elevated {

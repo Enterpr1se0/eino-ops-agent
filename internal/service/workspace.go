@@ -714,7 +714,7 @@ func (s *Service) ListWorkspaceFiles(ctx context.Context, workspaceID, relativeP
 	return s.Submit(ctx, domain.ExecRequest{HostID: host.ID, Mode: domain.ExecWorkspaceDirectoryList, WorkspaceID: workspaceID, RelativePath: relativePath, Reason: "list an allowlisted workspace directory"}, actor)
 }
 
-func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath, pattern string, contextLines, maxMatches int, actor string) (domain.ExecResult, error) {
+func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath, pattern string, matchMode domain.FileSearchMatchMode, contextLines int, actor string) (domain.ExecResult, error) {
 	workspace, ok := s.workspaceByID(workspaceID)
 	if !ok {
 		return domain.ExecResult{}, fmt.Errorf("workspace %q not found", workspaceID)
@@ -726,17 +726,15 @@ func (s *Service) SearchWorkspace(ctx context.Context, workspaceID, relativePath
 	if err != nil {
 		return domain.ExecResult{}, err
 	}
-	pattern = strings.TrimSpace(pattern)
-	if pattern == "" || len(pattern) > 512 || strings.ContainsAny(pattern, "\x00\r\n") {
-		return domain.ExecResult{}, fmt.Errorf("invalid workspace search pattern")
+	if err := validateFileSearchInput(pattern, matchMode, contextLines); err != nil {
+		return domain.ExecResult{}, fmt.Errorf("invalid Workspace search: %w", err)
 	}
-	if contextLines < 0 || maxMatches < 0 {
-		return domain.ExecResult{}, fmt.Errorf("workspace search context_lines and max_matches must be non-negative")
-	}
-	return s.Submit(ctx, domain.ExecRequest{
+	result, err := s.Submit(ctx, domain.ExecRequest{
 		HostID: host.ID, Mode: domain.ExecWorkspaceSearch, WorkspaceID: workspaceID, RelativePath: relativePath,
-		SearchPattern: pattern, ContextLines: contextLines, MaxMatches: maxMatches, Reason: "search literal text in an allowlisted workspace file",
+		SearchPattern: pattern, SearchMatchMode: matchMode, ContextLines: contextLines, Reason: "search text in an allowlisted workspace file",
 	}, actor)
+	decorateFileSearchResult(&result, pattern, matchMode, contextLines)
+	return result, err
 }
 
 func (s *Service) EditWorkspaceFile(ctx context.Context, workspaceID, relativePath, diff, validatorID, reason, actor string) (domain.ExecResult, error) {
@@ -902,7 +900,7 @@ func (s *Service) executeWorkspace(ctx context.Context, req domain.ExecRequest) 
 	case domain.ExecWorkspaceDirectoryList:
 		result.Stdout, err = listWorkspaceDirectory(path)
 	case domain.ExecWorkspaceSearch:
-		result.Stdout, err = searchWorkspaceFile(path, req.SearchPattern, req.ContextLines, req.MaxMatches)
+		result.Stdout, err = searchWorkspaceFile(path, req.SearchPattern, req.SearchMatchMode, req.ContextLines)
 	case domain.ExecWorkspaceEdit:
 		if workspace.Access != "read_write" {
 			err = fmt.Errorf("workspace %q is read_only", workspace.ID)
@@ -1418,12 +1416,25 @@ func isSensitiveWorkspaceComponent(name string) bool {
 	return strings.HasPrefix(lower, ".env") || strings.HasPrefix(lower, ".opspilot-") || lower == ".ssh" || lower == ".data" || lower == "master.key" || strings.Contains(lower, "credential")
 }
 
-func searchWorkspaceFile(path, pattern string, contextLines, maxMatches int) ([]byte, error) {
+func searchWorkspaceFile(path, pattern string, matchMode domain.FileSearchMatchMode, contextLines int) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	var matches func(string) bool
+	switch matchMode {
+	case domain.FileSearchLiteral:
+		matches = func(line string) bool { return strings.Contains(line, pattern) }
+	case domain.FileSearchRegex:
+		expression, compileErr := regexp.CompilePOSIX(pattern)
+		if compileErr != nil {
+			return nil, fmt.Errorf("invalid POSIX search regex: %w", compileErr)
+		}
+		matches = expression.MatchString
+	default:
+		return nil, fmt.Errorf("invalid search match_mode: use literal or regex")
+	}
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64<<10), int(^uint(0)>>1))
 	var output strings.Builder
@@ -1433,13 +1444,10 @@ func searchWorkspaceFile(path, pattern string, contextLines, maxMatches int) ([]
 		match   bool
 	}
 	before := make([]bufferedLine, 0, contextLines)
-	line, outputLines, lastOutputLine, afterRemaining := 0, 0, 0, 0
-	writeLine := func(item bufferedLine) bool {
+	line, lastOutputLine, afterRemaining := 0, 0, 0
+	writeLine := func(item bufferedLine) {
 		if item.number <= lastOutputLine {
-			return true
-		}
-		if maxMatches > 0 && outputLines >= maxMatches {
-			return false
+			return
 		}
 		separator := "-"
 		if item.match {
@@ -1447,27 +1455,19 @@ func searchWorkspaceFile(path, pattern string, contextLines, maxMatches int) ([]
 		}
 		fmt.Fprintf(&output, "%d%s%s\n", item.number, separator, item.content)
 		lastOutputLine = item.number
-		outputLines++
-		return true
 	}
 	for scanner.Scan() {
 		line++
 		item := bufferedLine{number: line, content: scanner.Text()}
-		item.match = strings.Contains(item.content, pattern)
+		item.match = matches(item.content)
 		if item.match {
 			for _, previous := range before {
-				if !writeLine(previous) {
-					return []byte(output.String()), nil
-				}
+				writeLine(previous)
 			}
-			if !writeLine(item) {
-				return []byte(output.String()), nil
-			}
+			writeLine(item)
 			afterRemaining = contextLines
 		} else if afterRemaining > 0 {
-			if !writeLine(item) {
-				return []byte(output.String()), nil
-			}
+			writeLine(item)
 			afterRemaining--
 		}
 		if contextLines > 0 {

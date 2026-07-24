@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	posixpath "path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -90,11 +91,22 @@ func buildRemoteFileReadScript(req domain.ExecRequest) string {
 }
 
 func buildRemoteFileSearchScript(req domain.ExecRequest) string {
-	script := "grep -n -F -C " + strconv.Itoa(req.ContextLines) + " -- " + shellQuote(req.SearchPattern) + " " + shellQuote(req.RemotePath)
-	if req.MaxMatches > 0 {
-		script += " | head -n " + strconv.Itoa(req.MaxMatches)
+	matchFlag := "-F"
+	if req.SearchMatchMode == domain.FileSearchRegex {
+		matchFlag = "-E"
 	}
-	return script
+	grep := "grep -n " + matchFlag + " -C " + strconv.Itoa(req.ContextLines) + " -- " + shellQuote(req.SearchPattern) + " " + shellQuote(req.RemotePath)
+	return strings.Join([]string{
+		"if " + grep + "; then",
+		"  exit 0",
+		"else",
+		"  search_status=$?",
+		`  if [ "$search_status" -eq 1 ]; then`,
+		"    exit 0",
+		"  fi",
+		`  exit "$search_status"`,
+		"fi",
+	}, "\n")
 }
 
 func resolvedFileOffset(size, requested int64) int64 {
@@ -107,21 +119,54 @@ func resolvedFileOffset(size, requested int64) int64 {
 	return size + requested
 }
 
-func (s *Service) SearchFile(ctx context.Context, hostID, path, pattern string, contextLines, maxMatches int, elevated bool, actor string) (domain.ExecResult, error) {
+func validateFileSearchInput(pattern string, matchMode domain.FileSearchMatchMode, contextLines int) error {
+	if strings.TrimSpace(pattern) == "" || len(pattern) > 512 || strings.ContainsAny(pattern, "\x00\r\n") {
+		return fmt.Errorf("invalid search pattern: use 1-512 characters on one line")
+	}
+	if contextLines < 0 {
+		return fmt.Errorf("search context_lines must be non-negative")
+	}
+	switch matchMode {
+	case domain.FileSearchLiteral:
+		return nil
+	case domain.FileSearchRegex:
+		if _, err := regexp.CompilePOSIX(pattern); err != nil {
+			return fmt.Errorf("invalid POSIX search regex: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid search match_mode: use literal or regex")
+	}
+}
+
+func (s *Service) SearchFile(ctx context.Context, hostID, path, pattern string, matchMode domain.FileSearchMatchMode, contextLines int, elevated bool, actor string) (domain.ExecResult, error) {
 	if err := validateRemoteFilePath(path); err != nil {
 		return domain.ExecResult{}, err
 	}
-	pattern = strings.TrimSpace(pattern)
-	if pattern == "" || len(pattern) > 512 || strings.ContainsAny(pattern, "\x00\r\n") {
-		return domain.ExecResult{}, fmt.Errorf("invalid search pattern: use 1-512 characters on one line")
+	if err := validateFileSearchInput(pattern, matchMode, contextLines); err != nil {
+		return domain.ExecResult{}, err
 	}
-	if contextLines < 0 || maxMatches < 0 {
-		return domain.ExecResult{}, fmt.Errorf("context_lines and max_matches must be non-negative")
-	}
-	return s.Submit(ctx, domain.ExecRequest{
+	result, err := s.Submit(ctx, domain.ExecRequest{
 		HostID: hostID, Mode: domain.ExecRemoteSearch, RemotePath: path, SearchPattern: pattern,
-		ContextLines: contextLines, MaxMatches: maxMatches, Elevated: elevated, Reason: "search literal matches in a remote file",
+		SearchMatchMode: matchMode, ContextLines: contextLines, Elevated: elevated, Reason: "search matches in a remote file",
 	}, actor)
+	decorateFileSearchResult(&result, pattern, matchMode, contextLines)
+	return result, err
+}
+
+func decorateFileSearchResult(result *domain.ExecResult, pattern string, matchMode domain.FileSearchMatchMode, contextLines int) {
+	if result.Status != "completed" {
+		return
+	}
+	result.Search = &domain.FileSearchResult{
+		Found:        result.Stdout != "",
+		Pattern:      pattern,
+		MatchMode:    matchMode,
+		ContextLines: contextLines,
+	}
+	if !result.Search.Found {
+		result.Message = "no matches found"
+	}
 }
 
 func (s *Service) EditRemoteFile(ctx context.Context, hostID, path, diff, validatorID string, elevated bool, reason, actor string) (domain.ExecResult, error) {
